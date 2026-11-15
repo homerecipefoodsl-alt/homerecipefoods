@@ -1,0 +1,1156 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core Helpers
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidEmailId(emailId) {
+      return emailId is string
+        && emailId.size() >= 3
+        && emailId.size() <= 254
+        && emailId.matches('^[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}$');
+    }
+
+    function isValidChatSessionId(id) {
+      return id is string && id.size() >= 24 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidSlug(slug) {
+      return slug is string && slug.size() >= 1 && slug.size() <= 160 && slug.matches('^[a-z0-9\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function hasVerifiedEmail() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && ('email' in request.auth.token)
+        && request.auth.token.email is string;
+    }
+
+    function authEmail() {
+      return request.auth.token.email.lower();
+    }
+
+    // Primary Super Admin identity gate (verified Firebase Auth token only)
+    function isPrimarySuperAdmin() {
+      return hasVerifiedEmail() && authEmail() == 'mdmahmudulhashan0@gmail.com';
+    }
+
+    // Authoritative RBAC role lookup in Firestore (/rbac_roles/{email})
+    function hasActiveRbacDoc() {
+      return hasVerifiedEmail()
+        && exists(/databases/$(database)/documents/rbac_roles/$(authEmail()))
+        && get(/databases/$(database)/documents/rbac_roles/$(authEmail())).data.status == 'active';
+    }
+
+    function rbacRole() {
+      return get(/databases/$(database)/documents/rbac_roles/$(authEmail())).data.role;
+    }
+
+    function isSuperAdmin() {
+      return isPrimarySuperAdmin()
+        || (hasActiveRbacDoc() && rbacRole() == 'super_admin' && authEmail() == 'mdmahmudulhashan0@gmail.com');
+    }
+
+    function isCatalogAdmin() {
+      return isSuperAdmin() || (hasActiveRbacDoc() && rbacRole() == 'admin');
+    }
+
+    function isSupportAgent() {
+      return hasActiveRbacDoc() && rbacRole() == 'support_agent';
+    }
+
+    function isSupportStaff() {
+      return isSuperAdmin() || isSupportAgent();
+    }
+
+    function isBoundedStringList(arr, maxLen, maxItemLen) {
+      return arr is list
+        && arr.size() <= maxLen
+        && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= maxItemLen));
+    }
+
+    // Entity Validators
+    function isValidRbacRole(data) {
+      return data.keys().hasAll(['email', 'uid', 'displayName', 'role', 'status', 'addedByEmail', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['email', 'uid', 'username', 'displayName', 'role', 'status', 'addedByEmail', 'createdAt', 'updatedAt'])
+        && isValidEmailId(data.email)
+        && data.uid is string && data.uid.size() <= 128
+        && (!('username' in data) || (data.username is string && data.username.size() <= 64))
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && data.role in ['super_admin', 'admin', 'support_agent']
+        && data.status in ['active', 'disabled']
+        && data.addedByEmail is string && data.addedByEmail.size() <= 254
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAdminUsername(data) {
+      return data.keys().hasAll(['username', 'email', 'active', 'updatedAt'])
+        && data.keys().hasOnly(['username', 'email', 'active', 'updatedAt'])
+        && isValidId(data.username)
+        && isValidEmailId(data.email)
+        && data.active is bool
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserAccount(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'photoUrl', 'role', 'status', 'createdAt', 'updatedAt', 'lastLoginAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'photoUrl', 'role', 'status', 'createdAt', 'updatedAt', 'lastLoginAt'])
+        && isValidId(data.uid)
+        && isValidEmailId(data.email)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && data.photoUrl is string && data.photoUrl.size() <= 500
+        && data.role in ['super_admin', 'admin', 'support_agent', 'customer']
+        && data.status in ['active', 'disabled']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        && data.lastLoginAt is timestamp;
+    }
+
+    function isValidAdminRecord(data) {
+      return (
+        data.keys().hasAll(['uid', 'email', 'username', 'display_name', 'role', 'active', 'created_at', 'updated_at'])
+        && data.keys().hasOnly(['uid', 'email', 'username', 'display_name', 'role', 'active', 'created_at', 'updated_at', 'last_login_at'])
+        && isValidId(data.uid)
+        && isValidEmailId(data.email)
+        && data.username is string && data.username.size() <= 64
+        && data.display_name is string && data.display_name.size() >= 1 && data.display_name.size() <= 120
+        && data.role in ['super_admin', 'admin', 'support_agent']
+        && data.active is bool
+        && data.created_at is timestamp
+        && data.updated_at is timestamp
+        && (!('last_login_at' in data) || data.last_login_at is timestamp)
+      ) || (
+        data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'isOnline', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'isOnline', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 254
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && data.role in ['super_admin', 'admin', 'support_agent']
+        && data.isOnline is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+      );
+    }
+
+    function isValidCategory(data) {
+      return data.keys().hasAll(['id', 'name', 'nameEn', 'slug', 'description', 'image', 'order', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
+          'description', 'descriptionEn', 'description_bn', 'description_en',
+          'image', 'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 120
+        && data.nameEn is string && data.nameEn.size() >= 1 && data.nameEn.size() <= 120
+        && (!('name_bn' in data) || (data.name_bn is string && data.name_bn.size() <= 120))
+        && (!('name_en' in data) || (data.name_en is string && data.name_en.size() <= 120))
+        && isValidSlug(data.slug)
+        && (!('icon' in data) || (data.icon is string && data.icon.size() <= 40))
+        && data.description is string && data.description.size() >= 1 && data.description.size() <= 600
+        && (!('descriptionEn' in data) || (data.descriptionEn is string && data.descriptionEn.size() <= 600))
+        && (!('description_bn' in data) || (data.description_bn is string && data.description_bn.size() <= 600))
+        && (!('description_en' in data) || (data.description_en is string && data.description_en.size() <= 600))
+        && data.image is string && data.image.size() >= 1 && data.image.size() <= 500000
+        && data.order is int && data.order >= 0 && data.order <= 1000
+        && (!('visible' in data) || data.visible is bool)
+        && (!('deleted' in data) || data.deleted is bool)
+        && (!('seoTitle' in data) || (data.seoTitle is string && data.seoTitle.size() <= 200))
+        && (!('seoDescription' in data) || (data.seoDescription is string && data.seoDescription.size() <= 400))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidOccasion(data) {
+      return data.keys().hasAll(['id', 'name', 'nameEn', 'slug', 'icon', 'description', 'order', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
+          'description', 'descriptionEn', 'description_bn', 'description_en',
+          'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 120
+        && data.nameEn is string && data.nameEn.size() >= 1 && data.nameEn.size() <= 120
+        && (!('name_bn' in data) || (data.name_bn is string && data.name_bn.size() <= 120))
+        && (!('name_en' in data) || (data.name_en is string && data.name_en.size() <= 120))
+        && isValidSlug(data.slug)
+        && data.icon is string && data.icon.size() >= 1 && data.icon.size() <= 32
+        && data.description is string && data.description.size() >= 1 && data.description.size() <= 600
+        && (!('descriptionEn' in data) || (data.descriptionEn is string && data.descriptionEn.size() <= 600))
+        && (!('description_bn' in data) || (data.description_bn is string && data.description_bn.size() <= 600))
+        && (!('description_en' in data) || (data.description_en is string && data.description_en.size() <= 600))
+        && data.order is int && data.order >= 0 && data.order <= 1000
+        && (!('visible' in data) || data.visible is bool)
+        && (!('deleted' in data) || data.deleted is bool)
+        && (!('seoTitle' in data) || (data.seoTitle is string && data.seoTitle.size() <= 200))
+        && (!('seoDescription' in data) || (data.seoDescription is string && data.seoDescription.size() <= 400))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidProduct(data) {
+      return data.keys().hasAll([
+          'id', 'name', 'nameEn', 'slug', 'category', 'categoryName', 'productType',
+          'price', 'priceUnit', 'shortDescription', 'description', 'images', 'ingredients',
+          'sizes', 'weight', 'occasions', 'showrooms', 'availability', 'importantNotes',
+          'featured', 'popular', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug',
+          'category', 'categoryName', 'categoryNameEn', 'productType',
+          'price', 'old_price', 'discount', 'price_label', 'priceUnit',
+          'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
+          'description', 'descriptionEn', 'description_bn', 'description_en',
+          'images', 'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
+          'availability', 'importantNotes', 'featured', 'popular',
+          'visible', 'deleted', 'status', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription', 'seoImage',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 160
+        && data.nameEn is string && data.nameEn.size() >= 1 && data.nameEn.size() <= 160
+        && (!('name_bn' in data) || (data.name_bn is string && data.name_bn.size() <= 160))
+        && (!('name_en' in data) || (data.name_en is string && data.name_en.size() <= 160))
+        && isValidSlug(data.slug)
+        && isValidSlug(data.category)
+        && data.categoryName is string && data.categoryName.size() >= 1 && data.categoryName.size() <= 120
+        && (!('categoryNameEn' in data) || (data.categoryNameEn is string && data.categoryNameEn.size() <= 120))
+        && data.productType is string && data.productType.size() >= 1 && data.productType.size() <= 120
+        && data.price is number && data.price >= 0 && data.price <= 1000000
+        && (!('old_price' in data) || (data.old_price is number && data.old_price >= 0 && data.old_price <= 1000000))
+        && (!('discount' in data) || (data.discount is string && data.discount.size() <= 60))
+        && (!('price_label' in data) || (data.price_label is string && data.price_label.size() <= 80))
+        && data.priceUnit is string && data.priceUnit.size() >= 1 && data.priceUnit.size() <= 60
+        && data.shortDescription is string && data.shortDescription.size() >= 1 && data.shortDescription.size() <= 300
+        && (!('shortDescriptionEn' in data) || (data.shortDescriptionEn is string && data.shortDescriptionEn.size() <= 300))
+        && (!('short_description_bn' in data) || (data.short_description_bn is string && data.short_description_bn.size() <= 300))
+        && (!('short_description_en' in data) || (data.short_description_en is string && data.short_description_en.size() <= 300))
+        && data.description is string && data.description.size() >= 1 && data.description.size() <= 4000
+        && (!('descriptionEn' in data) || (data.descriptionEn is string && data.descriptionEn.size() <= 4000))
+        && (!('description_bn' in data) || (data.description_bn is string && data.description_bn.size() <= 4000))
+        && (!('description_en' in data) || (data.description_en is string && data.description_en.size() <= 4000))
+        && isBoundedStringList(data.images, 6, 400000)
+        && isBoundedStringList(data.ingredients, 25, 120)
+        && (!('ingredients_bn' in data) || (data.ingredients_bn is string && data.ingredients_bn.size() <= 600))
+        && (!('ingredients_en' in data) || (data.ingredients_en is string && data.ingredients_en.size() <= 600))
+        && isBoundedStringList(data.sizes, 10, 80)
+        && data.weight is string && data.weight.size() <= 80
+        && isBoundedStringList(data.occasions, 15, 80)
+        && isBoundedStringList(data.showrooms, 20, 128)
+        && data.availability in ['In Showroom', 'Pre-Order at Showroom', 'Seasonal', 'Out of Stock']
+        && data.importantNotes is string && data.importantNotes.size() <= 800
+        && data.featured is bool
+        && data.popular is bool
+        && (!('visible' in data) || data.visible is bool)
+        && (!('deleted' in data) || data.deleted is bool)
+        && (!('status' in data) || data.status in ['draft', 'published', 'archived'])
+        && (!('display_order' in data) || (data.display_order is int && data.display_order >= 0 && data.display_order <= 10000))
+        && (!('seoTitle' in data) || (data.seoTitle is string && data.seoTitle.size() <= 200))
+        && (!('seoDescription' in data) || (data.seoDescription is string && data.seoDescription.size() <= 400))
+        && (!('seoImage' in data) || (data.seoImage is string && data.seoImage.size() <= 400000))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidShowroom(data) {
+      return data.keys().hasAll(['id', 'name', 'area', 'address', 'phone', 'openingHours', 'mapUrl', 'lat', 'lng', 'isMain', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'name', 'nameEn', 'name_bn', 'name_en',
+          'area', 'areaEn', 'address', 'addressEn', 'address_bn', 'address_en',
+          'description', 'descriptionEn', 'description_bn', 'description_en',
+          'phone', 'alternate_phone', 'email',
+          'openingHours', 'openingHoursEn', 'opening_time', 'closing_time', 'weekly_holiday',
+          'mapUrl', 'lat', 'lng', 'images', 'available_categories', 'available_products',
+          'isMain', 'visible', 'deleted', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 140
+        && (!('nameEn' in data) || (data.nameEn is string && data.nameEn.size() <= 140))
+        && (!('name_bn' in data) || (data.name_bn is string && data.name_bn.size() <= 140))
+        && (!('name_en' in data) || (data.name_en is string && data.name_en.size() <= 140))
+        && data.area is string && data.area.size() >= 1 && data.area.size() <= 100
+        && (!('areaEn' in data) || (data.areaEn is string && data.areaEn.size() <= 100))
+        && data.address is string && data.address.size() >= 1 && data.address.size() <= 400
+        && (!('addressEn' in data) || (data.addressEn is string && data.addressEn.size() <= 400))
+        && (!('address_bn' in data) || (data.address_bn is string && data.address_bn.size() <= 400))
+        && (!('address_en' in data) || (data.address_en is string && data.address_en.size() <= 400))
+        && (!('description' in data) || (data.description is string && data.description.size() <= 600))
+        && (!('descriptionEn' in data) || (data.descriptionEn is string && data.descriptionEn.size() <= 600))
+        && (!('description_bn' in data) || (data.description_bn is string && data.description_bn.size() <= 600))
+        && (!('description_en' in data) || (data.description_en is string && data.description_en.size() <= 600))
+        && data.phone is string && data.phone.size() >= 5 && data.phone.size() <= 40
+        && (!('alternate_phone' in data) || (data.alternate_phone is string && data.alternate_phone.size() <= 40))
+        && (!('email' in data) || (data.email is string && data.email.size() <= 254))
+        && data.openingHours is string && data.openingHours.size() >= 1 && data.openingHours.size() <= 160
+        && (!('openingHoursEn' in data) || (data.openingHoursEn is string && data.openingHoursEn.size() <= 160))
+        && (!('opening_time' in data) || (data.opening_time is string && data.opening_time.size() <= 40))
+        && (!('closing_time' in data) || (data.closing_time is string && data.closing_time.size() <= 40))
+        && (!('weekly_holiday' in data) || (data.weekly_holiday is string && data.weekly_holiday.size() <= 80))
+        && data.mapUrl is string && data.mapUrl.size() >= 1 && data.mapUrl.size() <= 600
+        && data.lat is number && data.lat >= -90 && data.lat <= 90
+        && data.lng is number && data.lng >= -180 && data.lng <= 180
+        && (!('images' in data) || isBoundedStringList(data.images, 6, 400000))
+        && (!('available_categories' in data) || isBoundedStringList(data.available_categories, 30, 80))
+        && (!('available_products' in data) || isBoundedStringList(data.available_products, 200, 128))
+        && data.isMain is bool
+        && (!('visible' in data) || data.visible is bool)
+        && (!('deleted' in data) || data.deleted is bool)
+        && (!('display_order' in data) || (data.display_order is int && data.display_order >= 0 && data.display_order <= 1000))
+        && (!('seoTitle' in data) || (data.seoTitle is string && data.seoTitle.size() <= 200))
+        && (!('seoDescription' in data) || (data.seoDescription is string && data.seoDescription.size() <= 400))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidComplaint(data) {
+      return data.keys().hasAll([
+          'id', 'referenceCode', 'customerName', 'phone', 'email', 'category',
+          'showroomId', 'showroomName', 'message', 'attachmentImage', 'status',
+          'adminNote', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'referenceCode', 'submittedByUid', 'customerName', 'phone', 'email', 'category',
+          'showroomId', 'showroomName', 'message', 'attachmentImage', 'status', 'priority',
+          'adminNote', 'deleted', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && (!('submittedByUid' in data) || (data.submittedByUid is string && data.submittedByUid.size() <= 128))
+        && data.referenceCode is string && data.referenceCode.size() >= 4 && data.referenceCode.size() <= 32 && data.referenceCode.matches('^[A-Z0-9]{2,10}-[A-Z0-9\\-]+$')
+        && data.customerName is string && data.customerName.size() >= 1 && data.customerName.size() <= 120
+        && data.phone is string && data.phone.size() >= 6 && data.phone.size() <= 32
+        && data.email is string && data.email.size() <= 254
+        && data.category is string && data.category.size() >= 1 && data.category.size() <= 80
+        && data.showroomId is string && data.showroomId.size() >= 1 && data.showroomId.size() <= 128
+        && data.showroomName is string && data.showroomName.size() >= 1 && data.showroomName.size() <= 140
+        && data.message is string && data.message.size() >= 5 && data.message.size() <= 3000
+        && data.attachmentImage is string && data.attachmentImage.size() <= 400000
+        && data.status in ['New', 'Reviewing', 'In Progress', 'Resolved', 'Rejected', 'Closed']
+        && (!('priority' in data) || data.priority in ['Low', 'Normal', 'High', 'Urgent'])
+        && (!('deleted' in data) || data.deleted is bool)
+        && data.adminNote is string && data.adminNote.size() <= 2000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidGreeting(data) {
+      return data.keys().hasAll(['useDynamicDate', 'customDateText', 'greetingText', 'dailyMessage', 'specialMessage', 'announcement', 'updatedAt'])
+        && data.keys().hasOnly([
+          'useDynamicDate', 'customDateText', 'customDateTextEn',
+          'greetingText', 'greetingTextEn', 'greeting_bn', 'greeting_en',
+          'dailyMessage', 'dailyMessageEn', 'message_bn', 'message_en',
+          'specialMessage', 'specialMessageEn', 'special_message_bn', 'special_message_en',
+          'announcement', 'announcementEn', 'announcement_bn', 'announcement_en',
+          'updatedAt'
+        ])
+        && data.useDynamicDate is bool
+        && data.customDateText is string && data.customDateText.size() <= 120
+        && (!('customDateTextEn' in data) || (data.customDateTextEn is string && data.customDateTextEn.size() <= 120))
+        && data.greetingText is string && data.greetingText.size() >= 1 && data.greetingText.size() <= 160
+        && (!('greetingTextEn' in data) || (data.greetingTextEn is string && data.greetingTextEn.size() <= 160))
+        && (!('greeting_bn' in data) || (data.greeting_bn is string && data.greeting_bn.size() <= 160))
+        && (!('greeting_en' in data) || (data.greeting_en is string && data.greeting_en.size() <= 160))
+        && data.dailyMessage is string && data.dailyMessage.size() >= 1 && data.dailyMessage.size() <= 200
+        && (!('dailyMessageEn' in data) || (data.dailyMessageEn is string && data.dailyMessageEn.size() <= 200))
+        && (!('message_bn' in data) || (data.message_bn is string && data.message_bn.size() <= 200))
+        && (!('message_en' in data) || (data.message_en is string && data.message_en.size() <= 200))
+        && data.specialMessage is string && data.specialMessage.size() <= 200
+        && (!('specialMessageEn' in data) || (data.specialMessageEn is string && data.specialMessageEn.size() <= 200))
+        && (!('special_message_bn' in data) || (data.special_message_bn is string && data.special_message_bn.size() <= 200))
+        && (!('special_message_en' in data) || (data.special_message_en is string && data.special_message_en.size() <= 200))
+        && data.announcement is string && data.announcement.size() <= 240
+        && (!('announcementEn' in data) || (data.announcementEn is string && data.announcementEn.size() <= 240))
+        && (!('announcement_bn' in data) || (data.announcement_bn is string && data.announcement_bn.size() <= 240))
+        && (!('announcement_en' in data) || (data.announcement_en is string && data.announcement_en.size() <= 240))
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidGreetingItem(data) {
+      return data.keys().hasAll(['id', 'text_bn', 'text_en', 'type', 'active', 'visible', 'display_order', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'text_bn', 'text_en', 'type', 'active', 'visible', 'display_order',
+          'durationMs', 'startDate', 'endDate', 'deleted', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.text_bn is string && data.text_bn.size() <= 240
+        && data.text_en is string && data.text_en.size() <= 240
+        && data.type in ['greeting', 'welcome', 'announcement', 'rotating']
+        && data.active is bool
+        && data.visible is bool
+        && data.display_order is int && data.display_order >= 0 && data.display_order <= 1000
+        && (!('durationMs' in data) || (data.durationMs is int && data.durationMs >= 1000 && data.durationMs <= 60000))
+        && (!('startDate' in data) || (data.startDate is string && data.startDate.size() <= 32))
+        && (!('endDate' in data) || (data.endDate is string && data.endDate.size() <= 32))
+        && (!('deleted' in data) || data.deleted is bool)
+        && (!('createdAt' in data) || data.createdAt is timestamp)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSiteSettings(data) {
+      return data.keys().hasAll([
+          'brandName', 'tagline', 'supportOnline', 'supportPhone',
+          'messengerUrl', 'facebookUrl', 'instagramUrl', 'youtubeUrl', 'heroSlides', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'brandName', 'brandNameBn', 'brandNameEn', 'logoUrl', 'faviconUrl',
+          'tagline', 'taglineBn', 'taglineEn',
+          'shortDescriptionBn', 'shortDescriptionEn', 'longDescriptionBn', 'longDescriptionEn',
+          'supportOnline', 'supportPhone', 'brandEmail', 'brandAddressBn', 'brandAddressEn',
+          'messengerUrl', 'facebookUrl', 'instagramUrl', 'youtubeUrl', 'whatsappUrl',
+          'footerTextBn', 'footerTextEn',
+          'announcementEnabled', 'announcementBn', 'announcementEn', 'announcementLink',
+          'primaryColor', 'accentColor', 'heroSlides', 'defaultLanguage',
+          'aiSupportEnabled', 'aiAssistantName', 'aiFallbackMessage', 'aiCustomInstructions',
+          'chatSupportHours', 'chatOfflineMessage', 'chatWelcomeMessage', 'chatCategories',
+          'complaintCategories', 'complaintRefPrefix', 'complaintTemplates',
+          'updatedAt'
+        ])
+        && data.brandName is string && data.brandName.size() >= 1 && data.brandName.size() <= 100
+        && (!('brandNameBn' in data) || (data.brandNameBn is string && data.brandNameBn.size() <= 100))
+        && (!('brandNameEn' in data) || (data.brandNameEn is string && data.brandNameEn.size() <= 100))
+        && (!('logoUrl' in data) || (data.logoUrl is string && data.logoUrl.size() <= 400000))
+        && (!('faviconUrl' in data) || (data.faviconUrl is string && data.faviconUrl.size() <= 400000))
+        && data.tagline is string && data.tagline.size() >= 1 && data.tagline.size() <= 200
+        && (!('taglineBn' in data) || (data.taglineBn is string && data.taglineBn.size() <= 200))
+        && (!('taglineEn' in data) || (data.taglineEn is string && data.taglineEn.size() <= 200))
+        && (!('shortDescriptionBn' in data) || (data.shortDescriptionBn is string && data.shortDescriptionBn.size() <= 600))
+        && (!('shortDescriptionEn' in data) || (data.shortDescriptionEn is string && data.shortDescriptionEn.size() <= 600))
+        && (!('longDescriptionBn' in data) || (data.longDescriptionBn is string && data.longDescriptionBn.size() <= 2000))
+        && (!('longDescriptionEn' in data) || (data.longDescriptionEn is string && data.longDescriptionEn.size() <= 2000))
+        && data.supportOnline is bool
+        && data.supportPhone is string && data.supportPhone.size() >= 5 && data.supportPhone.size() <= 40
+        && (!('brandEmail' in data) || (data.brandEmail is string && data.brandEmail.size() <= 254))
+        && (!('brandAddressBn' in data) || (data.brandAddressBn is string && data.brandAddressBn.size() <= 300))
+        && (!('brandAddressEn' in data) || (data.brandAddressEn is string && data.brandAddressEn.size() <= 300))
+        && data.messengerUrl is string && data.messengerUrl.size() <= 300
+        && data.facebookUrl is string && data.facebookUrl.size() <= 300
+        && data.instagramUrl is string && data.instagramUrl.size() <= 300
+        && data.youtubeUrl is string && data.youtubeUrl.size() <= 300
+        && (!('whatsappUrl' in data) || (data.whatsappUrl is string && data.whatsappUrl.size() <= 300))
+        && (!('footerTextBn' in data) || (data.footerTextBn is string && data.footerTextBn.size() <= 600))
+        && (!('footerTextEn' in data) || (data.footerTextEn is string && data.footerTextEn.size() <= 600))
+        && (!('announcementEnabled' in data) || data.announcementEnabled is bool)
+        && (!('announcementBn' in data) || (data.announcementBn is string && data.announcementBn.size() <= 300))
+        && (!('announcementEn' in data) || (data.announcementEn is string && data.announcementEn.size() <= 300))
+        && (!('announcementLink' in data) || (data.announcementLink is string && data.announcementLink.size() <= 300))
+        && (!('primaryColor' in data) || (data.primaryColor is string && data.primaryColor.size() <= 32))
+        && (!('accentColor' in data) || (data.accentColor is string && data.accentColor.size() <= 32))
+        && data.heroSlides is list && data.heroSlides.size() <= 6
+        && (data.heroSlides.size() == 0 || data.heroSlides[0] is map)
+        && (!('defaultLanguage' in data) || data.defaultLanguage in ['both', 'bn', 'en'])
+        && (!('aiSupportEnabled' in data) || data.aiSupportEnabled is bool)
+        && (!('aiAssistantName' in data) || (data.aiAssistantName is string && data.aiAssistantName.size() >= 1 && data.aiAssistantName.size() <= 80))
+        && (!('aiFallbackMessage' in data) || (data.aiFallbackMessage is string && data.aiFallbackMessage.size() >= 1 && data.aiFallbackMessage.size() <= 300))
+        && (!('aiCustomInstructions' in data) || (data.aiCustomInstructions is string && data.aiCustomInstructions.size() <= 1000))
+        && (!('chatSupportHours' in data) || (data.chatSupportHours is string && data.chatSupportHours.size() <= 160))
+        && (!('chatOfflineMessage' in data) || (data.chatOfflineMessage is string && data.chatOfflineMessage.size() <= 400))
+        && (!('chatWelcomeMessage' in data) || (data.chatWelcomeMessage is string && data.chatWelcomeMessage.size() <= 500))
+        && (!('chatCategories' in data) || isBoundedStringList(data.chatCategories, 12, 80))
+        && (!('complaintCategories' in data) || isBoundedStringList(data.complaintCategories, 15, 80))
+        && (!('complaintRefPrefix' in data) || (data.complaintRefPrefix is string && data.complaintRefPrefix.size() <= 12))
+        && (!('complaintTemplates' in data) || isBoundedStringList(data.complaintTemplates, 15, 400))
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidHeroBanner(data) {
+      return data.keys().hasAll(['id', 'title', 'subtitle', 'ctaLabel', 'ctaLink', 'image', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'title', 'title_bn', 'title_en', 'subtitle', 'subtitle_bn', 'subtitle_en',
+          'displayLanguage', 'ctaLabel', 'ctaLink', 'image', 'mobileImage',
+          'order', 'active', 'visible', 'deleted', 'startDate', 'endDate', 'overlayOpacity',
+          'status', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && data.subtitle is string && data.subtitle.size() <= 400
+        && data.ctaLabel is string && data.ctaLabel.size() <= 80
+        && data.ctaLink is string && data.ctaLink.size() <= 300
+        && data.image is string && data.image.size() >= 1 && data.image.size() <= 500000
+        && (!('title_bn' in data) || (data.title_bn is string && data.title_bn.size() <= 200))
+        && (!('title_en' in data) || (data.title_en is string && data.title_en.size() <= 200))
+        && (!('subtitle_bn' in data) || (data.subtitle_bn is string && data.subtitle_bn.size() <= 400))
+        && (!('subtitle_en' in data) || (data.subtitle_en is string && data.subtitle_en.size() <= 400))
+        && (!('displayLanguage' in data) || data.displayLanguage in ['both', 'bn', 'en'])
+        && (!('order' in data) || (data.order is int && data.order >= 0 && data.order <= 100))
+        && (!('active' in data) || data.active is bool)
+        && (!('visible' in data) || data.visible is bool)
+        && (!('deleted' in data) || data.deleted is bool)
+        && (!('startDate' in data) || (data.startDate is string && data.startDate.size() <= 32))
+        && (!('endDate' in data) || (data.endDate is string && data.endDate.size() <= 32))
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidHomepageSection(data) {
+      return data.keys().hasAll(['id', 'sectionKey', 'enabled', 'visible', 'display_order', 'title_bn', 'title_en', 'subtitle_bn', 'subtitle_en', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'sectionKey', 'enabled', 'visible', 'display_order',
+          'title_bn', 'title_en', 'subtitle_bn', 'subtitle_en',
+          'content_bn', 'content_en', 'ctaTextBn', 'ctaTextEn', 'ctaLink',
+          'cta_bn', 'cta_en', 'cta_link', 'backgroundImage', 'status', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.sectionKey in [
+          'hero', 'announcement', 'categories', 'featured_products', 'occasion_explorer',
+          'popular_products', 'promotional_banner', 'showrooms', 'complaint_and_support'
+        ]
+        && data.enabled is bool
+        && data.visible is bool
+        && data.display_order is int && data.display_order >= 0 && data.display_order <= 100
+        && data.title_bn is string && data.title_bn.size() <= 200
+        && data.title_en is string && data.title_en.size() <= 200
+        && data.subtitle_bn is string && data.subtitle_bn.size() <= 400
+        && data.subtitle_en is string && data.subtitle_en.size() <= 400
+        && (!('ctaTextBn' in data) || (data.ctaTextBn is string && data.ctaTextBn.size() <= 100))
+        && (!('ctaTextEn' in data) || (data.ctaTextEn is string && data.ctaTextEn.size() <= 100))
+        && (!('ctaLink' in data) || (data.ctaLink is string && data.ctaLink.size() <= 300))
+        && (!('cta_bn' in data) || (data.cta_bn is string && data.cta_bn.size() <= 100))
+        && (!('cta_en' in data) || (data.cta_en is string && data.cta_en.size() <= 100))
+        && (!('cta_link' in data) || (data.cta_link is string && data.cta_link.size() <= 300))
+        && (!('status' in data) || data.status in ['draft', 'published', 'archived'])
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSeoSettings(data) {
+      return data.keys().hasAll(['siteTitle', 'metaDescription', 'metaKeywords', 'ogTitle', 'ogDescription', 'ogImage', 'updatedAt'])
+        && data.keys().hasOnly([
+          'siteTitle', 'siteTitleBn', 'metaDescription', 'metaKeywords',
+          'ogTitle', 'ogDescription', 'ogImage', 'twitterCard',
+          'homepageTitle', 'homepageDescription', 'updatedAt'
+        ])
+        && data.siteTitle is string && data.siteTitle.size() >= 1 && data.siteTitle.size() <= 160
+        && data.metaDescription is string && data.metaDescription.size() <= 400
+        && data.metaKeywords is string && data.metaKeywords.size() <= 400
+        && data.ogTitle is string && data.ogTitle.size() <= 160
+        && data.ogDescription is string && data.ogDescription.size() <= 400
+        && data.ogImage is string && data.ogImage.size() <= 500000
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMediaItem(data) {
+      return data.keys().hasAll(['id', 'name', 'folder', 'url', 'mimeType', 'sizeBytes', 'createdAt'])
+        && data.keys().hasOnly([
+          'id', 'name', 'folder', 'url', 'storagePath', 'mimeType', 'sizeBytes',
+          'uploadedByEmail', 'uploadedBy', 'deleted', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 200
+        && data.folder in ['Products', 'Categories', 'Hero', 'Showrooms', 'General', 'Branding']
+        && data.url is string && data.url.size() >= 1 && data.url.size() <= 500000
+        && data.mimeType is string && data.mimeType.size() <= 80
+        && data.sizeBytes is int && data.sizeBytes >= 0 && data.sizeBytes <= 50000000
+        && (!('deleted' in data) || data.deleted is bool)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidAiKnowledge(data) {
+      return data.keys().hasAll(['id', 'title', 'category', 'active', 'visible', 'order', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'title', 'category', 'question_bn', 'question_en',
+          'answer_bn', 'answer_en', 'content_bn', 'content_en',
+          'active', 'visible', 'deleted', 'order', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 160
+        && data.category is string && data.category.size() >= 1 && data.category.size() <= 80
+        && (!('question_bn' in data) || (data.question_bn is string && data.question_bn.size() <= 400))
+        && (!('question_en' in data) || (data.question_en is string && data.question_en.size() <= 400))
+        && (!('answer_bn' in data) || (data.answer_bn is string && data.answer_bn.size() <= 2000))
+        && (!('answer_en' in data) || (data.answer_en is string && data.answer_en.size() <= 2000))
+        && (!('content_bn' in data) || (data.content_bn is string && data.content_bn.size() <= 2000))
+        && (!('content_en' in data) || (data.content_en is string && data.content_en.size() <= 2000))
+        && data.active is bool
+        && data.visible is bool
+        && data.order is int && data.order >= 0 && data.order <= 1000
+        && (!('deleted' in data) || data.deleted is bool)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidActivityLog(data) {
+      return data.keys().hasAll(['id', 'admin_uid', 'admin_email', 'action', 'module', 'record_id', 'timestamp'])
+        && data.keys().hasOnly(['id', 'admin_uid', 'admin_email', 'action', 'module', 'record_id', 'record_label', 'summary', 'timestamp'])
+        && isValidId(data.id)
+        && data.admin_uid is string && data.admin_uid.size() >= 1 && data.admin_uid.size() <= 128
+        && isValidEmailId(data.admin_email)
+        && data.action is string && data.action.size() >= 1 && data.action.size() <= 80
+        && data.module is string && data.module.size() >= 1 && data.module.size() <= 80
+        && data.record_id is string && data.record_id.size() >= 1 && data.record_id.size() <= 128
+        && (!('record_label' in data) || (data.record_label is string && data.record_label.size() <= 160))
+        && (!('summary' in data) || (data.summary is string && data.summary.size() <= 400))
+        && data.timestamp is timestamp;
+    }
+
+    function isValidChatSession(data) {
+      return data.keys().hasAll([
+          'id', 'customerName', 'customerPhone', 'status',
+          'assignedAdminEmail', 'assignedAdminName', 'lastMessage', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'customerUid', 'customerName', 'customerPhone', 'category', 'status',
+          'assignedAdminEmail', 'assignedAdminName', 'lastMessage', 'createdAt', 'updatedAt'
+        ])
+        && isValidChatSessionId(data.id)
+        && (!('customerUid' in data) || (data.customerUid is string && data.customerUid.size() <= 128))
+        && data.customerName is string && data.customerName.size() >= 1 && data.customerName.size() <= 100
+        && data.customerPhone is string && data.customerPhone.size() >= 5 && data.customerPhone.size() <= 32
+        && (!('category' in data) || (data.category is string && data.category.size() <= 80))
+        && data.status in ['waiting', 'active', 'closed']
+        && data.assignedAdminEmail is string && data.assignedAdminEmail.size() <= 254
+        && data.assignedAdminName is string && data.assignedAdminName.size() <= 120
+        && data.lastMessage is string && data.lastMessage.size() <= 500
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidChatMessage(data) {
+      return data.keys().hasAll(['id', 'sessionId', 'senderRole', 'senderName', 'text', 'createdAt'])
+        && data.keys().hasOnly(['id', 'sessionId', 'customerUid', 'senderRole', 'senderName', 'text', 'createdAt'])
+        && isValidId(data.id)
+        && isValidChatSessionId(data.sessionId)
+        && (!('customerUid' in data) || (data.customerUid is string && data.customerUid.size() <= 128))
+        && data.senderRole in ['customer', 'admin', 'system']
+        && data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 100
+        && data.text is string && data.text.size() >= 1 && data.text.size() <= 2000
+        && data.createdAt is timestamp;
+    }
+
+    // ==============================================
+    // Collection Rules
+    // ==============================================
+
+    // Authoritative RBAC Roles Registry (/rbac_roles/{emailKey})
+    match /rbac_roles/{emailKey} {
+      allow get: if isValidEmailId(emailKey)
+        && (isSuperAdmin() || (hasVerifiedEmail() && authEmail() == emailKey));
+      allow list: if isSuperAdmin();
+      allow create: if isValidEmailId(emailKey)
+        && isValidRbacRole(incoming())
+        && incoming().email == emailKey
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (isPrimarySuperAdmin()
+            && emailKey == 'mdmahmudulhashan0@gmail.com'
+            && incoming().role == 'super_admin'
+            && incoming().status == 'active')
+          ||
+          (isSuperAdmin()
+            && emailKey != 'mdmahmudulhashan0@gmail.com'
+            && incoming().role in ['admin', 'support_agent'])
+        );
+      allow update: if isValidEmailId(emailKey)
+        && isValidRbacRole(incoming())
+        && incoming().email == existing().email
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (isSuperAdmin()
+            && incoming().diff(existing()).affectedKeys().hasOnly(['uid', 'username', 'displayName', 'role', 'status', 'addedByEmail', 'updatedAt'])
+            && (
+              (emailKey == 'mdmahmudulhashan0@gmail.com'
+                && incoming().role == 'super_admin'
+                && incoming().status == 'active')
+              ||
+              (emailKey != 'mdmahmudulhashan0@gmail.com'
+                && incoming().role in ['admin', 'support_agent'])
+            ))
+          ||
+          (hasVerifiedEmail()
+            && authEmail() == emailKey
+            && existing().status == 'active'
+            && existing().uid == ''
+            && incoming().uid == request.auth.uid
+            && incoming().role == existing().role
+            && incoming().status == existing().status
+            && incoming().diff(existing()).affectedKeys().hasOnly(['uid', 'displayName', 'updatedAt']))
+        );
+      allow delete: if isSuperAdmin()
+        && isValidEmailId(emailKey)
+        && emailKey != 'mdmahmudulhashan0@gmail.com';
+    }
+
+    // Admin Username-to-Email Lookup (/admin_usernames/{usernameId})
+    // Single-document get only (no list enumeration) so /mahmud supports username sign-in securely
+    match /admin_usernames/{usernameId} {
+      allow get: if isValidId(usernameId);
+      allow list: if false;
+      allow create, update: if isValidId(usernameId)
+        && isValidAdminUsername(incoming())
+        && incoming().username == usernameId
+        && incoming().updatedAt == request.time
+        && (
+          isSuperAdmin()
+          || (isPrimarySuperAdmin() && usernameId == 'mahmud' && incoming().email == 'mdmahmudulhashan0@gmail.com')
+        );
+      allow delete: if isSuperAdmin()
+        && isValidId(usernameId)
+        && usernameId != 'mahmud';
+    }
+
+    // Registered User Accounts (/users/{userId})
+    match /users/{userId} {
+      allow get: if isValidId(userId)
+        && (isSuperAdmin() || (hasVerifiedEmail() && request.auth.uid == userId));
+      allow list: if isSuperAdmin();
+      allow create: if hasVerifiedEmail()
+        && isValidId(userId)
+        && request.auth.uid == userId
+        && isValidUserAccount(incoming())
+        && incoming().uid == userId
+        && incoming().email == authEmail()
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && incoming().lastLoginAt == request.time
+        && (
+          (isPrimarySuperAdmin() && incoming().role == 'super_admin' && incoming().status == 'active')
+          || (!isPrimarySuperAdmin() && hasActiveRbacDoc() && incoming().role == rbacRole() && incoming().status == 'active')
+          || (!isPrimarySuperAdmin() && !hasActiveRbacDoc() && incoming().role == 'customer' && incoming().status == 'active')
+        );
+      allow update: if isValidId(userId)
+        && isValidUserAccount(incoming())
+        && incoming().uid == existing().uid
+        && incoming().email == existing().email
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (isSuperAdmin()
+            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoUrl', 'role', 'status', 'updatedAt', 'lastLoginAt'])
+            && (
+              (existing().email == 'mdmahmudulhashan0@gmail.com'
+                && incoming().role == 'super_admin'
+                && incoming().status == 'active')
+              ||
+              (existing().email != 'mdmahmudulhashan0@gmail.com'
+                && incoming().role in ['customer', 'admin', 'support_agent'])
+            ))
+          ||
+          (hasVerifiedEmail()
+            && request.auth.uid == userId
+            && incoming().status == existing().status
+            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoUrl', 'role', 'updatedAt', 'lastLoginAt'])
+            && (
+              (isPrimarySuperAdmin() && incoming().role == 'super_admin')
+              || (!isPrimarySuperAdmin() && hasActiveRbacDoc() && incoming().role == rbacRole())
+              || (!isPrimarySuperAdmin() && !hasActiveRbacDoc() && incoming().role == 'customer')
+            ))
+        );
+      allow delete: if isSuperAdmin()
+        && isValidId(userId)
+        && userId != request.auth.uid
+        && existing().email != 'mdmahmudulhashan0@gmail.com';
+    }
+
+    // Admin Records (/admins/{adminUid})
+    match /admins/{adminUid} {
+      allow get: if isValidId(adminUid)
+        && (isSuperAdmin() || (hasVerifiedEmail() && request.auth.uid == adminUid));
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(adminUid)
+        && isValidAdminRecord(incoming())
+        && incoming().uid == adminUid
+        && (
+          isSuperAdmin()
+          || (isPrimarySuperAdmin() && adminUid == request.auth.uid && incoming().role == 'super_admin')
+          || (hasActiveRbacDoc()
+            && adminUid == request.auth.uid
+            && incoming().email == authEmail()
+            && incoming().role == rbacRole()
+            && incoming().active == true)
+        );
+      allow update: if isValidId(adminUid)
+        && isValidAdminRecord(incoming())
+        && incoming().uid == existing().uid
+        && incoming().email == existing().email
+        && (
+          isSuperAdmin()
+          || (isPrimarySuperAdmin() && adminUid == request.auth.uid && incoming().role == 'super_admin')
+          || (hasActiveRbacDoc()
+            && adminUid == request.auth.uid
+            && incoming().role == existing().role
+            && incoming().active == existing().active)
+        );
+      allow delete: if isSuperAdmin() && isValidId(adminUid) && adminUid != request.auth.uid;
+    }
+
+    // Public Catalog Showcase (Admin + Super Admin write)
+    match /categories/{categoryId} {
+      allow get: if isValidId(categoryId);
+      allow list: if true;
+      allow create: if isCatalogAdmin()
+        && isValidId(categoryId)
+        && isValidCategory(incoming())
+        && incoming().id == categoryId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isCatalogAdmin()
+        && isValidId(categoryId)
+        && isValidCategory(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
+          'description', 'descriptionEn', 'description_bn', 'description_en',
+          'image', 'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
+          'updatedAt'
+        ]);
+      allow delete: if isCatalogAdmin() && isValidId(categoryId);
+    }
+
+    match /occasions/{occasionId} {
+      allow get: if isValidId(occasionId);
+      allow list: if true;
+      allow create: if isCatalogAdmin()
+        && isValidId(occasionId)
+        && isValidOccasion(incoming())
+        && incoming().id == occasionId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isCatalogAdmin()
+        && isValidId(occasionId)
+        && isValidOccasion(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
+          'description', 'descriptionEn', 'description_bn', 'description_en',
+          'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
+          'updatedAt'
+        ]);
+      allow delete: if isCatalogAdmin() && isValidId(occasionId);
+    }
+
+    match /products/{productId} {
+      allow get: if isValidId(productId);
+      allow list: if true;
+      allow create: if isCatalogAdmin()
+        && isValidId(productId)
+        && isValidProduct(incoming())
+        && incoming().id == productId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isCatalogAdmin()
+        && isValidId(productId)
+        && isValidProduct(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'nameEn', 'name_bn', 'name_en', 'slug',
+          'category', 'categoryName', 'categoryNameEn', 'productType',
+          'price', 'old_price', 'discount', 'price_label', 'priceUnit',
+          'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
+          'description', 'descriptionEn', 'description_bn', 'description_en',
+          'images', 'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
+          'availability', 'importantNotes', 'featured', 'popular',
+          'visible', 'deleted', 'status', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription', 'seoImage',
+          'updatedAt'
+        ]);
+      allow delete: if isCatalogAdmin() && isValidId(productId);
+    }
+
+    match /showrooms/{showroomId} {
+      allow get: if isValidId(showroomId);
+      allow list: if true;
+      allow create: if isCatalogAdmin()
+        && isValidId(showroomId)
+        && isValidShowroom(incoming())
+        && incoming().id == showroomId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isCatalogAdmin()
+        && isValidId(showroomId)
+        && isValidShowroom(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'nameEn', 'name_bn', 'name_en',
+          'area', 'areaEn', 'address', 'addressEn', 'address_bn', 'address_en',
+          'description', 'descriptionEn', 'description_bn', 'description_en',
+          'phone', 'alternate_phone', 'email',
+          'openingHours', 'openingHoursEn', 'opening_time', 'closing_time', 'weekly_holiday',
+          'mapUrl', 'lat', 'lng', 'images', 'available_categories', 'available_products',
+          'isMain', 'visible', 'deleted', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription',
+          'updatedAt'
+        ]);
+      allow delete: if isCatalogAdmin() && isValidId(showroomId);
+    }
+
+    match /greetings/{greetingId} {
+      allow get: if isValidId(greetingId);
+      allow list: if true;
+      allow create: if isCatalogAdmin()
+        && isValidId(greetingId)
+        && ((greetingId == 'daily' && isValidGreeting(incoming()))
+          || (greetingId != 'daily' && isValidGreetingItem(incoming())))
+        && incoming().updatedAt == request.time;
+      allow update: if isCatalogAdmin()
+        && isValidId(greetingId)
+        && incoming().updatedAt == request.time
+        && (
+          (greetingId == 'daily' && isValidGreeting(incoming())
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'useDynamicDate', 'customDateText', 'customDateTextEn',
+              'greetingText', 'greetingTextEn', 'greeting_bn', 'greeting_en',
+              'dailyMessage', 'dailyMessageEn', 'message_bn', 'message_en',
+              'specialMessage', 'specialMessageEn', 'special_message_bn', 'special_message_en',
+              'announcement', 'announcementEn', 'announcement_bn', 'announcement_en',
+              'updatedAt'
+            ]))
+          ||
+          (greetingId != 'daily' && isValidGreetingItem(incoming())
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'text_bn', 'text_en', 'type', 'active', 'visible', 'display_order',
+              'durationMs', 'startDate', 'endDate', 'deleted', 'updatedAt'
+            ]))
+        );
+      allow delete: if isCatalogAdmin() && isValidId(greetingId) && greetingId != 'daily';
+    }
+
+    match /hero_banners/{bannerId} {
+      allow get: if isValidId(bannerId);
+      allow list: if true;
+      allow create: if isCatalogAdmin()
+        && isValidId(bannerId)
+        && isValidHeroBanner(incoming())
+        && incoming().id == bannerId
+        && incoming().updatedAt == request.time;
+      allow update: if isCatalogAdmin()
+        && isValidId(bannerId)
+        && isValidHeroBanner(incoming())
+        && incoming().id == existing().id
+        && incoming().updatedAt == request.time;
+      allow delete: if isCatalogAdmin() && isValidId(bannerId);
+    }
+
+    match /homepage_sections/{sectionId} {
+      allow get: if isValidId(sectionId);
+      allow list: if true;
+      allow create: if isCatalogAdmin()
+        && isValidId(sectionId)
+        && isValidHomepageSection(incoming())
+        && incoming().id == sectionId
+        && incoming().updatedAt == request.time;
+      allow update: if isCatalogAdmin()
+        && isValidId(sectionId)
+        && isValidHomepageSection(incoming())
+        && incoming().id == existing().id
+        && incoming().updatedAt == request.time;
+      allow delete: if isSuperAdmin() && isValidId(sectionId);
+    }
+
+    // Site Settings (Tiered: Super Admin = all, Catalog Admin = heroSlides only, Support = supportOnline only)
+    match /site_settings/{settingId} {
+      allow get: if isValidId(settingId);
+      allow list: if true;
+      allow create: if isSuperAdmin()
+        && isValidId(settingId)
+        && isValidSiteSettings(incoming())
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(settingId)
+        && isValidSiteSettings(incoming())
+        && incoming().updatedAt == request.time
+        && (
+          (isSuperAdmin() && incoming().diff(existing()).affectedKeys().hasOnly([
+            'brandName', 'brandNameBn', 'brandNameEn', 'logoUrl', 'faviconUrl',
+            'tagline', 'taglineBn', 'taglineEn',
+            'shortDescriptionBn', 'shortDescriptionEn', 'longDescriptionBn', 'longDescriptionEn',
+            'supportOnline', 'supportPhone', 'brandEmail', 'brandAddressBn', 'brandAddressEn',
+            'messengerUrl', 'facebookUrl', 'instagramUrl', 'youtubeUrl', 'whatsappUrl',
+            'footerTextBn', 'footerTextEn',
+            'announcementEnabled', 'announcementBn', 'announcementEn', 'announcementLink',
+            'primaryColor', 'accentColor', 'heroSlides', 'defaultLanguage',
+            'aiSupportEnabled', 'aiAssistantName', 'aiFallbackMessage', 'aiCustomInstructions',
+            'chatSupportHours', 'chatOfflineMessage', 'chatWelcomeMessage', 'chatCategories',
+            'complaintCategories', 'complaintRefPrefix', 'complaintTemplates',
+            'updatedAt'
+          ]))
+          ||
+          (isCatalogAdmin() && settingId == 'main' && incoming().diff(existing()).affectedKeys().hasOnly([
+            'heroSlides', 'updatedAt'
+          ]))
+          ||
+          (isSupportAgent() && settingId == 'main' && incoming().diff(existing()).affectedKeys().hasOnly([
+            'supportOnline', 'updatedAt'
+          ]))
+        );
+      allow delete: if isSuperAdmin() && isValidId(settingId);
+    }
+
+    match /seo_settings/{settingId} {
+      allow get: if isValidId(settingId);
+      allow list: if true;
+      allow create, update: if isSuperAdmin()
+        && isValidId(settingId)
+        && isValidSeoSettings(incoming())
+        && incoming().updatedAt == request.time;
+      allow delete: if isSuperAdmin() && isValidId(settingId);
+    }
+
+    match /media/{mediaId} {
+      allow get: if isValidId(mediaId);
+      allow list: if true;
+      allow create: if isCatalogAdmin()
+        && isValidId(mediaId)
+        && isValidMediaItem(incoming())
+        && incoming().id == mediaId
+        && incoming().createdAt == request.time;
+      allow update: if isCatalogAdmin()
+        && isValidId(mediaId)
+        && isValidMediaItem(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'folder', 'deleted', 'updatedAt']);
+      allow delete: if isSuperAdmin() && isValidId(mediaId);
+    }
+
+    match /ai_knowledge/{entryId} {
+      allow get: if isValidId(entryId);
+      allow list: if true;
+      allow create: if isCatalogAdmin()
+        && isValidId(entryId)
+        && isValidAiKnowledge(incoming())
+        && incoming().id == entryId
+        && incoming().updatedAt == request.time;
+      allow update: if isCatalogAdmin()
+        && isValidId(entryId)
+        && isValidAiKnowledge(incoming())
+        && incoming().id == existing().id
+        && incoming().updatedAt == request.time;
+      allow delete: if isCatalogAdmin() && isValidId(entryId);
+    }
+
+    // Strictly Private Complaints Box (Super Admin + Support Agent + submitter own UID only)
+    match /complaints/{complaintId} {
+      allow get: if isValidId(complaintId) && (
+        isSupportStaff()
+        || (hasVerifiedEmail() && 'submittedByUid' in existing() && existing().submittedByUid != '' && existing().submittedByUid == request.auth.uid)
+      );
+      allow list: if isSupportStaff()
+        || (hasVerifiedEmail() && resource.data.submittedByUid == request.auth.uid);
+      allow create: if isValidId(complaintId)
+        && isValidComplaint(incoming())
+        && incoming().id == complaintId
+        && incoming().status == 'New'
+        && incoming().adminNote == ''
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (!isSignedIn() && (!('submittedByUid' in incoming()) || incoming().submittedByUid == ''))
+          || (isSignedIn() && 'submittedByUid' in incoming() && incoming().submittedByUid == request.auth.uid)
+        );
+      allow update: if isSupportStaff()
+        && isValidId(complaintId)
+        && isValidComplaint(incoming())
+        && (existing().status != 'Closed' || isSuperAdmin())
+        && incoming().id == existing().id
+        && incoming().referenceCode == existing().referenceCode
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'priority', 'adminNote', 'updatedAt']);
+      allow delete: if isSuperAdmin() && isValidId(complaintId);
+    }
+
+    // Live Support Chat Sessions & Messages (Super Admin + Support Agent + owning customer only)
+    match /chat_sessions/{sessionId} {
+      allow get: if isSupportStaff()
+        || (isValidChatSessionId(sessionId)
+          && (!('customerUid' in existing()) || existing().customerUid == '' || (isSignedIn() && existing().customerUid == request.auth.uid)));
+      allow list: if isSupportStaff();
+      allow create: if isValidChatSessionId(sessionId)
+        && isValidChatSession(incoming())
+        && incoming().id == sessionId
+        && incoming().status == 'waiting'
+        && incoming().assignedAdminEmail == ''
+        && incoming().assignedAdminName == ''
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (!isSignedIn() && (!('customerUid' in incoming()) || incoming().customerUid == ''))
+          || (isSignedIn() && 'customerUid' in incoming() && incoming().customerUid == request.auth.uid)
+        );
+      allow update: if isValidChatSessionId(sessionId)
+        && isValidChatSession(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (isSupportStaff() && incoming().diff(existing()).affectedKeys().hasOnly([
+            'status', 'assignedAdminEmail', 'assignedAdminName', 'lastMessage', 'updatedAt'
+          ]))
+          ||
+          (existing().status != 'closed'
+            && (!('customerUid' in existing()) || existing().customerUid == '' || (isSignedIn() && existing().customerUid == request.auth.uid))
+            && (incoming().status == existing().status || incoming().status == 'closed')
+            && incoming().diff(existing()).affectedKeys().hasOnly(['lastMessage', 'status', 'updatedAt']))
+        );
+      allow delete: if isSuperAdmin() && isValidChatSessionId(sessionId);
+
+      match /messages/{messageId} {
+        allow get: if isSupportStaff()
+          || (isValidChatSessionId(sessionId)
+            && isValidId(messageId)
+            && (!('customerUid' in existing()) || existing().customerUid == '' || (isSignedIn() && existing().customerUid == request.auth.uid)));
+        allow list: if isSupportStaff()
+          || (isValidChatSessionId(sessionId)
+            && resource.data.sessionId == sessionId
+            && (!('customerUid' in resource.data) || resource.data.customerUid == '' || (isSignedIn() && resource.data.customerUid == request.auth.uid)));
+        allow create: if isValidChatSessionId(sessionId)
+          && isValidId(messageId)
+          && isValidChatMessage(incoming())
+          && incoming().id == messageId
+          && incoming().sessionId == sessionId
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/chat_sessions/$(sessionId))
+          && get(/databases/$(database)/documents/chat_sessions/$(sessionId)).data.status != 'closed'
+          && (
+            isSupportStaff()
+            || (incoming().senderRole == 'customer'
+              && (
+                !('customerUid' in get(/databases/$(database)/documents/chat_sessions/$(sessionId)).data)
+                || get(/databases/$(database)/documents/chat_sessions/$(sessionId)).data.customerUid == ''
+                || (isSignedIn() && get(/databases/$(database)/documents/chat_sessions/$(sessionId)).data.customerUid == request.auth.uid)
+              ))
+          );
+        allow update: if false;
+        allow delete: if isSuperAdmin() && isValidChatSessionId(sessionId) && isValidId(messageId);
+      }
+    }
+
+    // Immutable Admin Activity Audit Logs (Super Admin reads, staff creates own log entry)
+    match /activity_logs/{logId} {
+      allow get: if isValidId(logId) && isSuperAdmin();
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(logId)
+        && (isCatalogAdmin() || isSupportStaff())
+        && isValidActivityLog(incoming())
+        && incoming().id == logId
+        && incoming().admin_uid == request.auth.uid
+        && incoming().timestamp == request.time;
+      allow update, delete: if false;
+    }
+  }
+}

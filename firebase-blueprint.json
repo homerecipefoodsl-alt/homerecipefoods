@@ -1,0 +1,440 @@
+{
+  "entities": {
+    "RbacRoleEntry": {
+      "title": "RbacRoleEntry",
+      "description": "Authorized staff role assignment keyed by lowercase verified email",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 254 },
+        "uid": { "type": "string", "minLength": 0, "maxLength": 128 },
+        "username": { "type": "string", "minLength": 0, "maxLength": 64 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["super_admin", "admin", "support_agent"] },
+        "status": { "type": "string", "enum": ["active", "disabled"] },
+        "addedByEmail": { "type": "string", "minLength": 0, "maxLength": 254 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "uid", "displayName", "role", "status", "addedByEmail", "createdAt", "updatedAt"]
+    },
+    "AdminUsernameMapping": {
+      "title": "AdminUsernameMapping",
+      "description": "Username-to-email lookup document for /mahmud email/password sign-in (contains zero secrets)",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 254 },
+        "active": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["username", "email", "active", "updatedAt"]
+    },
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Authenticated user account and authoritative role state",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 254 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "photoUrl": { "type": "string", "minLength": 0, "maxLength": 500 },
+        "role": { "type": "string", "enum": ["super_admin", "admin", "support_agent", "customer"] },
+        "status": { "type": "string", "enum": ["active", "disabled"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "lastLoginAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "photoUrl", "role", "status", "createdAt", "updatedAt", "lastLoginAt"]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Administrator registry profile keyed by Firebase Auth UID",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 254 },
+        "username": { "type": "string", "minLength": 0, "maxLength": 64 },
+        "display_name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["super_admin", "admin", "support_agent"] },
+        "active": { "type": "boolean" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "last_login_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "username", "display_name", "role", "active", "created_at", "updated_at"]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "Primary food product category (bilingual Bengali & English)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "nameEn": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "name_bn": { "type": "string", "minLength": 0, "maxLength": 120 },
+        "name_en": { "type": "string", "minLength": 0, "maxLength": 120 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9\\-]+$" },
+        "description": { "type": "string", "minLength": 1, "maxLength": 600 },
+        "descriptionEn": { "type": "string", "minLength": 0, "maxLength": 600 },
+        "image": { "type": "string", "minLength": 1, "maxLength": 500000 },
+        "order": { "type": "integer" },
+        "visible": { "type": "boolean" },
+        "deleted": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "nameEn", "slug", "description", "image", "order", "createdAt", "updatedAt"]
+    },
+    "Occasion": {
+      "title": "Occasion",
+      "description": "Special celebration or event occasion for product discovery",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "nameEn": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9\\-]+$" },
+        "icon": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 600 },
+        "descriptionEn": { "type": "string", "minLength": 0, "maxLength": 600 },
+        "order": { "type": "integer" },
+        "visible": { "type": "boolean" },
+        "deleted": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "nameEn", "slug", "icon", "description", "order", "createdAt", "updatedAt"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Food showcase product item (no online ordering, bilingual Bengali & English)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "nameEn": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[a-z0-9\\-]+$" },
+        "category": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9\\-]+$" },
+        "categoryName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "productType": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "price": { "type": "number" },
+        "old_price": { "type": "number" },
+        "discount": { "type": "string", "minLength": 0, "maxLength": 60 },
+        "price_label": { "type": "string", "minLength": 0, "maxLength": 80 },
+        "priceUnit": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "shortDescription": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "images": { "type": "array" },
+        "ingredients": { "type": "array" },
+        "sizes": { "type": "array" },
+        "weight": { "type": "string", "minLength": 0, "maxLength": 80 },
+        "occasions": { "type": "array" },
+        "showrooms": { "type": "array" },
+        "availability": { "type": "string", "enum": ["In Showroom", "Pre-Order at Showroom", "Seasonal", "Out of Stock"] },
+        "importantNotes": { "type": "string", "minLength": 0, "maxLength": 800 },
+        "featured": { "type": "boolean" },
+        "popular": { "type": "boolean" },
+        "visible": { "type": "boolean" },
+        "deleted": { "type": "boolean" },
+        "display_order": { "type": "integer" },
+        "status": { "type": "string", "enum": ["draft", "published", "archived"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id", "name", "nameEn", "slug", "category", "categoryName", "productType",
+        "price", "priceUnit", "shortDescription", "description", "images",
+        "ingredients", "sizes", "weight", "occasions", "showrooms",
+        "availability", "importantNotes", "featured", "popular", "createdAt", "updatedAt"
+      ]
+    },
+    "Showroom": {
+      "title": "Showroom",
+      "description": "Physical Home Recipe Foods showroom branch",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "area": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "address": { "type": "string", "minLength": 1, "maxLength": 400 },
+        "phone": { "type": "string", "minLength": 5, "maxLength": 40 },
+        "alternate_phone": { "type": "string", "minLength": 0, "maxLength": 40 },
+        "email": { "type": "string", "minLength": 0, "maxLength": 254 },
+        "openingHours": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "weekly_holiday": { "type": "string", "minLength": 0, "maxLength": 80 },
+        "mapUrl": { "type": "string", "minLength": 1, "maxLength": 600 },
+        "lat": { "type": "number" },
+        "lng": { "type": "number" },
+        "isMain": { "type": "boolean" },
+        "visible": { "type": "boolean" },
+        "deleted": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "area", "address", "phone", "openingHours", "mapUrl", "lat", "lng", "isMain", "createdAt", "updatedAt"]
+    },
+    "HeroBanner": {
+      "title": "HeroBanner",
+      "description": "Homepage hero banner slide managed by admins",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "subtitle": { "type": "string", "minLength": 0, "maxLength": 400 },
+        "ctaLabel": { "type": "string", "minLength": 0, "maxLength": 80 },
+        "ctaLink": { "type": "string", "minLength": 0, "maxLength": 300 },
+        "image": { "type": "string", "minLength": 1, "maxLength": 500000 },
+        "active": { "type": "boolean" },
+        "visible": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "subtitle", "ctaLabel", "ctaLink", "image", "updatedAt"]
+    },
+    "HomepageSection": {
+      "title": "HomepageSection",
+      "description": "Dynamic homepage section configuration and display ordering",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sectionKey": {
+          "type": "string",
+          "enum": ["hero", "announcement", "categories", "featured_products", "occasion_explorer", "popular_products", "promotional_banner", "showrooms", "complaint_and_support"]
+        },
+        "enabled": { "type": "boolean" },
+        "visible": { "type": "boolean" },
+        "display_order": { "type": "integer" },
+        "title_bn": { "type": "string", "minLength": 0, "maxLength": 200 },
+        "title_en": { "type": "string", "minLength": 0, "maxLength": 200 },
+        "subtitle_bn": { "type": "string", "minLength": 0, "maxLength": 400 },
+        "subtitle_en": { "type": "string", "minLength": 0, "maxLength": 400 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "sectionKey", "enabled", "visible", "display_order", "title_bn", "title_en", "subtitle_bn", "subtitle_en", "updatedAt"]
+    },
+    "Complaint": {
+      "title": "Complaint",
+      "description": "Strictly private customer complaint submission",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "referenceCode": { "type": "string", "minLength": 4, "maxLength": 32 },
+        "customerName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "phone": { "type": "string", "minLength": 6, "maxLength": 32 },
+        "email": { "type": "string", "minLength": 0, "maxLength": 254 },
+        "category": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "showroomId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "showroomName": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "message": { "type": "string", "minLength": 5, "maxLength": 3000 },
+        "attachmentImage": { "type": "string", "minLength": 0, "maxLength": 400000 },
+        "status": { "type": "string", "enum": ["New", "Reviewing", "In Progress", "Resolved", "Rejected", "Closed"] },
+        "priority": { "type": "string", "enum": ["Low", "Normal", "High", "Urgent"] },
+        "adminNote": { "type": "string", "minLength": 0, "maxLength": 2000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "referenceCode", "customerName", "phone", "email", "category", "showroomId", "showroomName", "message", "attachmentImage", "status", "adminNote", "createdAt", "updatedAt"]
+    },
+    "GreetingConfig": {
+      "title": "GreetingConfig",
+      "description": "Dynamic greeting and daily message configuration under brand logo",
+      "type": "object",
+      "properties": {
+        "useDynamicDate": { "type": "boolean" },
+        "customDateText": { "type": "string", "minLength": 0, "maxLength": 120 },
+        "greetingText": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "dailyMessage": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "specialMessage": { "type": "string", "minLength": 0, "maxLength": 200 },
+        "announcement": { "type": "string", "minLength": 0, "maxLength": 240 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["useDynamicDate", "customDateText", "greetingText", "dailyMessage", "specialMessage", "announcement", "updatedAt"]
+    },
+    "SiteSettings": {
+      "title": "SiteSettings",
+      "description": "Global site configuration, brand identity, announcement bar, AI support config, and support availability",
+      "type": "object",
+      "properties": {
+        "brandName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "tagline": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "supportOnline": { "type": "boolean" },
+        "supportPhone": { "type": "string", "minLength": 5, "maxLength": 40 },
+        "messengerUrl": { "type": "string", "minLength": 0, "maxLength": 300 },
+        "facebookUrl": { "type": "string", "minLength": 0, "maxLength": 300 },
+        "instagramUrl": { "type": "string", "minLength": 0, "maxLength": 300 },
+        "youtubeUrl": { "type": "string", "minLength": 0, "maxLength": 300 },
+        "heroSlides": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["brandName", "tagline", "supportOnline", "supportPhone", "messengerUrl", "facebookUrl", "instagramUrl", "youtubeUrl", "heroSlides", "updatedAt"]
+    },
+    "SeoSettings": {
+      "title": "SeoSettings",
+      "description": "Global SEO & OpenGraph metadata settings",
+      "type": "object",
+      "properties": {
+        "siteTitle": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "metaDescription": { "type": "string", "minLength": 0, "maxLength": 400 },
+        "metaKeywords": { "type": "string", "minLength": 0, "maxLength": 400 },
+        "ogTitle": { "type": "string", "minLength": 0, "maxLength": 160 },
+        "ogDescription": { "type": "string", "minLength": 0, "maxLength": 400 },
+        "ogImage": { "type": "string", "minLength": 0, "maxLength": 500000 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["siteTitle", "metaDescription", "metaKeywords", "ogTitle", "ogDescription", "ogImage", "updatedAt"]
+    },
+    "MediaItem": {
+      "title": "MediaItem",
+      "description": "Uploaded media asset metadata",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "folder": { "type": "string", "enum": ["Products", "Categories", "Hero", "Showrooms", "General", "Branding"] },
+        "url": { "type": "string", "minLength": 1, "maxLength": 500000 },
+        "mimeType": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "sizeBytes": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "folder", "url", "mimeType", "sizeBytes", "createdAt"]
+    },
+    "AiKnowledgeEntry": {
+      "title": "AiKnowledgeEntry",
+      "description": "FAQ and policy entry fed to the AI Assistant",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "category": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "active": { "type": "boolean" },
+        "visible": { "type": "boolean" },
+        "order": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "category", "active", "visible", "order", "updatedAt"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Immutable audit log entry for admin mutations and logins",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "admin_uid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "admin_email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 254 },
+        "action": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "module": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "record_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "admin_uid", "admin_email", "action", "module", "record_id", "timestamp"]
+    },
+    "ChatSession": {
+      "title": "ChatSession",
+      "description": "Private customer-to-support live chat session",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 24, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "customerName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "customerPhone": { "type": "string", "minLength": 5, "maxLength": 32 },
+        "status": { "type": "string", "enum": ["waiting", "active", "closed"] },
+        "assignedAdminEmail": { "type": "string", "minLength": 0, "maxLength": 254 },
+        "assignedAdminName": { "type": "string", "minLength": 0, "maxLength": 120 },
+        "lastMessage": { "type": "string", "minLength": 0, "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "customerName", "customerPhone", "status", "assignedAdminEmail", "assignedAdminName", "lastMessage", "createdAt", "updatedAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Individual message inside a live chat session",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sessionId": { "type": "string", "minLength": 24, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderRole": { "type": "string", "enum": ["customer", "admin", "system"] },
+        "senderName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "sessionId", "senderRole", "senderName", "text", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/rbac_roles/{emailKey}": {
+      "schema": { "$ref": "#/entities/RbacRoleEntry" },
+      "description": "Authoritative RBAC role assignments managed exclusively by Super Admin"
+    },
+    "/admin_usernames/{usernameId}": {
+      "schema": { "$ref": "#/entities/AdminUsernameMapping" },
+      "description": "Username-to-email resolution records for /mahmud email/password sign-in"
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserAccount" },
+      "description": "Registered user profiles and enforced role records"
+    },
+    "/admins/{adminUid}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Administrator registry keyed by Firebase Auth UID"
+    },
+    "/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/Category" },
+      "description": "Public food showcase categories"
+    },
+    "/occasions/{occasionId}": {
+      "schema": { "$ref": "#/entities/Occasion" },
+      "description": "Special celebration occasions for product discovery"
+    },
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Public showcase product catalog"
+    },
+    "/showrooms/{showroomId}": {
+      "schema": { "$ref": "#/entities/Showroom" },
+      "description": "Public showroom locations and contact details"
+    },
+    "/hero_banners/{bannerId}": {
+      "schema": { "$ref": "#/entities/HeroBanner" },
+      "description": "Homepage hero banners managed via Admin Panel"
+    },
+    "/homepage_sections/{sectionId}": {
+      "schema": { "$ref": "#/entities/HomepageSection" },
+      "description": "Dynamic homepage section ordering, visibility, and copy"
+    },
+    "/greetings/{greetingId}": {
+      "schema": { "$ref": "#/entities/GreetingConfig" },
+      "description": "Dynamic animated greeting messages under the logo"
+    },
+    "/site_settings/{settingId}": {
+      "schema": { "$ref": "#/entities/SiteSettings" },
+      "description": "Brand settings, hero banners, AI support config, and support status"
+    },
+    "/seo_settings/{settingId}": {
+      "schema": { "$ref": "#/entities/SeoSettings" },
+      "description": "Global SEO & OpenGraph configuration"
+    },
+    "/media/{mediaId}": {
+      "schema": { "$ref": "#/entities/MediaItem" },
+      "description": "Uploaded image library metadata"
+    },
+    "/ai_knowledge/{entryId}": {
+      "schema": { "$ref": "#/entities/AiKnowledgeEntry" },
+      "description": "AI Assistant knowledge base entries"
+    },
+    "/complaints/{complaintId}": {
+      "schema": { "$ref": "#/entities/Complaint" },
+      "description": "Private customer complaints readable/manageable by Super Admin & Support Agents"
+    },
+    "/chat_sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/ChatSession" },
+      "description": "Live support chat sessions keyed by high-entropy client session ID"
+    },
+    "/chat_sessions/{sessionId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Messages belonging to a live support chat session"
+    },
+    "/activity_logs/{logId}": {
+      "schema": { "$ref": "#/entities/ActivityLog" },
+      "description": "Immutable admin activity audit logs"
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Home Recipe Foods",
+  "description": "Home Recipe Foods — Premium Bangladeshi artisanal bakery, traditional sweets, custom cakes, and luxury Akd gift boxes. Browse our showcase and visit our showrooms.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
