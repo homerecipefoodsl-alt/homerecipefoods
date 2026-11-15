@@ -8,9 +8,8 @@ All backend data, authentication, and storage remain connected directly to your 
 
 ## Architecture Overview
 
-- **Frontend Build Output**: `dist/` (built via `npm run build`)
-- **Cloudflare Workers Static Assets**: Configured in `wrangler.jsonc` with `not_found_handling: "single-page-application"` so `/products`, `/category/*`, `/occasion/*`, `/mahmud`, and `/mahmud/dashboard` all serve cleanly without 404 errors on refresh.
-- **Cloudflare Pages Fallback**: `public/_redirects` (`/* /index.html 200`) is included for Cloudflare Pages compatibility.
+- **Frontend Build Output**: `dist/` (built via `bun run build` or `npm run build`)
+- **Cloudflare Workers Static Assets**: Configured in `wrangler.jsonc` (`"name": "homerecipefoods"`) with `not_found_handling: "single-page-application"` so `/`, `/products`, `/about`, `/contact`, `/complaint`, `/admin`, `/mahmud`, and `/mahmud/dashboard` all serve cleanly without `_redirects` infinite-loop errors.
 - **Secret Isolation**: `GEMINI_API_KEY` is stored **only** as a Cloudflare Worker secret (`wrangler secret put GEMINI_API_KEY`) and never bundled into `dist/`.
 
 ---
@@ -30,14 +29,15 @@ VITE_FIREBASE_APP_ID="1:771532162522:web:8dfcecb6033932861cace3"
 VITE_FIREBASE_FIRESTORE_DATABASE_ID="ai-studio-8e160dd1-e90f-4eac-89d5-fbd11fce8ac3"
 ```
 
-### 2. Build the Production Bundle
+### 2. Build & Deploy (Cloudflare Workers Builds / GitHub CI)
 ```bash
-npm install
-npm run build
+bun install --frozen-lockfile
+bun run build
+npx wrangler deploy
 ```
-Verify that `dist/index.html` and `dist/assets/*` were generated cleanly.
+Verify that `dist/index.html` and `dist/assets/*` were generated cleanly (without `_redirects`).
 
-### 3. Configure Secrets & Deploy with Wrangler
+### 3. Configure Secrets (One-Time)
 Update `"APP_URL"` in `wrangler.jsonc` if using a custom domain, then run:
 
 ```bash

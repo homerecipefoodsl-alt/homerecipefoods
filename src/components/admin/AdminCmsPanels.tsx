@@ -740,7 +740,7 @@ export function AdminSystemSettingsPanel() {
           </div>
           <ul className="mt-3 space-y-1.5 text-xs text-[#57534E]">
             <li>• Static SPA output in <code className="font-mono">dist/</code></li>
-            <li>• Workers Static Assets (<code className="font-mono">wrangler.jsonc</code>) + Pages (<code className="font-mono">public/_redirects</code>)</li>
+            <li>• Workers Static Assets (<code className="font-mono">wrangler.jsonc</code> SPA fallback)</li>
             <li>• Secret <code className="font-mono">GEMINI_API_KEY</code> isolated server-side in <code className="font-mono">worker/index.ts</code></li>
             <li>• Primary Admin Login Route: <code className="font-mono">/mahmud</code></li>
           </ul>

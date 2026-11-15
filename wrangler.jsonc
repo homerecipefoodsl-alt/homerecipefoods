@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "home-recipe-foods",
+  "name": "homerecipefoods",
   "main": "worker/index.ts",
   "compatibility_date": "2025-04-01",
   "assets": {
