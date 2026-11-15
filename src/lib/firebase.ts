@@ -124,10 +124,14 @@ export const rtdb = rtdbInstance;
 
 export async function applyAuthPersistence(rememberSession: boolean): Promise<void> {
   if (!authInstance) return;
-  await setPersistence(
-    authInstance,
-    rememberSession ? browserLocalPersistence : browserSessionPersistence
-  );
+  try {
+    await setPersistence(
+      authInstance,
+      rememberSession ? browserLocalPersistence : browserSessionPersistence
+    );
+  } catch (err) {
+    console.warn('Firebase Auth persistence fallback:', err);
+  }
 }
 
 export function requireDb(): Firestore {

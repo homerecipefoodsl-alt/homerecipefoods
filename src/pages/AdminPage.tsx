@@ -124,6 +124,7 @@ export function MahmudLoginScreen() {
   const [resetIdentifier, setResetIdentifier] = useState('');
   const [resetSending, setResetSending] = useState(false);
   const [resetMessage, setResetMessage] = useState<string | null>(null);
+  const [resetError, setResetError] = useState<string | null>(null);
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -149,14 +150,17 @@ export function MahmudLoginScreen() {
     if (!resetIdentifier.trim()) return;
     setResetSending(true);
     setResetMessage(null);
+    setResetError(null);
     try {
       await sendAdminPasswordReset(resetIdentifier);
       setResetMessage(
         'If an active administrator account matches that username or email, a password reset link has been sent.'
       );
-    } catch {
-      setResetMessage(
-        'Unable to send reset email right now. Verify Firebase Auth settings for ai-studio-applet-webapp-e4b0f.'
+    } catch (err) {
+      setResetError(
+        err instanceof Error
+          ? err.message
+          : 'Unable to send reset email right now. Verify Firebase Auth settings for ai-studio-applet-webapp-e4b0f.'
       );
     } finally {
       setResetSending(false);
@@ -224,6 +228,12 @@ export function MahmudLoginScreen() {
                 </div>
               )}
 
+              {resetError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-xs font-semibold text-[#B91C1C]">
+                  {resetError}
+                </div>
+              )}
+
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
                   Username or Email
@@ -252,6 +262,7 @@ export function MahmudLoginScreen() {
                 onClick={() => {
                   setForgotMode(false);
                   setResetMessage(null);
+                  setResetError(null);
                 }}
                 className="w-full cursor-pointer text-center text-xs font-semibold text-[#57534E] hover:text-[#1C1917]"
               >

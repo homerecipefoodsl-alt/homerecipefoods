@@ -342,70 +342,82 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
         // Ensure primary Super Admin RBAC & Admin records exist on first verified password login
         if (isPrimarySuperAdminEmail) {
-          const rbacSnap = await getDoc(rbacRef);
-          if (!rbacSnap.exists()) {
-            await setDoc(rbacRef, {
-              email: emailLower,
-              uid: currentUser.uid,
-              username: PRIMARY_SUPER_ADMIN_USERNAME,
-              displayName: currentUser.displayName || 'Mahmud (Super Admin)',
-              role: 'super_admin',
-              status: 'active',
-              addedByEmail: 'system-bootstrap',
-              createdAt: now,
-              updatedAt: now,
-            });
-          } else {
-            const rbacData = rbacSnap.data() as RbacRoleEntry;
-            if (!rbacData.uid || !rbacData.username) {
-              await updateDoc(rbacRef, {
+          try {
+            const rbacSnap = await getDoc(rbacRef);
+            if (!rbacSnap.exists()) {
+              await setDoc(rbacRef, {
+                email: emailLower,
                 uid: currentUser.uid,
-                username: rbacData.username || PRIMARY_SUPER_ADMIN_USERNAME,
-                displayName:
-                  currentUser.displayName || rbacData.displayName || 'Super Admin',
+                username: PRIMARY_SUPER_ADMIN_USERNAME,
+                displayName: currentUser.displayName || 'Mahmud (Super Admin)',
+                role: 'super_admin',
+                status: 'active',
+                addedByEmail: 'system-bootstrap',
+                createdAt: now,
+                updatedAt: now,
+              });
+            } else {
+              const rbacData = rbacSnap.data() as RbacRoleEntry;
+              if (!rbacData.uid || !rbacData.username) {
+                await updateDoc(rbacRef, {
+                  uid: currentUser.uid,
+                  username: rbacData.username || PRIMARY_SUPER_ADMIN_USERNAME,
+                  displayName:
+                    currentUser.displayName || rbacData.displayName || 'Super Admin',
+                  updatedAt: now,
+                });
+              }
+            }
+          } catch (bootstrapErr) {
+            console.warn('Super Admin RBAC bootstrap sync warning:', bootstrapErr);
+          }
+
+          try {
+            const adminSnap = await getDoc(adminRef);
+            if (!adminSnap.exists()) {
+              await setDoc(adminRef, {
+                uid: currentUser.uid,
+                email: emailLower,
+                username: PRIMARY_SUPER_ADMIN_USERNAME,
+                display_name: currentUser.displayName || 'Mahmud (Super Admin)',
+                role: 'super_admin',
+                active: true,
+                created_at: now,
+                updated_at: now,
+                last_login_at: now,
+              });
+            } else {
+              await updateDoc(adminRef, {
+                last_login_at: now,
+                updated_at: now,
+              });
+            }
+          } catch (adminSyncErr) {
+            console.warn('Super Admin profile sync warning:', adminSyncErr);
+          }
+
+          try {
+            const usernameRef = doc(
+              activeDb,
+              'admin_usernames',
+              PRIMARY_SUPER_ADMIN_USERNAME
+            );
+            const usernameSnap = await getDoc(usernameRef);
+            if (!usernameSnap.exists()) {
+              await setDoc(usernameRef, {
+                username: PRIMARY_SUPER_ADMIN_USERNAME,
+                email: emailLower,
+                active: true,
                 updatedAt: now,
               });
             }
-          }
-
-          const adminSnap = await getDoc(adminRef);
-          if (!adminSnap.exists()) {
-            await setDoc(adminRef, {
-              uid: currentUser.uid,
-              email: emailLower,
-              username: PRIMARY_SUPER_ADMIN_USERNAME,
-              display_name: currentUser.displayName || 'Mahmud (Super Admin)',
-              role: 'super_admin',
-              active: true,
-              created_at: now,
-              updated_at: now,
-              last_login_at: now,
-            });
-          } else {
-            await updateDoc(adminRef, {
-              last_login_at: now,
-              updated_at: now,
-            });
-          }
-
-          const usernameRef = doc(
-            activeDb,
-            'admin_usernames',
-            PRIMARY_SUPER_ADMIN_USERNAME
-          );
-          const usernameSnap = await getDoc(usernameRef);
-          if (!usernameSnap.exists()) {
-            await setDoc(usernameRef, {
-              username: PRIMARY_SUPER_ADMIN_USERNAME,
-              email: emailLower,
-              active: true,
-              updatedAt: now,
-            });
+          } catch (usernameSyncErr) {
+            console.warn('Super Admin username sync warning:', usernameSyncErr);
           }
         }
 
         // Read authoritative RBAC + admin profile
-        let resolvedRole: UserRole = 'customer';
+        let resolvedRole: UserRole = isPrimarySuperAdminEmail ? 'super_admin' : 'customer';
         let resolvedStatus: AccountStatus = 'active';
         let resolvedAdminRecord: AdminRecord | null = null;
 
@@ -1084,6 +1096,85 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [user, writeActivityLogInternal]
   );
 
+  const mapFirebaseAuthError = (
+    err: unknown
+  ): { message: string; countAsFailedAttempt: boolean } => {
+    const code =
+      err && typeof err === 'object' && 'code' in err
+        ? String((err as { code?: unknown }).code || '')
+        : '';
+
+    switch (code) {
+      case 'auth/invalid-credential':
+      case 'auth/wrong-password':
+      case 'auth/user-not-found':
+        return {
+          message: 'Username/email or password is incorrect.',
+          countAsFailedAttempt: true,
+        };
+      case 'auth/invalid-email':
+        return {
+          message: 'Please enter a valid email address or admin username.',
+          countAsFailedAttempt: false,
+        };
+      case 'auth/operation-not-allowed':
+        return {
+          message:
+            'Firebase Email/Password sign-in is disabled in project ai-studio-applet-webapp-e4b0f. Enable Email/Password in Firebase Console → Authentication → Sign-in method.',
+          countAsFailedAttempt: false,
+        };
+      case 'auth/user-disabled':
+        return {
+          message: 'This administrator account has been disabled in Firebase Authentication.',
+          countAsFailedAttempt: false,
+        };
+      case 'auth/too-many-requests':
+        return {
+          message:
+            'Too many login attempts in Firebase Authentication. Please wait a few minutes or use Forgot Password.',
+          countAsFailedAttempt: false,
+        };
+      case 'auth/unauthorized-domain':
+        return {
+          message:
+            'This domain is not authorized in Firebase Authentication. Add it under Firebase Console → Authentication → Settings → Authorized domains.',
+          countAsFailedAttempt: false,
+        };
+      case 'auth/network-request-failed':
+        return {
+          message:
+            'Network error connecting to Firebase Authentication. Please check your internet connection and try again.',
+          countAsFailedAttempt: false,
+        };
+      case 'auth/invalid-api-key':
+      case 'auth/app-not-authorized':
+      case 'auth/configuration-not-found':
+        return {
+          message:
+            'Firebase Authentication configuration error for project ai-studio-applet-webapp-e4b0f.',
+          countAsFailedAttempt: false,
+        };
+      default:
+        return {
+          message:
+            err instanceof Error && err.message
+              ? err.message
+              : 'Unable to sign in with Firebase Authentication.',
+          countAsFailedAttempt: false,
+        };
+    }
+  };
+
+  const recordFailedAttempt = (currentAttempts: number) => {
+    const nextAttempts = currentAttempts + 1;
+    const nextLock =
+      nextAttempts >= MAX_LOGIN_ATTEMPTS
+        ? Date.now() + BASE_LOCKOUT_MS * Math.pow(2, nextAttempts - MAX_LOGIN_ATTEMPTS)
+        : 0;
+    writeLoginGuard({ attempts: nextAttempts, lockedUntil: nextLock });
+    if (nextLock) setLoginLockoutUntil(nextLock);
+  };
+
   // Email/Password + Username Login ONLY (NO Google Login!)
   const signInAdminWithCredentials = async (
     identifier: string,
@@ -1118,93 +1209,127 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         if (usernameSnap.exists()) {
           const mapping = usernameSnap.data() as AdminUsernameMapping;
           if (!mapping.active || !mapping.email) {
+            recordFailedAttempt(guard.attempts);
             throw genericError;
           }
           resolvedEmail = mapping.email.trim().toLowerCase();
         } else if (cleanId === PRIMARY_SUPER_ADMIN_USERNAME) {
           resolvedEmail = PRIMARY_SUPER_ADMIN_EMAIL;
         } else {
-          // Record failed attempt silently without leaking existence
-          const nextAttempts = guard.attempts + 1;
-          const nextLock =
-            nextAttempts >= MAX_LOGIN_ATTEMPTS
-              ? Date.now() + BASE_LOCKOUT_MS * Math.pow(2, nextAttempts - MAX_LOGIN_ATTEMPTS)
-              : 0;
-          writeLoginGuard({ attempts: nextAttempts, lockedUntil: nextLock });
-          if (nextLock) setLoginLockoutUntil(nextLock);
+          recordFailedAttempt(guard.attempts);
           throw genericError;
         }
       } catch (err) {
         if (err === genericError) throw genericError;
+        const fsCode =
+          err && typeof err === 'object' && 'code' in err
+            ? String((err as { code?: unknown }).code || '')
+            : '';
+        if (fsCode === 'unavailable' || fsCode === 'network-request-failed') {
+          throw new Error(
+            'Unable to reach Firebase Firestore to look up username. You may also sign in directly with your admin email address.'
+          );
+        }
         if (cleanId === PRIMARY_SUPER_ADMIN_USERNAME) {
           resolvedEmail = PRIMARY_SUPER_ADMIN_EMAIL;
         } else {
+          recordFailedAttempt(guard.attempts);
           throw genericError;
         }
       }
     }
 
+    await applyAuthPersistence(rememberSession);
+
+    let cred;
     try {
-      await applyAuthPersistence(rememberSession);
-      const cred = await signInWithEmailAndPassword(auth, resolvedEmail, password);
-
-      // Verify user has password provider and authorized role
-      const isPasswordAuth = cred.user.providerData.some(
-        (p) => p.providerId === 'password'
-      );
-      if (!isPasswordAuth) {
-        await signOut(auth);
-        throw genericError;
+      cred = await signInWithEmailAndPassword(auth, resolvedEmail, password);
+    } catch (authErr) {
+      const mapped = mapFirebaseAuthError(authErr);
+      if (mapped.countAsFailedAttempt) {
+        recordFailedAttempt(guard.attempts);
       }
-
-      const emailLower = (cred.user.email || resolvedEmail).toLowerCase();
-      const isBootstrapSuperAdmin = emailLower === PRIMARY_SUPER_ADMIN_EMAIL;
-
-      if (!cred.user.emailVerified) {
-        if (isBootstrapSuperAdmin) {
-          writeLoginGuard({ attempts: 0, lockedUntil: 0 });
-          setLoginLockoutUntil(0);
-          return;
-        }
-        await signOut(auth);
-        throw genericError;
-      }
-
-      const rbacSnap = await getDoc(doc(db, 'rbac_roles', emailLower));
-      const adminSnap = await getDoc(doc(db, 'admins', cred.user.uid));
-
-      const hasActiveRbac =
-        rbacSnap.exists() && (rbacSnap.data() as RbacRoleEntry).status === 'active';
-      const hasActiveAdmin =
-        adminSnap.exists() && (adminSnap.data() as AdminRecord).active === true;
-
-      if (!isBootstrapSuperAdmin && !hasActiveRbac && !hasActiveAdmin) {
-        await signOut(auth);
-        throw genericError;
-      }
-
-      // Reset brute-force guard on success & log login
-      writeLoginGuard({ attempts: 0, lockedUntil: 0 });
-      setLoginLockoutUntil(0);
-      await writeActivityLogInternal(
-        cred.user.uid,
-        emailLower,
-        'login',
-        'auth',
-        cred.user.uid,
-        emailLower,
-        'Admin portal email/password login'
-      );
-    } catch {
-      const nextAttempts = guard.attempts + 1;
-      const nextLock =
-        nextAttempts >= MAX_LOGIN_ATTEMPTS
-          ? Date.now() + BASE_LOCKOUT_MS * Math.pow(2, nextAttempts - MAX_LOGIN_ATTEMPTS)
-          : 0;
-      writeLoginGuard({ attempts: nextAttempts, lockedUntil: nextLock });
-      if (nextLock) setLoginLockoutUntil(nextLock);
-      throw genericError;
+      throw new Error(mapped.message);
     }
+
+    // Password authentication succeeded; verify provider, token, and RBAC authorization
+    const isPasswordAuth = cred.user.providerData.some(
+      (p) => p.providerId === 'password'
+    );
+    if (!isPasswordAuth) {
+      await signOut(auth);
+      throw new Error('Email/password authentication is required for Admin access.');
+    }
+
+    try {
+      await cred.user.getIdToken(true);
+    } catch {
+      // Proceed with active credential token
+    }
+
+    // Reset failed-attempt lockout since Firebase Auth password succeeded
+    writeLoginGuard({ attempts: 0, lockedUntil: 0 });
+    setLoginLockoutUntil(0);
+
+    const emailLower = (cred.user.email || resolvedEmail).trim().toLowerCase();
+    const isBootstrapSuperAdmin = emailLower === PRIMARY_SUPER_ADMIN_EMAIL;
+
+    // If email is not yet verified, allow MahmudLoginRoute to present the verification screen
+    // (onAuthStateChanged keeps staffRole = null until emailVerified === true).
+    if (!cred.user.emailVerified) {
+      return;
+    }
+
+    let rbacEntry: RbacRoleEntry | null = null;
+    let adminEntry: AdminRecord | null = null;
+
+    try {
+      const rbacSnap = await getDoc(doc(db, 'rbac_roles', emailLower));
+      if (rbacSnap.exists()) {
+        rbacEntry = rbacSnap.data() as RbacRoleEntry;
+      }
+    } catch {
+      // Non-fatal: inspect admins/{uid} fallback
+    }
+
+    try {
+      const adminSnap = await getDoc(doc(db, 'admins', cred.user.uid));
+      if (adminSnap.exists()) {
+        adminEntry = adminSnap.data() as AdminRecord;
+      }
+    } catch {
+      // Non-fatal
+    }
+
+    const isDisabled =
+      rbacEntry?.status === 'disabled' || adminEntry?.active === false;
+    const hasActiveRbac = rbacEntry?.status === 'active';
+    const hasActiveAdmin = adminEntry?.active === true;
+
+    if (!isBootstrapSuperAdmin) {
+      if (isDisabled) {
+        await signOut(auth);
+        throw new Error(
+          'This administrator account has been disabled. Contact the Super Admin.'
+        );
+      }
+      if (!hasActiveRbac && !hasActiveAdmin) {
+        await signOut(auth);
+        throw new Error(
+          `Signed in as ${emailLower}, but this account is not registered as an active Admin or Support Agent.`
+        );
+      }
+    }
+
+    await writeActivityLogInternal(
+      cred.user.uid,
+      emailLower,
+      'login',
+      'auth',
+      cred.user.uid,
+      emailLower,
+      'Admin portal email/password login'
+    );
   };
 
   const resendAdminVerificationEmail = async (): Promise<void> => {
@@ -1246,8 +1371,19 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
     try {
       await sendPasswordResetEmail(auth, emailToReset);
-    } catch {
-      // Never disclose account existence
+    } catch (err) {
+      const code =
+        err && typeof err === 'object' && 'code' in err
+          ? String((err as { code?: unknown }).code || '')
+          : '';
+      if (
+        code === 'auth/operation-not-allowed' ||
+        code === 'auth/unauthorized-domain' ||
+        code === 'auth/network-request-failed'
+      ) {
+        throw new Error(mapFirebaseAuthError(err).message);
+      }
+      // Do not disclose account existence for auth/user-not-found
     }
   };
 
