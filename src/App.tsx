@@ -37,15 +37,22 @@ const NotFoundPage = lazy(() =>
 
 class AppErrorBoundary extends React.Component<
   { children: React.ReactNode },
-  { hasError: boolean }
+  { hasError: boolean; errorDetail: string }
 > {
   constructor(props: { children: React.ReactNode }) {
     super(props);
-    this.state = { hasError: false };
+    this.state = { hasError: false, errorDetail: '' };
   }
 
-  static getDerivedStateFromError() {
-    return { hasError: true };
+  static getDerivedStateFromError(error: Error) {
+    return {
+      hasError: true,
+      errorDetail: error?.message ? String(error.message).slice(0, 180) : '',
+    };
+  }
+
+  componentDidCatch(error: Error) {
+    console.error('Application boundary caught error:', error?.message || error);
   }
 
   render() {
@@ -58,13 +65,27 @@ class AppErrorBoundary extends React.Component<
           <p className="mt-2 text-sm text-[#57534E]">
             অনুগ্রহ করে পৃষ্ঠাটি রিলোড করুন অথবা একটু পর আবার চেষ্টা করুন।
           </p>
-          <button
-            type="button"
-            onClick={() => window.location.reload()}
-            className="mt-5 cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#B91C1C]"
-          >
-            পৃষ্ঠা রিলোড করুন
-          </button>
+          {this.state.errorDetail && (
+            <p className="mt-3 rounded-lg border border-[#E7E5E4] bg-[#FAFAF8] px-3 py-2 font-mono text-[11px] text-[#57534E]">
+              {this.state.errorDetail}
+            </p>
+          )}
+          <div className="mt-5 flex flex-wrap justify-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => this.setState({ hasError: false, errorDetail: '' })}
+              className="cursor-pointer rounded-lg border border-[#D6D3D1] px-5 py-2.5 text-sm font-semibold text-[#1C1917] hover:border-[#1C1917]"
+            >
+              পুনরায় চেষ্টা করুন
+            </button>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#B91C1C]"
+            >
+              পৃষ্ঠা রিলোড করুন
+            </button>
+          </div>
         </div>
       );
     }

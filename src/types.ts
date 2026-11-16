@@ -77,6 +77,7 @@ export interface RbacRoleEntry {
   email: string;
   uid: string;
   username?: string;
+  name?: string;
   displayName: string;
   phone?: string;
   managerId?: string;
@@ -95,6 +96,7 @@ export interface AdminRecord {
   uid: string;
   email: string;
   username: string;
+  name?: string;
   display_name: string;
   phone?: string;
   manager_id?: string;
@@ -119,6 +121,7 @@ export interface AdminUsernameMapping {
 export interface UserAccount {
   uid: string;
   email: string;
+  name?: string;
   displayName: string;
   photoUrl: string;
   phone?: string;

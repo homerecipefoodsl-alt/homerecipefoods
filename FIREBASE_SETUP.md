@@ -21,7 +21,7 @@ This application connects strictly to the existing Firebase project **`ai-studio
 3. Enable **Email/Password** (Google/Facebook/social login providers are intentionally omitted from `/mahmud`).
 4. Go to **Authentication → Settings → Authorized domains** and add:
    - `localhost` (for local development)
-   - Your Cloudflare Workers / Pages domain (e.g. `home-recipe-foods.workers.dev` or `home-recipe-foods.pages.dev`)
+   - Your Cloudflare Workers / Pages domain (e.g. `homerecipefoods.workers.dev` or `homerecipefoods.pages.dev`)
    - Your production custom domain (e.g. `homerecipefoods.com` and `www.homerecipefoods.com`)
 
 ---
@@ -35,9 +35,9 @@ Never hardcode a password in source files or environment variables.
 3. **Verify the email address**:
    - Firestore Security Rules require `request.auth.token.email_verified == true` for all privileged admin operations.
    - If the user was created manually in Firebase Console with `emailVerified: false`, sign in once at **`/mahmud`** and click **"Send Verification Email"**, check the Gmail inbox, then click **"I Verified · Refresh"**. (Alternatively, set `emailVerified: true` via Firebase Admin SDK.)
-4. Adding extra Admins or Support Agents:
-   - Sign in as Super Admin at `/mahmud` → open **Admin Management (`/mahmud/admins`)**.
-   - Create each staff member's Firebase Auth Email/Password user in Firebase Console → **Authentication → Users**, then register their email, optional username (e.g. `mahmud`, `support1`), and role (`admin` or `support_agent`) in **Admin Management**.
+4. Adding extra Admins, Managers, or Staff from the Admin Panel:
+   - Configure `FIREBASE_SERVICE_ACCOUNT_JSON` (downloaded from Firebase Console → Project Settings → Service Accounts for `ai-studio-applet-webapp-e4b0f`) as a Cloudflare Worker secret via `npx wrangler secret put FIREBASE_SERVICE_ACCOUNT_JSON`.
+   - Sign in as Super Admin at `/mahmud` → open **Admin Management (`/mahmud/admins`)** → use **Add New User** to create pre-verified Admin, Manager (with Unique Manager ID), and Staff accounts without signing out of your Super Admin session.
 
 ---
 

@@ -125,15 +125,32 @@ function generateUniqueManagerId(existingRoles: RbacRoleEntry[]): string {
 
 function formatFirestoreDate(val: unknown): string {
   if (!val) return '—';
-  if (typeof val === 'object' && val !== null && 'toDate' in val) {
-    const fn = (val as { toDate?: () => Date }).toDate;
-    if (typeof fn === 'function') {
-      return fn().toLocaleDateString('en-GB', {
-        day: '2-digit',
-        month: 'short',
-        year: 'numeric',
-      });
+  try {
+    if (typeof val === 'object' && val !== null && 'toDate' in val) {
+      const fn = (val as { toDate?: () => Date }).toDate;
+      if (typeof fn === 'function') {
+        const d = fn();
+        if (d instanceof Date && !Number.isNaN(d.getTime())) {
+          return d.toLocaleDateString('en-GB', {
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric',
+          });
+        }
+      }
     }
+    if (typeof val === 'string') {
+      const d = new Date(val);
+      if (!Number.isNaN(d.getTime())) {
+        return d.toLocaleDateString('en-GB', {
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric',
+        });
+      }
+    }
+  } catch {
+    return '—';
   }
   return '—';
 }
@@ -152,6 +169,8 @@ export function AdminRoleManagementPanel() {
 
   const [roles, setRoles] = useState<RbacRoleEntry[]>([]);
   const [hasAdminCredentials, setHasAdminCredentials] = useState<boolean | null>(null);
+  const [serviceAccountStatus, setServiceAccountStatus] = useState<string | null>(null);
+  const [serviceAccountMessage, setServiceAccountMessage] = useState<string | null>(null);
 
   // Add New User Form State
   const [creationMode, setCreationMode] = useState<'new_auth' | 'existing_auth'>('new_auth');
@@ -229,9 +248,21 @@ export function AdminRoleManagementPanel() {
           headers: { Authorization: `Bearer ${idToken}` },
         });
         if (!resp.ok) return;
-        const data = (await resp.json()) as { hasAdminCredentials?: boolean };
-        if (active && typeof data.hasAdminCredentials === 'boolean') {
-          setHasAdminCredentials(data.hasAdminCredentials);
+        const data = (await resp.json()) as {
+          hasAdminCredentials?: boolean;
+          serviceAccountStatus?: string;
+          serviceAccountMessage?: string;
+        };
+        if (active) {
+          if (typeof data.hasAdminCredentials === 'boolean') {
+            setHasAdminCredentials(data.hasAdminCredentials);
+          }
+          if (typeof data.serviceAccountStatus === 'string') {
+            setServiceAccountStatus(data.serviceAccountStatus);
+          }
+          if (typeof data.serviceAccountMessage === 'string') {
+            setServiceAccountMessage(data.serviceAccountMessage);
+          }
         }
       } catch {
         // Ignore non-fatal capability probe
@@ -255,6 +286,27 @@ export function AdminRoleManagementPanel() {
       setManagerIdInput(generateUniqueManagerId(roles));
     }
   }, [roleInput, roles, managerIdInput]);
+
+  // All hooks MUST run before any conditional return to satisfy React Rules of Hooks
+  const filteredRoles = useMemo(() => {
+    return roles.filter((r) => {
+      if (!r) return false;
+      if (roleFilter !== 'all' && r.role !== roleFilter) return false;
+      if (statusFilter !== 'all' && r.status !== statusFilter) return false;
+      if (searchQuery.trim()) {
+        const q = searchQuery.trim().toLowerCase();
+        return (
+          (r.email || '').toLowerCase().includes(q) ||
+          (r.displayName || r.name || '').toLowerCase().includes(q) ||
+          (r.username || '').toLowerCase().includes(q) ||
+          (r.managerId || '').toLowerCase().includes(q) ||
+          (r.managerTitle || '').toLowerCase().includes(q) ||
+          (r.phone || '').toLowerCase().includes(q)
+        );
+      }
+      return true;
+    });
+  }, [roles, roleFilter, statusFilter, searchQuery]);
 
   if (!canManageManagers) {
     return null;
@@ -340,9 +392,9 @@ export function AdminRoleManagementPanel() {
     }
     if (
       cleanEmail === PRIMARY_SUPER_ADMIN_EMAIL ||
-      roles.some((r) => r.email.toLowerCase() === cleanEmail)
+      roles.some((r) => (r.email || '').toLowerCase() === cleanEmail)
     ) {
-      setFeedback({ type: 'err', text: 'This email is already registered.' });
+      setFeedback({ type: 'err', text: 'এই email দিয়ে ইতিমধ্যে একটি account রয়েছে।' });
       return;
     }
     if (cleanUsername && cleanUsername === 'mahmud') {
@@ -380,6 +432,13 @@ export function AdminRoleManagementPanel() {
       }
     }
     if (creationMode === 'new_auth') {
+      if (!isSuperAdmin) {
+        setFeedback({
+          type: 'err',
+          text: 'Only a verified Super Admin can create new Firebase Authentication user accounts.',
+        });
+        return;
+      }
       if (passwordInput.length < 8) {
         setFeedback({
           type: 'err',
@@ -405,9 +464,7 @@ export function AdminRoleManagementPanel() {
     setFeedback(null);
 
     let createdUid = '';
-    let rollbackToken = '';
-    let verificationEmailSent = false;
-    let authMode: 'admin_sdk' | 'identity_toolkit' | undefined;
+    let successHeadline = '';
 
     try {
       if (creationMode === 'new_auth') {
@@ -422,139 +479,117 @@ export function AdminRoleManagementPanel() {
             Authorization: `Bearer ${idToken}`,
           },
           body: JSON.stringify({
+            name: cleanName,
+            displayName: cleanName,
             email: cleanEmail,
             password: passwordInput,
-            displayName: cleanName,
+            phone: cleanPhone,
+            username: cleanUsername,
             role: effectiveRole,
+            permissions: sanitizedPermissions,
             status: statusInput,
+            ...(effectiveRole === 'manager'
+              ? {
+                  managerId: cleanManagerId,
+                  managerTitle: cleanManagerTitle || 'Store Manager',
+                }
+              : {}),
             allowSuperAdminCreation:
               effectiveRole === 'super_admin' &&
               isPrimarySuperAdmin &&
               allowSuperAdminCreation,
           }),
         });
-        const apiJson = (await apiResp.json()) as {
+
+        const rawText = await apiResp.text();
+        let apiJson: {
+          success?: boolean;
           ok?: boolean;
           uid?: string;
-          rollbackToken?: string;
-          verificationEmailSent?: boolean;
-          authMode?: 'admin_sdk' | 'identity_toolkit';
+          firestoreSynced?: boolean;
+          message?: string;
           error?: string;
-        };
-        if (!apiResp.ok || !apiJson.uid) {
-          throw new Error(apiJson.error || 'Failed to create Firebase Auth user.');
+          code?: string;
+        } = {};
+        try {
+          apiJson = JSON.parse(rawText) as typeof apiJson;
+        } catch {
+          throw new Error(
+            `Unexpected server response (HTTP ${apiResp.status}). Verify Worker /api/admin/create-user route is deployed.`
+          );
         }
+
+        if (!apiResp.ok || !apiJson.uid || (!apiJson.success && !apiJson.ok)) {
+          const detail = apiJson.message || apiJson.error || 'Failed to create Admin user.';
+          throw new Error(
+            apiJson.code && !detail.includes(apiJson.code)
+              ? `${detail} [${apiJson.code}]`
+              : detail
+          );
+        }
+
         createdUid = apiJson.uid;
-        rollbackToken = apiJson.rollbackToken || '';
-        verificationEmailSent = Boolean(apiJson.verificationEmailSent);
-        authMode = apiJson.authMode;
-      }
+        successHeadline =
+          apiJson.message ||
+          (effectiveRole === 'admin'
+            ? 'Admin successfully created'
+            : effectiveRole === 'manager'
+            ? 'Manager successfully created'
+            : 'Staff user successfully created');
+      } else {
+        const firestore = requireDb();
+        const now = serverTimestamp();
+        const batch = writeBatch(firestore);
+        const isActive = statusInput === 'active';
+        const creatorEmail = user?.email?.toLowerCase() || PRIMARY_SUPER_ADMIN_EMAIL;
 
-      const firestore = requireDb();
-      const now = serverTimestamp();
-      const batch = writeBatch(firestore);
-      const isActive = statusInput === 'active';
-      const creatorEmail = user?.email?.toLowerCase() || PRIMARY_SUPER_ADMIN_EMAIL;
-
-      const rbacPayload: Record<string, unknown> = {
-        email: cleanEmail,
-        uid: createdUid,
-        username: cleanUsername,
-        displayName: cleanName,
-        phone: cleanPhone,
-        permissions: sanitizedPermissions,
-        role: effectiveRole,
-        status: statusInput,
-        addedByEmail: creatorEmail,
-        createdBy: creatorEmail,
-        createdAt: now,
-        updatedAt: now,
-      };
-      if (effectiveRole === 'manager') {
-        rbacPayload.managerId = cleanManagerId;
-        rbacPayload.managerTitle = cleanManagerTitle || 'Store Manager';
-      }
-      batch.set(doc(firestore, 'rbac_roles', cleanEmail), rbacPayload);
-
-      if (createdUid) {
-        const adminPayload: Record<string, unknown> = {
-          uid: createdUid,
+        const rbacPayload: Record<string, unknown> = {
           email: cleanEmail,
+          uid: '',
           username: cleanUsername,
-          display_name: cleanName,
+          name: cleanName,
+          displayName: cleanName,
           phone: cleanPhone,
           permissions: sanitizedPermissions,
           role: effectiveRole,
-          active: isActive,
           status: statusInput,
-          created_by: creatorEmail,
-          created_at: now,
-          updated_at: now,
+          addedByEmail: creatorEmail,
+          createdBy: creatorEmail,
+          createdAt: now,
+          updatedAt: now,
         };
         if (effectiveRole === 'manager') {
-          adminPayload.manager_id = cleanManagerId;
-          adminPayload.manager_title = cleanManagerTitle || 'Store Manager';
+          rbacPayload.managerId = cleanManagerId;
+          rbacPayload.managerTitle = cleanManagerTitle || 'Store Manager';
         }
-        batch.set(doc(firestore, 'admins', createdUid), adminPayload);
+        batch.set(doc(firestore, 'rbac_roles', cleanEmail), rbacPayload);
 
-        if (isSuperAdmin) {
-          batch.set(doc(firestore, 'users', createdUid), {
-            uid: createdUid,
+        if (cleanUsername) {
+          batch.set(doc(firestore, 'admin_usernames', cleanUsername), {
+            username: cleanUsername,
             email: cleanEmail,
-            displayName: cleanName,
-            photoUrl: '',
-            phone: cleanPhone,
-            ...(effectiveRole === 'manager' ? { managerId: cleanManagerId } : {}),
-            permissions: sanitizedPermissions,
-            role: effectiveRole,
-            status: statusInput,
-            createdBy: creatorEmail,
-            createdAt: now,
+            active: isActive,
             updatedAt: now,
-            lastLoginAt: now,
           });
         }
-      }
 
-      if (cleanUsername) {
-        batch.set(doc(firestore, 'admin_usernames', cleanUsername), {
-          username: cleanUsername,
-          email: cleanEmail,
-          active: isActive,
-          updatedAt: now,
-        });
+        await batch.commit();
+        successHeadline = `Assigned ${ROLE_LABEL[effectiveRole]} permissions to existing Auth user ${cleanEmail}.`;
       }
 
       try {
-        await batch.commit();
-      } catch (fsErr) {
-        if ((createdUid || rollbackToken) && user) {
-          try {
-            const idToken = await user.getIdToken();
-            await fetch('/api/admin/rollback-user', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${idToken}`,
-              },
-              body: JSON.stringify({ uid: createdUid, rollbackToken }),
-            });
-          } catch {
-            // Best-effort rollback
-          }
-        }
-        throw fsErr;
+        await logAdminActivity(
+          'create_user',
+          'admins',
+          cleanEmail,
+          cleanManagerId || cleanUsername || cleanEmail,
+          `Created ${effectiveRole} (${cleanName}, status: ${statusInput})${
+            cleanManagerId ? ` [${cleanManagerId}]` : ''
+          }`
+        );
+      } catch {
+        // Activity logging must never fail the created user flow
       }
-
-      await logAdminActivity(
-        'create_user',
-        'admins',
-        cleanEmail,
-        cleanManagerId || cleanUsername || cleanEmail,
-        `Created ${effectiveRole} (${cleanName}, status: ${statusInput})${
-          cleanManagerId ? ` [${cleanManagerId}]` : ''
-        }`
-      );
 
       setNameInput('');
       setEmailInput('');
@@ -572,16 +607,8 @@ export function AdminRoleManagementPanel() {
         type: 'ok',
         text:
           creationMode === 'new_auth'
-            ? `User "${cleanName}" (${cleanEmail}) created as ${ROLE_LABEL[effectiveRole]}${
-                cleanManagerId ? ` · ID: ${cleanManagerId}` : ''
-              } (UID: ${createdUid}).${
-                authMode === 'admin_sdk'
-                  ? ' Account is pre-verified and ready to sign in immediately. Your Super Admin session remains active.'
-                  : verificationEmailSent
-                  ? ' Verification email sent (user must verify before first /mahmud login). Your Super Admin session remains active.'
-                  : ' Your Super Admin session remains active.'
-              }`
-            : `Assigned ${ROLE_LABEL[effectiveRole]} permissions to existing Auth user ${cleanEmail}.`,
+            ? `${successHeadline} · "${cleanName}" (${cleanEmail}) · UID: ${createdUid}. Your Super Admin session remains active.`
+            : successHeadline,
       });
     } catch (err) {
       setFeedback({
@@ -982,25 +1009,6 @@ export function AdminRoleManagementPanel() {
     }
   };
 
-  const filteredRoles = useMemo(() => {
-    return roles.filter((r) => {
-      if (roleFilter !== 'all' && r.role !== roleFilter) return false;
-      if (statusFilter !== 'all' && r.status !== statusFilter) return false;
-      if (searchQuery.trim()) {
-        const q = searchQuery.trim().toLowerCase();
-        return (
-          r.email.toLowerCase().includes(q) ||
-          (r.displayName || '').toLowerCase().includes(q) ||
-          (r.username || '').toLowerCase().includes(q) ||
-          (r.managerId || '').toLowerCase().includes(q) ||
-          (r.managerTitle || '').toLowerCase().includes(q) ||
-          (r.phone || '').toLowerCase().includes(q)
-        );
-      }
-      return true;
-    });
-  }, [roles, roleFilter, statusFilter, searchQuery]);
-
   const adminCount = roles.filter((r) => r.role === 'admin' && r.status === 'active').length;
   const managerCount = roles.filter((r) => r.role === 'manager' && r.status === 'active').length;
   const supportCount = roles.filter(
@@ -1031,22 +1039,24 @@ export function AdminRoleManagementPanel() {
                 <span className="font-mono font-semibold text-[#1C1917]">
                   {PRIMARY_SUPER_ADMIN_EMAIL}
                 </span>
-                . Server-side creation keeps your current Super Admin session signed in. Passwords are
-                never stored in Firestore or client storage.
+                . Server-side creation uses Firebase Admin SDK and keeps your current Super Admin
+                session signed in. Passwords are never stored in Firestore or client storage.
               </p>
               {hasAdminCredentials !== null && (
-                <p className="mt-1 text-[11px] font-medium text-[#44403C]">
-                  Auth Mode:{' '}
+                <div className="mt-1.5 text-[11px] font-medium text-[#44403C]">
+                  Admin SDK Status:{' '}
                   {hasAdminCredentials ? (
                     <span className="font-semibold text-emerald-700">
-                      Firebase Admin Service Account Active (instant pre-verified accounts + Auth disable/delete sync)
+                      Firebase Admin Service Account Active (pre-verified creation + atomic Firestore profile + Auth rollback)
                     </span>
                   ) : (
-                    <span className="font-semibold text-amber-800">
-                      Identity Toolkit REST Mode (sends email verification link to newly created users)
+                    <span className="font-semibold text-[#B91C1C]">
+                      Not Ready ({serviceAccountStatus || 'missing'}) —{' '}
+                      {serviceAccountMessage ||
+                        'Configure FIREBASE_SERVICE_ACCOUNT_JSON secret in Cloudflare Worker.'}
                     </span>
                   )}
-                </p>
+                </div>
               )}
             </div>
           </div>
@@ -1462,7 +1472,9 @@ export function AdminRoleManagementPanel() {
             <div className="mt-4 grid grid-cols-1 gap-3 text-xs sm:grid-cols-2">
               <div className="rounded-lg bg-[#FAFAF8] p-3">
                 <p className="text-[#78716C]">Role</p>
-                <p className="mt-0.5 font-bold text-[#1C1917]">{ROLE_LABEL[viewingEntry.role]}</p>
+                <p className="mt-0.5 font-bold text-[#1C1917]">
+                  {ROLE_LABEL[viewingEntry.role] || viewingEntry.role || 'Staff'}
+                </p>
               </div>
               <div className="rounded-lg bg-[#FAFAF8] p-3">
                 <p className="text-[#78716C]">Status</p>
@@ -1512,7 +1524,9 @@ export function AdminRoleManagementPanel() {
               <div className="flex flex-wrap gap-1.5">
                 {(viewingEntry.role === 'super_admin'
                   ? ALL_PERMISSION_DEFINITIONS.map((p) => p.key)
-                  : viewingEntry.permissions || DEFAULT_ROLE_PERMISSIONS[viewingEntry.role] || []
+                  : Array.isArray(viewingEntry.permissions)
+                  ? viewingEntry.permissions
+                  : DEFAULT_ROLE_PERMISSIONS[viewingEntry.role] || []
                 ).map((perm) => (
                   <span
                     key={perm}
@@ -1907,7 +1921,7 @@ export function AdminRoleManagementPanel() {
                                   : 'bg-emerald-50 text-emerald-700'
                               }`}
                             >
-                              {ROLE_LABEL[r.role]}
+                              {ROLE_LABEL[r.role] || r.role}
                             </span>
                             <p className="text-[11px] text-[#78716C]">
                               {permCount} permissions
@@ -2322,13 +2336,14 @@ export function AdminUserManagementPanel() {
   };
 
   const filtered = users.filter((u) => {
+    if (!u) return false;
     if (roleFilter !== 'all' && u.role !== roleFilter) return false;
     if (statusFilter !== 'all' && u.status !== statusFilter) return false;
     if (search.trim()) {
       const q = search.toLowerCase();
       return (
-        u.email.toLowerCase().includes(q) ||
-        u.displayName.toLowerCase().includes(q) ||
+        (u.email || '').toLowerCase().includes(q) ||
+        (u.displayName || u.name || '').toLowerCase().includes(q) ||
         (u.phone || '').toLowerCase().includes(q)
       );
     }
@@ -2412,7 +2427,7 @@ export function AdminUserManagementPanel() {
             <div className="mt-4 grid grid-cols-2 gap-3 text-xs">
               <div className="rounded-lg bg-[#FAFAF8] p-3">
                 <p className="text-[#78716C]">Role</p>
-                <p className="mt-0.5 font-bold">{ROLE_LABEL[viewingUser.role]}</p>
+                <p className="mt-0.5 font-bold">{ROLE_LABEL[viewingUser.role] || viewingUser.role}</p>
               </div>
               <div className="rounded-lg bg-[#FAFAF8] p-3">
                 <p className="text-[#78716C]">Status</p>
@@ -2582,7 +2597,7 @@ export function AdminUserManagementPanel() {
                       <td className="px-4 py-3">
                         {isPrimary || isSelf ? (
                           <span className="inline-flex items-center gap-1 rounded bg-[#1C1917] px-2.5 py-1 text-[11px] font-bold text-[#FACC15]">
-                            {ROLE_LABEL[u.role]}
+                            {ROLE_LABEL[u.role] || u.role}
                           </span>
                         ) : (
                           <select
@@ -2773,7 +2788,7 @@ export function AdminSecurityConfigPanel() {
             Cloudflare Worker Secret for Admin SDK Pre-Verified User Creation
           </p>
           <p className="mt-1 text-[11px]">
-            Optional: Add <code className="font-mono font-semibold">FIREBASE_SERVICE_ACCOUNT_JSON</code> as a Cloudflare Worker secret (<code className="font-mono">npx wrangler secret put FIREBASE_SERVICE_ACCOUNT_JSON</code>) so new accounts created by the Super Admin are pre-verified immediately and Auth disable/delete actions sync to Firebase Authentication. Never commit service account keys to Git or frontend code.
+            Required: Add <code className="font-mono font-semibold">FIREBASE_SERVICE_ACCOUNT_JSON</code> as a Cloudflare Worker secret (<code className="font-mono">npx wrangler secret put FIREBASE_SERVICE_ACCOUNT_JSON</code>) for project <code className="font-mono font-semibold">{firebasePublicInfo.expectedProjectId}</code> so Admin and Manager creation runs atomically on the Worker with pre-verified Auth accounts and Firestore profile sync. Never commit service account keys to Git or frontend code.
           </p>
         </div>
 

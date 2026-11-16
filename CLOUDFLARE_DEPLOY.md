@@ -10,7 +10,7 @@ All backend data, authentication, and storage remain connected directly to your 
 
 - **Frontend Build Output**: `dist/` (built via `bun run build` or `npm run build`)
 - **Cloudflare Workers Static Assets**: Configured in `wrangler.jsonc` (`"name": "homerecipefoods"`) with `not_found_handling: "single-page-application"` so `/`, `/products`, `/about`, `/contact`, `/complaint`, `/admin`, `/mahmud`, and `/mahmud/dashboard` all serve cleanly without `_redirects` infinite-loop errors.
-- **Secret Isolation**: `GEMINI_API_KEY` is stored **only** as a Cloudflare Worker secret (`wrangler secret put GEMINI_API_KEY`) and never bundled into `dist/`.
+- **Secret Isolation**: `FIREBASE_SERVICE_ACCOUNT_JSON` and `GEMINI_API_KEY` are stored **only** as Cloudflare Worker secrets (`wrangler secret put ...`) and never bundled into `dist/`.
 
 ---
 
@@ -38,10 +38,11 @@ npx wrangler deploy
 Verify that `dist/index.html` and `dist/assets/*` were generated cleanly (without `_redirects`).
 
 ### 3. Configure Secrets (One-Time)
-Update `"APP_URL"` in `wrangler.jsonc` if using a custom domain, then run:
+Update `"APP_URL"` in `wrangler.jsonc` if using a custom domain, then upload your Firebase Service Account JSON (for project `ai-studio-applet-webapp-e4b0f`) and Gemini API key:
 
 ```bash
 npx wrangler login
+npx wrangler secret put FIREBASE_SERVICE_ACCOUNT_JSON
 npx wrangler secret put GEMINI_API_KEY
 npx wrangler deploy
 ```

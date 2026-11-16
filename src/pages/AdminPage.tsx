@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -195,6 +195,70 @@ function PanelFallback() {
       <div className="h-7 w-7 animate-spin rounded-full border-2 border-[#E7E5E4] border-t-[#DC1F26]" />
     </div>
   );
+}
+
+class AdminPanelErrorBoundary extends React.Component<
+  { children: React.ReactNode; activeTab: string },
+  { hasError: boolean; errorMessage: string }
+> {
+  constructor(props: { children: React.ReactNode; activeTab: string }) {
+    super(props);
+    this.state = { hasError: false, errorMessage: '' };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return {
+      hasError: true,
+      errorMessage: error?.message || 'Unexpected admin panel rendering error.',
+    };
+  }
+
+  componentDidUpdate(prevProps: { activeTab: string }) {
+    if (prevProps.activeTab !== this.props.activeTab && this.state.hasError) {
+      this.setState({ hasError: false, errorMessage: '' });
+    }
+  }
+
+  componentDidCatch(error: Error) {
+    console.error('Admin panel error:', error?.message || error);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="rounded-xl border border-red-200 bg-white p-6">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-[#DC1F26]" />
+            <div>
+              <h3 className="font-display text-lg font-bold text-[#1C1917]">
+                এই অ্যাডমিন প্যানেলটি লোড করতে সমস্যা হয়েছে
+              </h3>
+              <p className="mt-1 text-xs text-[#57534E]">
+                {this.state.errorMessage || 'অনুগ্রহ করে পুনরায় চেষ্টা করুন অথবা পৃষ্ঠা রিলোড করুন।'}
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => this.setState({ hasError: false, errorMessage: '' })}
+                  className="cursor-pointer rounded-lg bg-[#1C1917] px-4 py-2 text-xs font-semibold text-white hover:bg-[#DC1F26]"
+                >
+                  Retry Panel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => window.location.reload()}
+                  className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold text-[#1C1917]"
+                >
+                  Reload Page
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 export function MahmudLoginScreen() {
@@ -943,7 +1007,8 @@ export function AdminPage() {
 
           {/* Main Workspace */}
           <div className="lg:col-span-9">
-            <Suspense fallback={<PanelFallback />}>
+            <AdminPanelErrorBoundary activeTab={activeTab}>
+              <Suspense fallback={<PanelFallback />}>
               {activeTab === 'dashboard' && hasPermission('dashboard_view') && (
                 <div className="space-y-6">
                   {isSuperAdmin && (
@@ -1335,6 +1400,7 @@ export function AdminPage() {
                 <AdminSecurityConfigPanel />
               )}
             </Suspense>
+            </AdminPanelErrorBoundary>
           </div>
         </div>
       </div>
