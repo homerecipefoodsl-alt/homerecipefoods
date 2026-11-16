@@ -38,27 +38,29 @@ import {
   handleFirestoreError,
   isFirebaseConfigured,
 } from '../lib/firebase';
-import type {
-  AccountStatus,
-  AdminRecord,
-  AdminUsernameMapping,
-  AiKnowledgeEntry,
-  Category,
-  DisplayLanguage,
-  GreetingConfig,
-  GreetingItem,
-  HeroSlide,
-  HomepageSection,
-  MediaItem,
-  Occasion,
-  Product,
-  RbacRoleEntry,
-  SeoSettings,
-  Showroom,
-  SiteSettings,
-  StaffRole,
-  UserAccount,
-  UserRole,
+import {
+  DEFAULT_ROLE_PERMISSIONS,
+  type AccountStatus,
+  type AdminRecord,
+  type AdminUsernameMapping,
+  type AiKnowledgeEntry,
+  type Category,
+  type DisplayLanguage,
+  type GreetingConfig,
+  type GreetingItem,
+  type HeroSlide,
+  type HomepageSection,
+  type MediaItem,
+  type Occasion,
+  type PermissionKey,
+  type Product,
+  type RbacRoleEntry,
+  type SeoSettings,
+  type Showroom,
+  type SiteSettings,
+  type StaffRole,
+  type UserAccount,
+  type UserRole,
 } from '../types';
 
 export const PRIMARY_SUPER_ADMIN_EMAIL = 'mdmahmudulhashan0@gmail.com';
@@ -155,6 +157,8 @@ interface StoreContextValue {
   authReady: boolean;
   userRole: UserRole | null;
   staffRole: StaffRole | null;
+  permissions: PermissionKey[];
+  hasPermission: (perm: PermissionKey) => boolean;
   adminProfile: AdminRecord | null;
   accountStatus: AccountStatus;
   isAdmin: boolean;
@@ -206,6 +210,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(!isFirebaseConfigured);
   const [userRole, setUserRole] = useState<UserRole | null>(null);
+  const [rbacPermissions, setRbacPermissions] = useState<PermissionKey[] | null>(null);
   const [adminProfile, setAdminProfile] = useState<AdminRecord | null>(null);
   const [accountStatus, setAccountStatus] = useState<AccountStatus>('active');
   const [adminCheckLoading, setAdminCheckLoading] = useState(isFirebaseConfigured);
@@ -297,6 +302,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       if (!currentUser || !currentUser.email) {
         setUserRole(currentUser ? 'customer' : null);
+        setRbacPermissions(null);
         setAdminProfile(null);
         setAccountStatus('active');
         setEmailVerificationRequired(false);
@@ -311,6 +317,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       );
       if (!hasPasswordProvider) {
         setUserRole('customer');
+        setRbacPermissions(null);
         setAdminProfile(null);
         setAccountStatus('active');
         setEmailVerificationRequired(false);
@@ -320,6 +327,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       if (!currentUser.emailVerified) {
         setUserRole('customer');
+        setRbacPermissions(null);
         setAdminProfile(null);
         setAccountStatus('active');
         setEmailVerificationRequired(true);
@@ -419,14 +427,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         // Read authoritative RBAC + admin profile
         let resolvedRole: UserRole = isPrimarySuperAdminEmail ? 'super_admin' : 'customer';
         let resolvedStatus: AccountStatus = 'active';
+        let resolvedPermissions: PermissionKey[] | null = isPrimarySuperAdminEmail
+          ? DEFAULT_ROLE_PERMISSIONS.super_admin
+          : null;
         let resolvedAdminRecord: AdminRecord | null = null;
+        let rbacSnapDataCache: RbacRoleEntry | null = null;
 
         try {
           const activeRbacSnap = await getDoc(rbacRef);
           if (activeRbacSnap.exists()) {
             const rbacData = activeRbacSnap.data() as RbacRoleEntry;
+            rbacSnapDataCache = rbacData;
             if (rbacData.status === 'active') {
               resolvedRole = rbacData.role;
+              resolvedPermissions = Array.isArray(rbacData.permissions)
+                ? rbacData.permissions
+                : DEFAULT_ROLE_PERMISSIONS[rbacData.role] ?? [];
               if (!rbacData.uid) {
                 try {
                   await updateDoc(rbacRef, {
@@ -441,7 +457,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
               }
             } else {
               resolvedRole = 'customer';
-              resolvedStatus = 'disabled';
+              resolvedStatus = rbacData.status === 'suspended' ? 'suspended' : 'disabled';
+              resolvedPermissions = [];
             }
           }
         } catch {
@@ -453,8 +470,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           if (adminSnap.exists()) {
             const aData = adminSnap.data() as AdminRecord;
             resolvedAdminRecord = aData;
-            if (aData.active && resolvedStatus !== 'disabled') {
+            const adminNonActive =
+              !aData.active || aData.status === 'disabled' || aData.status === 'suspended';
+            if (!adminNonActive && resolvedStatus === 'active') {
               resolvedRole = aData.role;
+              if (!resolvedPermissions) {
+                resolvedPermissions = Array.isArray(aData.permissions)
+                  ? aData.permissions
+                  : DEFAULT_ROLE_PERMISSIONS[aData.role] ?? [];
+              }
               if (!isPrimarySuperAdminEmail) {
                 try {
                   await updateDoc(adminRef, {
@@ -465,31 +489,41 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                   // Ignore if disallowed
                 }
               }
-            } else if (!aData.active) {
+            } else if (adminNonActive && !isPrimarySuperAdminEmail) {
               resolvedRole = 'customer';
-              resolvedStatus = 'disabled';
+              resolvedStatus = aData.status === 'suspended' ? 'suspended' : 'disabled';
+              resolvedPermissions = [];
             }
           } else if (
             !isPrimarySuperAdminEmail &&
             resolvedStatus === 'active' &&
-            (resolvedRole === 'admin' || resolvedRole === 'support_agent')
+            (resolvedRole === 'admin' ||
+              resolvedRole === 'manager' ||
+              resolvedRole === 'support_agent')
           ) {
             try {
-              const rbacSnapData = (await getDoc(rbacRef)).data() as
-                | RbacRoleEntry
-                | undefined;
               const staffUsername =
-                rbacSnapData?.username || emailLower.split('@')[0];
+                rbacSnapDataCache?.username || emailLower.split('@')[0];
               const newAdminDoc: AdminRecord = {
                 uid: currentUser.uid,
                 email: emailLower,
                 username: staffUsername,
                 display_name:
                   currentUser.displayName ||
-                  rbacSnapData?.displayName ||
+                  rbacSnapDataCache?.displayName ||
                   emailLower.split('@')[0],
+                ...(rbacSnapDataCache?.phone ? { phone: rbacSnapDataCache.phone } : {}),
+                ...(rbacSnapDataCache?.managerId
+                  ? { manager_id: rbacSnapDataCache.managerId }
+                  : {}),
+                ...(rbacSnapDataCache?.managerTitle
+                  ? { manager_title: rbacSnapDataCache.managerTitle }
+                  : {}),
+                permissions:
+                  resolvedPermissions ?? DEFAULT_ROLE_PERMISSIONS[resolvedRole] ?? [],
                 role: resolvedRole,
                 active: true,
+                status: 'active',
                 created_at: now,
                 updated_at: now,
                 last_login_at: now,
@@ -515,15 +549,21 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                 displayName: currentUser.displayName || emailLower.split('@')[0],
                 photoUrl: currentUser.photoURL || '',
                 role: resolvedRole,
-                status: 'active',
+                status: resolvedStatus,
                 createdAt: now,
                 updatedAt: now,
                 lastLoginAt: now,
               });
             } else {
               const existingUser = userSnap.data() as UserAccount;
-              if (existingUser.status === 'disabled') {
-                resolvedStatus = 'disabled';
+              if (
+                (existingUser.status === 'disabled' ||
+                  existingUser.status === 'suspended') &&
+                !isPrimarySuperAdminEmail
+              ) {
+                resolvedStatus = existingUser.status;
+                resolvedRole = 'customer';
+                resolvedPermissions = [];
               }
               await updateDoc(userRef, {
                 displayName:
@@ -540,21 +580,39 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         }
 
         setUserRole(resolvedRole);
+        setRbacPermissions(resolvedPermissions);
         setAdminProfile(resolvedAdminRecord);
         setAccountStatus(resolvedStatus);
 
-        // Live subscriptions so role/status changes apply immediately
+        let latestRbacStatus: AccountStatus = resolvedStatus;
+
+        // Live subscriptions so role/status/permission changes apply immediately
         unsubRbac = onSnapshot(
           rbacRef,
           (snap) => {
-            if (!snap.exists()) return;
+            if (!snap.exists()) {
+              if (!isPrimarySuperAdminEmail) {
+                latestRbacStatus = 'disabled';
+                setUserRole('customer');
+                setRbacPermissions([]);
+                setAccountStatus('disabled');
+              }
+              return;
+            }
             const r = snap.data() as RbacRoleEntry;
+            latestRbacStatus = r.status;
             if (r.status === 'active') {
               setUserRole(r.role);
+              setRbacPermissions(
+                Array.isArray(r.permissions)
+                  ? r.permissions
+                  : DEFAULT_ROLE_PERMISSIONS[r.role] ?? []
+              );
               setAccountStatus('active');
             } else {
               setUserRole('customer');
-              setAccountStatus('disabled');
+              setRbacPermissions([]);
+              setAccountStatus(r.status === 'suspended' ? 'suspended' : 'disabled');
             }
           },
           () => {}
@@ -566,11 +624,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             if (snap.exists()) {
               const a = snap.data() as AdminRecord;
               setAdminProfile(a);
-              if (!a.active) {
+              const adminNonActive =
+                !a.active || a.status === 'disabled' || a.status === 'suspended';
+              if (adminNonActive && !isPrimarySuperAdminEmail) {
                 setUserRole('customer');
-                setAccountStatus('disabled');
-              } else {
+                setRbacPermissions([]);
+                setAccountStatus(a.status === 'suspended' ? 'suspended' : 'disabled');
+              } else if (latestRbacStatus === 'active') {
                 setUserRole(a.role);
+                if (Array.isArray(a.permissions)) {
+                  setRbacPermissions(a.permissions);
+                }
                 setAccountStatus('active');
               }
             }
@@ -581,10 +645,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         unsubUserDoc = onSnapshot(
           userRef,
           (snap) => {
-            if (snap.exists()) {
+            if (snap.exists() && !isPrimarySuperAdminEmail) {
               const u = snap.data() as UserAccount;
-              if (u.status === 'disabled') {
-                setAccountStatus('disabled');
+              if (u.status === 'disabled' || u.status === 'suspended') {
+                setUserRole('customer');
+                setRbacPermissions([]);
+                setAccountStatus(u.status);
               }
             }
           },
@@ -593,6 +659,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       } catch (err) {
         console.error('Admin verification error:', err);
         setUserRole('customer');
+        setRbacPermissions(null);
         setAdminProfile(null);
         setAccountStatus('active');
       } finally {
@@ -1058,10 +1125,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const setLanguageMode = (lang: DisplayLanguage) => setLanguageOverride(lang);
 
   const staffRole: StaffRole | null = useMemo(() => {
-    if (accountStatus === 'disabled') return null;
+    if (accountStatus !== 'active') return null;
     if (
       userRole === 'super_admin' ||
       userRole === 'admin' ||
+      userRole === 'manager' ||
       userRole === 'support_agent'
     ) {
       return userRole;
@@ -1069,9 +1137,37 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     return null;
   }, [userRole, accountStatus]);
 
+  const permissions: PermissionKey[] = useMemo(() => {
+    if (!staffRole || accountStatus !== 'active') return [];
+    if (staffRole === 'super_admin') {
+      return DEFAULT_ROLE_PERMISSIONS.super_admin;
+    }
+    if (rbacPermissions !== null) {
+      return rbacPermissions;
+    }
+    return DEFAULT_ROLE_PERMISSIONS[staffRole] ?? [];
+  }, [staffRole, accountStatus, rbacPermissions]);
+
+  const hasPermission = useCallback(
+    (perm: PermissionKey): boolean => {
+      if (!staffRole || accountStatus !== 'active') return false;
+      if (staffRole === 'super_admin') return true;
+      return permissions.includes(perm);
+    },
+    [staffRole, accountStatus, permissions]
+  );
+
   const isSuperAdmin = staffRole === 'super_admin';
-  const isCatalogAdmin = staffRole === 'super_admin' || staffRole === 'admin';
-  const isSupportStaff = staffRole === 'super_admin' || staffRole === 'support_agent';
+  const isCatalogAdmin =
+    staffRole === 'super_admin' ||
+    hasPermission('products_view') ||
+    hasPermission('categories_manage') ||
+    hasPermission('showrooms_manage') ||
+    hasPermission('banners_manage');
+  const isSupportStaff =
+    staffRole === 'super_admin' ||
+    hasPermission('complaints_manage') ||
+    hasPermission('chat_manage');
   const isAdmin = staffRole !== null;
 
   const logAdminActivity = useCallback(
@@ -1301,22 +1397,30 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       // Non-fatal
     }
 
+    const isSuspended =
+      rbacEntry?.status === 'suspended' || adminEntry?.status === 'suspended';
     const isDisabled =
-      rbacEntry?.status === 'disabled' || adminEntry?.active === false;
+      rbacEntry?.status === 'disabled' ||
+      rbacEntry?.status === 'suspended' ||
+      adminEntry?.active === false ||
+      adminEntry?.status === 'disabled' ||
+      adminEntry?.status === 'suspended';
     const hasActiveRbac = rbacEntry?.status === 'active';
-    const hasActiveAdmin = adminEntry?.active === true;
+    const hasActiveAdmin = adminEntry?.active === true && adminEntry?.status !== 'suspended';
 
     if (!isBootstrapSuperAdmin) {
       if (isDisabled) {
         await signOut(auth);
         throw new Error(
-          'This administrator account has been disabled. Contact the Super Admin.'
+          isSuspended
+            ? 'This staff account has been suspended. Contact the Super Admin.'
+            : 'This administrator account has been disabled. Contact the Super Admin.'
         );
       }
       if (!hasActiveRbac && !hasActiveAdmin) {
         await signOut(auth);
         throw new Error(
-          `Signed in as ${emailLower}, but this account is not registered as an active Admin or Support Agent.`
+          `Signed in as ${emailLower}, but this account is not registered as an active Admin, Manager, or Support Agent.`
         );
       }
     }
@@ -1531,6 +1635,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         authReady,
         userRole,
         staffRole,
+        permissions,
+        hasPermission,
         adminProfile,
         accountStatus,
         isAdmin,

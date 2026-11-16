@@ -209,15 +209,15 @@ function MahmudLoginRoute() {
     );
   }
 
-  if (user && staffRole && accountStatus !== 'disabled') {
+  if (user && staffRole && accountStatus === 'active') {
     return <Navigate to="/mahmud/dashboard" replace />;
   }
 
-  if (user && (!staffRole || accountStatus === 'disabled')) {
+  if (user && (!staffRole || accountStatus !== 'active')) {
     return (
       <UnauthorizedAdminCard
         email={user.email}
-        disabled={accountStatus === 'disabled'}
+        disabled={accountStatus !== 'active'}
         needsVerification={emailVerificationRequired}
         onResendVerification={resendAdminVerificationEmail}
         onRefreshVerification={refreshAdminSession}
@@ -256,11 +256,11 @@ function ProtectedMahmudRoute() {
     return <Navigate to="/mahmud" replace />;
   }
 
-  if (!staffRole || accountStatus === 'disabled') {
+  if (!staffRole || accountStatus !== 'active') {
     return (
       <UnauthorizedAdminCard
         email={user.email}
-        disabled={accountStatus === 'disabled'}
+        disabled={accountStatus !== 'active'}
         needsVerification={emailVerificationRequired}
         onResendVerification={resendAdminVerificationEmail}
         onRefreshVerification={refreshAdminSession}

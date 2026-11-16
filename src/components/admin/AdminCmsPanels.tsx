@@ -594,11 +594,12 @@ export function AdminSeoPanel() {
 // ACTIVITY LOGS PANEL
 // ========================
 export function AdminActivityLogsPanel() {
-  const { isSuperAdmin } = useStore();
+  const { isSuperAdmin, hasPermission } = useStore();
+  const canViewLogs = isSuperAdmin || hasPermission('reports_view');
   const [logs, setLogs] = useState<ActivityLog[]>([]);
 
   useEffect(() => {
-    if (!db || !isSuperAdmin) {
+    if (!db || !canViewLogs) {
       setLogs([]);
       return;
     }
@@ -610,9 +611,9 @@ export function AdminActivityLogsPanel() {
       () => {}
     );
     return () => unsub();
-  }, [isSuperAdmin]);
+  }, [canViewLogs]);
 
-  if (!isSuperAdmin) return null;
+  if (!canViewLogs) return null;
 
   return (
     <div className="space-y-5">
@@ -675,11 +676,12 @@ export function AdminActivityLogsPanel() {
 // SYSTEM SETTINGS & CLOUDFLARE/FIREBASE STATUS PANEL
 // ========================
 export function AdminSystemSettingsPanel() {
-  const { isSuperAdmin, seedDemoCatalog } = useStore();
+  const { isSuperAdmin, hasPermission, seedDemoCatalog } = useStore();
+  const canViewSystem = isSuperAdmin || hasPermission('settings_view');
   const [seeding, setSeeding] = useState(false);
   const [seedResult, setSeedResult] = useState<string | null>(null);
 
-  if (!isSuperAdmin) return null;
+  if (!canViewSystem) return null;
 
   const handleSafeSeed = async () => {
     setSeeding(true);

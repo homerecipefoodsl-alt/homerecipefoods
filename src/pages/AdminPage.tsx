@@ -1,7 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
+  BadgeCheck,
+  BarChart3,
+  CheckCircle2,
   Database,
   Eye,
   EyeOff,
@@ -26,44 +29,118 @@ import {
   UserCog,
   Users,
 } from 'lucide-react';
-import { collection, onSnapshot, orderBy, query } from 'firebase/firestore';
+import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { BrandLogo } from '../components/BrandLogo';
-import {
-  AdminCategoriesPanel,
-  AdminOccasionsPanel,
-  AdminProductsPanel,
-  AdminShowroomsPanel,
-} from '../components/admin/AdminCatalogPanels';
-import {
-  AdminActivityLogsPanel,
-  AdminHomepageSectionsPanel,
-  AdminMediaLibraryPanel,
-  AdminSeoPanel,
-  AdminSystemSettingsPanel,
-} from '../components/admin/AdminCmsPanels';
-import {
-  AdminBannersPanel,
-  AdminComplaintsPanel,
-  AdminGreetingPanel,
-  AdminLiveChatPanel,
-  AdminSettingsPanel,
-} from '../components/admin/AdminEngagementPanels';
-import {
-  AdminRoleManagementPanel,
-  AdminSecurityConfigPanel,
-  AdminUserManagementPanel,
-} from '../components/admin/AdminRoleUserPanels';
 import { useStore } from '../context/StoreContext';
 import {
   OperationType,
   db,
   firebaseConnectionStatus,
   firebaseMissingFields,
+  firebasePublicInfo,
   handleFirestoreError,
   isFirebaseConfigured,
 } from '../lib/firebase';
-import type { ChatSession, Complaint, StaffRole } from '../types';
+import type {
+  ActivityLog,
+  ChatSession,
+  Complaint,
+  RbacRoleEntry,
+  StaffRole,
+  UserAccount,
+} from '../types';
+
+const AdminProductsPanel = lazy(() =>
+  import('../components/admin/AdminCatalogPanels').then((m) => ({
+    default: m.AdminProductsPanel,
+  }))
+);
+const AdminCategoriesPanel = lazy(() =>
+  import('../components/admin/AdminCatalogPanels').then((m) => ({
+    default: m.AdminCategoriesPanel,
+  }))
+);
+const AdminOccasionsPanel = lazy(() =>
+  import('../components/admin/AdminCatalogPanels').then((m) => ({
+    default: m.AdminOccasionsPanel,
+  }))
+);
+const AdminShowroomsPanel = lazy(() =>
+  import('../components/admin/AdminCatalogPanels').then((m) => ({
+    default: m.AdminShowroomsPanel,
+  }))
+);
+const AdminHomepageSectionsPanel = lazy(() =>
+  import('../components/admin/AdminCmsPanels').then((m) => ({
+    default: m.AdminHomepageSectionsPanel,
+  }))
+);
+const AdminMediaLibraryPanel = lazy(() =>
+  import('../components/admin/AdminCmsPanels').then((m) => ({
+    default: m.AdminMediaLibraryPanel,
+  }))
+);
+const AdminSeoPanel = lazy(() =>
+  import('../components/admin/AdminCmsPanels').then((m) => ({
+    default: m.AdminSeoPanel,
+  }))
+);
+const AdminActivityLogsPanel = lazy(() =>
+  import('../components/admin/AdminCmsPanels').then((m) => ({
+    default: m.AdminActivityLogsPanel,
+  }))
+);
+const AdminSystemSettingsPanel = lazy(() =>
+  import('../components/admin/AdminCmsPanels').then((m) => ({
+    default: m.AdminSystemSettingsPanel,
+  }))
+);
+const AdminBannersPanel = lazy(() =>
+  import('../components/admin/AdminEngagementPanels').then((m) => ({
+    default: m.AdminBannersPanel,
+  }))
+);
+const AdminGreetingPanel = lazy(() =>
+  import('../components/admin/AdminEngagementPanels').then((m) => ({
+    default: m.AdminGreetingPanel,
+  }))
+);
+const AdminComplaintsPanel = lazy(() =>
+  import('../components/admin/AdminEngagementPanels').then((m) => ({
+    default: m.AdminComplaintsPanel,
+  }))
+);
+const AdminLiveChatPanel = lazy(() =>
+  import('../components/admin/AdminEngagementPanels').then((m) => ({
+    default: m.AdminLiveChatPanel,
+  }))
+);
+const AdminSettingsPanel = lazy(() =>
+  import('../components/admin/AdminEngagementPanels').then((m) => ({
+    default: m.AdminSettingsPanel,
+  }))
+);
+const AdminRoleManagementPanel = lazy(() =>
+  import('../components/admin/AdminRoleUserPanels').then((m) => ({
+    default: m.AdminRoleManagementPanel,
+  }))
+);
+const AdminUserManagementPanel = lazy(() =>
+  import('../components/admin/AdminRoleUserPanels').then((m) => ({
+    default: m.AdminUserManagementPanel,
+  }))
+);
+const AdminSecurityConfigPanel = lazy(() =>
+  import('../components/admin/AdminRoleUserPanels').then((m) => ({
+    default: m.AdminSecurityConfigPanel,
+  }))
+);
+const AdminReportsPanel = lazy(() =>
+  import('../components/admin/AdminReportsPanel').then((m) => ({
+    default: m.AdminReportsPanel,
+  }))
+);
 
 export type AdminTab =
   | 'dashboard'
@@ -77,6 +154,7 @@ export type AdminTab =
   | 'complaints'
   | 'chat'
   | 'media'
+  | 'reports'
   | 'seo'
   | 'settings'
   | 'admins'
@@ -96,15 +174,28 @@ const ROLE_DISPLAY: Record<
   },
   admin: {
     label: 'Admin',
-    scope: 'Catalog & CMS Access · Products, Categories, Occasions, Showrooms, Banners & Greetings',
+    scope: 'Catalog & CMS Access · Products, Categories, Occasions, Showrooms, Banners & Reports',
     badgeClass: 'bg-[#FACC15] text-[#1C1917]',
+  },
+  manager: {
+    label: 'Manager',
+    scope: 'Delegated Operations Access · Assigned Modules & Unique Manager ID',
+    badgeClass: 'bg-[#FEFCE8] text-[#9A3412]',
   },
   support_agent: {
     label: 'Support Agent',
-    scope: 'Support Access · Customer Live Chat & Complaints Only',
+    scope: 'Support Access · Customer Live Chat & Complaints',
     badgeClass: 'bg-emerald-600 text-white',
   },
 };
+
+function PanelFallback() {
+  return (
+    <div className="flex items-center justify-center rounded-xl border border-[#E7E5E4] bg-white py-16">
+      <div className="h-7 w-7 animate-spin rounded-full border-2 border-[#E7E5E4] border-t-[#DC1F26]" />
+    </div>
+  );
+}
 
 export function MahmudLoginScreen() {
   const {
@@ -187,7 +278,7 @@ export function MahmudLoginScreen() {
               Home Recipe Foods
             </h1>
             <p className="mt-0.5 text-sm font-semibold text-[#57534E]">
-              Admin Login
+              Admin &amp; Manager Login
             </p>
           </div>
 
@@ -394,10 +485,11 @@ export function AdminPage() {
     user,
     authReady,
     staffRole,
+    permissions,
+    hasPermission,
+    adminProfile,
     accountStatus,
     isSuperAdmin,
-    isCatalogAdmin,
-    isSupportStaff,
     adminCheckLoading,
     firestoreEmpty,
     signOutAdmin,
@@ -406,6 +498,9 @@ export function AdminPage() {
 
   const [complaints, setComplaints] = useState<Complaint[]>([]);
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
+  const [staffRoles, setStaffRoles] = useState<RbacRoleEntry[]>([]);
+  const [registeredUsers, setRegisteredUsers] = useState<UserAccount[]>([]);
+  const [recentActivities, setRecentActivities] = useState<ActivityLog[]>([]);
   const [seeding, setSeeding] = useState(false);
   const [seedDone, setSeedDone] = useState(false);
 
@@ -413,49 +508,100 @@ export function AdminPage() {
     document.title = 'Admin Console – Home Recipe Foods';
   }, []);
 
-  // Only subscribe to private support collections when authenticated as Super Admin or Support Agent
+  const canComplaints = hasPermission('complaints_manage');
+  const canChat = hasPermission('chat_manage');
+  const canStaffDirectory = isSuperAdmin || hasPermission('manager_manage');
+  const canLogs = isSuperAdmin || hasPermission('dashboard_view') || hasPermission('reports_view');
+
+  // Granular Firestore subscriptions strictly aligned with user permissions
   useEffect(() => {
-    if (!authReady || !isSupportStaff || accountStatus === 'disabled' || !db) {
+    if (!authReady || !staffRole || accountStatus !== 'active' || !db) {
       setComplaints([]);
       setChatSessions([]);
+      setStaffRoles([]);
+      setRegisteredUsers([]);
+      setRecentActivities([]);
       return;
     }
 
     const activeDb = db;
+    const unsubs: Array<() => void> = [];
 
-    const unsubComplaints = onSnapshot(
-      query(collection(activeDb, 'complaints'), orderBy('createdAt', 'desc')),
-      (snap) => {
-        setComplaints(snap.docs.map((d) => d.data() as Complaint));
-      },
-      (err) => {
-        try {
-          handleFirestoreError(err, OperationType.LIST, 'complaints');
-        } catch {
-          // Handled cleanly
-        }
-      }
-    );
+    if (canComplaints) {
+      unsubs.push(
+        onSnapshot(
+          query(collection(activeDb, 'complaints'), orderBy('createdAt', 'desc')),
+          (snap) => setComplaints(snap.docs.map((d) => d.data() as Complaint)),
+          (err) => {
+            try {
+              handleFirestoreError(err, OperationType.LIST, 'complaints');
+            } catch {
+              // Handled cleanly
+            }
+          }
+        )
+      );
+    }
 
-    const unsubChats = onSnapshot(
-      query(collection(activeDb, 'chat_sessions'), orderBy('updatedAt', 'desc')),
-      (snap) => {
-        setChatSessions(snap.docs.map((d) => d.data() as ChatSession));
-      },
-      (err) => {
-        try {
-          handleFirestoreError(err, OperationType.LIST, 'chat_sessions');
-        } catch {
-          // Handled cleanly
-        }
-      }
-    );
+    if (canChat) {
+      unsubs.push(
+        onSnapshot(
+          query(collection(activeDb, 'chat_sessions'), orderBy('updatedAt', 'desc')),
+          (snap) => setChatSessions(snap.docs.map((d) => d.data() as ChatSession)),
+          (err) => {
+            try {
+              handleFirestoreError(err, OperationType.LIST, 'chat_sessions');
+            } catch {
+              // Handled cleanly
+            }
+          }
+        )
+      );
+    }
+
+    if (canStaffDirectory) {
+      unsubs.push(
+        onSnapshot(
+          collection(activeDb, 'rbac_roles'),
+          (snap) => setStaffRoles(snap.docs.map((d) => d.data() as RbacRoleEntry)),
+          () => {}
+        )
+      );
+    }
+
+    if (isSuperAdmin) {
+      unsubs.push(
+        onSnapshot(
+          collection(activeDb, 'users'),
+          (snap) => setRegisteredUsers(snap.docs.map((d) => d.data() as UserAccount)),
+          () => {}
+        )
+      );
+    }
+
+    if (canLogs) {
+      unsubs.push(
+        onSnapshot(
+          query(collection(activeDb, 'activity_logs'), orderBy('timestamp', 'desc'), limit(8)),
+          (snap) => setRecentActivities(snap.docs.map((d) => d.data() as ActivityLog)),
+          () => {}
+        )
+      );
+    }
 
     return () => {
-      unsubComplaints();
-      unsubChats();
+      unsubs.forEach((u) => u());
     };
-  }, [authReady, isSupportStaff, accountStatus]);
+  }, [
+    authReady,
+    staffRole,
+    accountStatus,
+    canComplaints,
+    canChat,
+    canStaffDirectory,
+    isSuperAdmin,
+    canLogs,
+  ]);
 
   const openComplaints = complaints.filter(
     (c) => c.status === 'New' || c.status === 'Reviewing' || c.status === 'In Progress'
@@ -465,87 +611,151 @@ export function AdminPage() {
   ).length;
   const activeChats = chatSessions.filter((s) => s.status !== 'closed').length;
 
+  const totalAdminsCount = staffRoles.filter(
+    (r) => r.role === 'admin' && r.status === 'active'
+  ).length;
+  const totalManagersCount = staffRoles.filter(
+    (r) => r.role === 'manager' && r.status === 'active'
+  ).length;
+
   const allowedNavItems = useMemo(() => {
-    if (!staffRole || accountStatus === 'disabled') return [];
+    if (!staffRole || accountStatus !== 'active') return [];
 
-    const items: { id: AdminTab; label: string; icon: React.ReactNode }[] = [
-      { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard className="h-4 w-4" /> },
-    ];
+    const items: { id: AdminTab; label: string; icon: React.ReactNode }[] = [];
 
-    if (isCatalogAdmin) {
+    if (hasPermission('dashboard_view')) {
+      items.push({
+        id: 'dashboard',
+        label: 'Dashboard',
+        icon: <LayoutDashboard className="h-4 w-4" />,
+      });
+    }
+
+    if (hasPermission('products_view')) {
+      items.push({
+        id: 'products',
+        label: 'Products',
+        icon: <Package className="h-4 w-4" />,
+      });
+    }
+
+    if (hasPermission('categories_manage')) {
       items.push(
-        { id: 'products', label: 'Products', icon: <Package className="h-4 w-4" /> },
         { id: 'categories', label: 'Categories', icon: <Grid className="h-4 w-4" /> },
-        { id: 'occasions', label: 'Occasions', icon: <Sparkles className="h-4 w-4" /> },
-        { id: 'showrooms', label: 'Showrooms', icon: <MapPin className="h-4 w-4" /> },
-        { id: 'homepage', label: 'Homepage Sections', icon: <LayoutTemplate className="h-4 w-4" /> },
+        { id: 'occasions', label: 'Occasions', icon: <Sparkles className="h-4 w-4" /> }
+      );
+    }
+
+    if (hasPermission('showrooms_manage')) {
+      items.push({
+        id: 'showrooms',
+        label: 'Showrooms',
+        icon: <MapPin className="h-4 w-4" />,
+      });
+    }
+
+    if (hasPermission('banners_manage')) {
+      items.push(
+        {
+          id: 'homepage',
+          label: 'Homepage Sections',
+          icon: <LayoutTemplate className="h-4 w-4" />,
+        },
         { id: 'banners', label: 'Hero Banners', icon: <Image className="h-4 w-4" /> },
-        { id: 'greetings', label: 'Greetings', icon: <MessageSquareText className="h-4 w-4" /> },
+        {
+          id: 'greetings',
+          label: 'Greetings',
+          icon: <MessageSquareText className="h-4 w-4" />,
+        },
         { id: 'media', label: 'Media Library', icon: <FileImage className="h-4 w-4" /> }
       );
     }
 
-    if (isSupportStaff) {
-      items.push(
-        {
-          id: 'complaints',
-          label: `Complaints (${openComplaints})`,
-          icon: <ShieldAlert className="h-4 w-4" />,
-        },
-        {
-          id: 'chat',
-          label: `Live Chat & AI (${activeChats})`,
-          icon: <MessageCircle className="h-4 w-4" />,
-        }
-      );
+    if (hasPermission('complaints_manage')) {
+      items.push({
+        id: 'complaints',
+        label: `Complaints (${openComplaints})`,
+        icon: <ShieldAlert className="h-4 w-4" />,
+      });
+    }
+
+    if (hasPermission('chat_manage')) {
+      items.push({
+        id: 'chat',
+        label: `Live Chat & AI (${activeChats})`,
+        icon: <MessageCircle className="h-4 w-4" />,
+      });
+    }
+
+    if (hasPermission('reports_view')) {
+      items.push({
+        id: 'reports',
+        label: 'Reports & Analytics',
+        icon: <BarChart3 className="h-4 w-4" />,
+      });
+    }
+
+    if (hasPermission('seo_manage')) {
+      items.push({
+        id: 'seo',
+        label: 'SEO & OpenGraph',
+        icon: <Search className="h-4 w-4" />,
+      });
+    }
+
+    if (hasPermission('settings_view')) {
+      items.push({
+        id: 'settings',
+        label: 'Website & AI Settings',
+        icon: <Settings className="h-4 w-4" />,
+      });
+    }
+
+    if (isSuperAdmin || hasPermission('manager_manage') || hasPermission('admin_manage')) {
+      items.push({
+        id: 'admins',
+        label: 'Admins & Managers',
+        icon: <UserCog className="h-4 w-4" />,
+      });
     }
 
     if (isSuperAdmin) {
-      items.push(
-        {
-          id: 'seo',
-          label: 'SEO & OpenGraph',
-          icon: <Search className="h-4 w-4" />,
-        },
-        {
-          id: 'settings',
-          label: 'Website & AI Settings',
-          icon: <Settings className="h-4 w-4" />,
-        },
-        {
-          id: 'admins',
-          label: 'Admin & Roles',
-          icon: <UserCog className="h-4 w-4" />,
-        },
-        {
-          id: 'users',
-          label: 'User Management',
-          icon: <Users className="h-4 w-4" />,
-        },
-        {
-          id: 'logs',
-          label: 'Activity Logs',
-          icon: <Activity className="h-4 w-4" />,
-        },
-        {
-          id: 'system',
-          label: 'System & Cloudflare',
-          icon: <Server className="h-4 w-4" />,
-        },
-        {
-          id: 'security',
-          label: 'Security & Firebase',
-          icon: <KeyRound className="h-4 w-4" />,
-        }
-      );
+      items.push({
+        id: 'users',
+        label: 'User Management',
+        icon: <Users className="h-4 w-4" />,
+      });
+    }
+
+    if (isSuperAdmin || hasPermission('reports_view')) {
+      items.push({
+        id: 'logs',
+        label: 'Activity Logs',
+        icon: <Activity className="h-4 w-4" />,
+      });
+    }
+
+    if (isSuperAdmin || hasPermission('settings_view')) {
+      items.push({
+        id: 'system',
+        label: 'System & Cloudflare',
+        icon: <Server className="h-4 w-4" />,
+      });
+    }
+
+    if (isSuperAdmin) {
+      items.push({
+        id: 'security',
+        label: 'Security & Firebase',
+        icon: <KeyRound className="h-4 w-4" />,
+      });
     }
 
     return items;
   }, [
     staffRole,
     accountStatus,
-    isCatalogAdmin,
-    isSupportStaff,
+    hasPermission,
     isSuperAdmin,
     openComplaints,
     activeChats,
@@ -556,7 +766,7 @@ export function AdminPage() {
     if (requested && allowedNavItems.some((item) => item.id === requested)) {
       return requested;
     }
-    return 'dashboard';
+    return allowedNavItems[0]?.id ?? 'dashboard';
   }, [section, allowedNavItems]);
 
   const selectTab = (nextTab: AdminTab) => {
@@ -586,7 +796,7 @@ export function AdminPage() {
     return <MahmudLoginScreen />;
   }
 
-  if (!staffRole || accountStatus === 'disabled') {
+  if (!staffRole || accountStatus !== 'active') {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#FAFAF8] px-4 py-20">
         <div className="w-full max-w-md overflow-hidden rounded-2xl border border-red-200 bg-white text-center shadow-sm">
@@ -596,12 +806,14 @@ export function AdminPage() {
           <div className="p-8">
             <ShieldAlert className="mx-auto h-10 w-10 text-[#DC1F26]" />
             <h1 className="font-display mt-3 text-2xl font-bold text-[#1C1917]">
-              {accountStatus === 'disabled'
+              {accountStatus === 'suspended'
+                ? 'অ্যাকাউন্ট স্থগিত করা হয়েছে (Suspended)'
+                : accountStatus === 'disabled'
                 ? 'অ্যাকাউন্ট নিষ্ক্রিয় করা হয়েছে'
                 : 'প্রবেশাধিকার সংরক্ষিত (403)'}
             </h1>
             <p className="mt-2 text-xs leading-relaxed text-[#57534E]">
-              আপনার অ্যাকাউন্টটি ({user.email}) অনুমোদিত অ্যাডমিন বা সাপোর্ট তালিকায় সক্রিয় নয় অথবা পাসওয়ার্ড-ভিত্তিক অ্যাডমিন লগইন নয়।
+              আপনার অ্যাকাউন্টটি ({user.email}) অনুমোদিত অ্যাডমিন, ম্যানেজার বা সাপোর্ট তালিকায় সক্রিয় নয় অথবা পাসওয়ার্ড-ভিত্তিক অ্যাডমিন লগইন নয়।
             </p>
             <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
               <Link
@@ -642,6 +854,12 @@ export function AdminPage() {
                   <Shield className="h-3 w-3" />
                   <span>{roleMeta.label}</span>
                 </span>
+                {adminProfile?.manager_id && (
+                  <span className="inline-flex items-center gap-1 rounded bg-white/10 px-2 py-0.5 font-mono text-[11px] font-bold text-[#FACC15]">
+                    <BadgeCheck className="h-3 w-3" />
+                    <span>{adminProfile.manager_id}</span>
+                  </span>
+                )}
                 <span className="text-xs font-semibold text-[#FACC15]">
                   Home Recipe Foods · /mahmud Console
                 </span>
@@ -725,109 +943,130 @@ export function AdminPage() {
 
           {/* Main Workspace */}
           <div className="lg:col-span-9">
-            {activeTab === 'dashboard' && (
-              <div className="space-y-6">
-                {isSuperAdmin && (
-                  <div className="rounded-xl border border-[#1C1917] bg-[#1C1917] p-5 text-white">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <span className="inline-flex items-center gap-1.5 rounded bg-[#DC1F26] px-2.5 py-0.5 text-[11px] font-bold text-white">
-                          <Shield className="h-3 w-3" />
-                          <span>Super Admin — Full Dynamic Control</span>
-                        </span>
-                        <h2 className="font-display mt-2 text-xl font-bold text-white">
-                          সম্পূর্ণ ডাইনামিক ওয়েবসাইট, সিএমএস এবং সিকিউরিটি নিয়ন্ত্রণ সক্রিয়
-                        </h2>
-                        <p className="mt-1 text-xs text-[#D6D3D1]">
-                          প্রোডাক্ট, ক্যাটাগরি, হোমপেজ সেকশন, ব্যানার, গ্রিটিংস, মিডিয়া, এসইও, অভিযোগ, লাইভ চ্যাট, AI Knowledge এবং অ্যাডমিন রোল এখান থেকেই পরিচালনা করুন।
-                        </p>
+            <Suspense fallback={<PanelFallback />}>
+              {activeTab === 'dashboard' && hasPermission('dashboard_view') && (
+                <div className="space-y-6">
+                  {isSuperAdmin && (
+                    <div className="rounded-xl border border-[#1C1917] bg-[#1C1917] p-5 text-white">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <span className="inline-flex items-center gap-1.5 rounded bg-[#DC1F26] px-2.5 py-0.5 text-[11px] font-bold text-white">
+                            <Shield className="h-3 w-3" />
+                            <span>Super Admin — Enterprise Governance</span>
+                          </span>
+                          <h2 className="font-display mt-2 text-xl font-bold text-white">
+                            সম্পূর্ণ ডাইনামিক ওয়েবসাইট, সিএমএস, ম্যানেজার এবং সিকিউরিটি নিয়ন্ত্রণ সক্রিয়
+                          </h2>
+                          <p className="mt-1 text-xs text-[#D6D3D1]">
+                            প্রোডাক্ট, ক্যাটাগরি, শোরুম, হোমপেজ সেকশন, ব্যানার, গ্রিটিংস, মিডিয়া, এসইও, অভিযোগ, লাইভ চ্যাট এবং Admin/Manager পারমিশন এখান থেকে পরিচালনা করুন।
+                          </p>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )}
-
-                {isCatalogAdmin && firestoreEmpty && !seedDone && (
-                  <div className="flex flex-col justify-between gap-3 rounded-xl border border-[#FDE047] bg-[#FEFCE8] p-5 sm:flex-row sm:items-center">
-                    <div>
-                      <h3 className="text-sm font-bold text-[#1C1917]">
-                        Firestore ডাটাবেসে অনুপস্থিত ডিফল্ট ক্যাটালগ যোগ করুন
-                      </h3>
-                      <p className="mt-0.5 text-xs text-[#57534E]">
-                        এটি নন-ডেস্ট্রাক্টিভ: শুধুমাত্র অনুপস্থিত ডকুমেন্টগুলো যোগ করবে এবং বিদ্যমান কোনো ডাটা পরিবর্তন করবে না।
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleSeed}
-                      disabled={seeding}
-                      className="shrink-0 cursor-pointer rounded-lg bg-[#DC1F26] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#B91C1C]"
-                    >
-                      {seeding ? 'সেভ হচ্ছে...' : 'নিরাপদে সেভ করুন'}
-                    </button>
-                  </div>
-                )}
-
-                <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-                  {isCatalogAdmin && (
-                    <>
-                      <div className="rounded-xl border border-[#E7E5E4] bg-white p-4">
-                        <p className="text-xs text-[#78716C]">Total Products</p>
-                        <p className="font-mono tabular-nums mt-1 text-2xl font-bold text-[#1C1917]">
-                          {allProducts.filter((p) => !p.deleted).length}
-                        </p>
-                      </div>
-                      <div className="rounded-xl border border-[#E7E5E4] bg-white p-4">
-                        <p className="text-xs text-[#78716C]">Total Categories</p>
-                        <p className="font-mono tabular-nums mt-1 text-2xl font-bold text-[#1C1917]">
-                          {allCategories.filter((c) => !c.deleted).length}
-                        </p>
-                      </div>
-                      <div className="rounded-xl border border-[#E7E5E4] bg-white p-4">
-                        <p className="text-xs text-[#78716C]">Total Showrooms</p>
-                        <p className="font-mono tabular-nums mt-1 text-2xl font-bold text-[#1C1917]">
-                          {allShowrooms.filter((s) => !s.deleted).length}
-                        </p>
-                      </div>
-                    </>
                   )}
 
-                  {isSupportStaff && (
-                    <>
+                  {hasPermission('products_add') && firestoreEmpty && !seedDone && (
+                    <div className="flex flex-col justify-between gap-3 rounded-xl border border-[#FDE047] bg-[#FEFCE8] p-5 sm:flex-row sm:items-center">
+                      <div>
+                        <h3 className="text-sm font-bold text-[#1C1917]">
+                          Firestore ডাটাবেসে অনুপস্থিত ডিফল্ট ক্যাটালগ যোগ করুন
+                        </h3>
+                        <p className="mt-0.5 text-xs text-[#57534E]">
+                          এটি নন-ডেস্ট্রাক্টিভ: শুধুমাত্র অনুপস্থিত ডকুমেন্টগুলো যোগ করবে এবং বিদ্যমান কোনো ডাটা পরিবর্তন করবে না।
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleSeed}
+                        disabled={seeding}
+                        className="shrink-0 cursor-pointer rounded-lg bg-[#DC1F26] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#B91C1C]"
+                      >
+                        {seeding ? 'সেভ হচ্ছে...' : 'নিরাপদে সেভ করুন'}
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Enterprise KPI Cards */}
+                  <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+                    <div className="rounded-xl border border-[#E7E5E4] bg-white p-4">
+                      <p className="text-xs text-[#78716C]">Total Products</p>
+                      <p className="font-mono mt-1 text-2xl font-bold tabular-nums text-[#1C1917]">
+                        {allProducts.filter((p) => !p.deleted).length}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-[#E7E5E4] bg-white p-4">
+                      <p className="text-xs text-[#78716C]">Total Categories</p>
+                      <p className="font-mono mt-1 text-2xl font-bold tabular-nums text-[#1C1917]">
+                        {allCategories.filter((c) => !c.deleted).length}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-[#E7E5E4] bg-white p-4">
+                      <p className="text-xs text-[#78716C]">Total Showrooms</p>
+                      <p className="font-mono mt-1 text-2xl font-bold tabular-nums text-[#1C1917]">
+                        {allShowrooms.filter((s) => !s.deleted).length}
+                      </p>
+                    </div>
+
+                    {canComplaints && (
+                      <>
+                        <div className="rounded-xl border border-[#E7E5E4] bg-white p-4">
+                          <p className="text-xs text-[#78716C]">Open Complaints</p>
+                          <p className="font-mono mt-1 text-2xl font-bold tabular-nums text-[#DC1F26]">
+                            {openComplaints}
+                          </p>
+                        </div>
+                        <div className="rounded-xl border border-[#E7E5E4] bg-white p-4">
+                          <p className="text-xs text-[#78716C]">Resolved Complaints</p>
+                          <p className="font-mono mt-1 text-2xl font-bold tabular-nums text-emerald-700">
+                            {resolvedComplaints}
+                          </p>
+                        </div>
+                      </>
+                    )}
+
+                    {canChat && (
                       <div className="rounded-xl border border-[#E7E5E4] bg-white p-4">
-                        <p className="text-xs text-[#78716C]">Active Chats</p>
-                        <p className="font-mono tabular-nums mt-1 text-2xl font-bold text-[#DC1F26]">
+                        <p className="text-xs text-[#78716C]">Active Live Chats</p>
+                        <p className="font-mono mt-1 text-2xl font-bold tabular-nums text-[#DC1F26]">
                           {activeChats}
                         </p>
                       </div>
-                      <div className="rounded-xl border border-[#E7E5E4] bg-white p-4">
-                        <p className="text-xs text-[#78716C]">Total Complaints</p>
-                        <p className="font-mono tabular-nums mt-1 text-2xl font-bold text-[#1C1917]">
-                          {complaints.length}
-                        </p>
-                      </div>
-                      <div className="rounded-xl border border-[#E7E5E4] bg-white p-4">
-                        <p className="text-xs text-[#78716C]">Open Complaints</p>
-                        <p className="font-mono tabular-nums mt-1 text-2xl font-bold text-[#DC1F26]">
-                          {openComplaints}
-                        </p>
-                      </div>
-                      <div className="rounded-xl border border-[#E7E5E4] bg-white p-4">
-                        <p className="text-xs text-[#78716C]">Resolved</p>
-                        <p className="font-mono tabular-nums mt-1 text-2xl font-bold text-emerald-700">
-                          {resolvedComplaints}
-                        </p>
-                      </div>
-                    </>
-                  )}
-                </div>
+                    )}
 
-                <div className="rounded-xl border border-[#E7E5E4] bg-white p-6">
-                  <h3 className="font-display text-xl font-bold text-[#1C1917]">
-                    দ্রুত ব্যবস্থাপনা (Quick Actions)
-                  </h3>
-                  <div className="mt-4 flex flex-wrap gap-3">
-                    {isCatalogAdmin && (
+                    {canStaffDirectory && (
                       <>
+                        <div className="rounded-xl border border-[#E7E5E4] bg-white p-4">
+                          <p className="text-xs text-[#78716C]">Total Admins</p>
+                          <p className="font-mono mt-1 text-2xl font-bold tabular-nums text-[#1C1917]">
+                            {totalAdminsCount}
+                          </p>
+                        </div>
+                        <div className="rounded-xl border border-[#E7E5E4] bg-white p-4">
+                          <p className="text-xs text-[#78716C]">Total Managers</p>
+                          <p className="font-mono mt-1 text-2xl font-bold tabular-nums text-[#9A3412]">
+                            {totalManagersCount}
+                          </p>
+                        </div>
+                      </>
+                    )}
+
+                    {isSuperAdmin && (
+                      <div className="rounded-xl border border-[#E7E5E4] bg-white p-4">
+                        <p className="text-xs text-[#78716C]">Registered Users</p>
+                        <p className="font-mono mt-1 text-2xl font-bold tabular-nums text-[#1C1917]">
+                          {registeredUsers.length}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Quick Actions */}
+                  <div className="rounded-xl border border-[#E7E5E4] bg-white p-6">
+                    <h3 className="font-display text-xl font-bold text-[#1C1917]">
+                      দ্রুত ব্যবস্থাপনা (Quick Actions)
+                    </h3>
+                    <div className="mt-4 flex flex-wrap gap-3">
+                      {hasPermission('products_view') && (
                         <button
                           type="button"
                           onClick={() => selectTab('products')}
@@ -835,31 +1074,44 @@ export function AdminPage() {
                         >
                           + পণ্য যোগ / এডিট
                         </button>
+                      )}
+                      {hasPermission('categories_manage') && (
                         <button
                           type="button"
-                          onClick={() => selectTab('homepage')}
+                          onClick={() => selectTab('categories')}
                           className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
                         >
-                          হোমপেজ সেকশন সাজান
+                          ক্যাটাগরি ও উপলক্ষ
                         </button>
+                      )}
+                      {hasPermission('showrooms_manage') && (
                         <button
                           type="button"
-                          onClick={() => selectTab('banners')}
+                          onClick={() => selectTab('showrooms')}
                           className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
                         >
-                          হিরো ব্যানার পরিবর্তন
+                          শোরুম ব্যবস্থাপনা
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => selectTab('greetings')}
-                          className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
-                        >
-                          গ্রিটিং বার্তা পরিবর্তন
-                        </button>
-                      </>
-                    )}
-                    {isSupportStaff && (
-                      <>
+                      )}
+                      {hasPermission('banners_manage') && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => selectTab('homepage')}
+                            className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
+                          >
+                            হোমপেজ সেকশন সাজান
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => selectTab('banners')}
+                            className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
+                          >
+                            হিরো ব্যানার পরিবর্তন
+                          </button>
+                        </>
+                      )}
+                      {canComplaints && (
                         <button
                           type="button"
                           onClick={() => selectTab('complaints')}
@@ -867,6 +1119,8 @@ export function AdminPage() {
                         >
                           অভিযোগ দেখুন ({openComplaints})
                         </button>
+                      )}
+                      {canChat && (
                         <button
                           type="button"
                           onClick={() => selectTab('chat')}
@@ -874,61 +1128,213 @@ export function AdminPage() {
                         >
                           লাইভ চ্যাট ও AI ({activeChats})
                         </button>
-                      </>
-                    )}
-                    {isSuperAdmin && (
-                      <>
+                      )}
+                      {hasPermission('reports_view') && (
+                        <button
+                          type="button"
+                          onClick={() => selectTab('reports')}
+                          className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
+                        >
+                          Reports &amp; CSV Export
+                        </button>
+                      )}
+                      {(isSuperAdmin || hasPermission('manager_manage')) && (
                         <button
                           type="button"
                           onClick={() => selectTab('admins')}
-                          className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
+                          className="cursor-pointer rounded-lg border border-[#1C1917] bg-[#1C1917] px-4 py-2 text-xs font-semibold text-white hover:bg-[#DC1F26]"
                         >
-                          Admin &amp; Roles পরিচালনা
+                          + Create Admin / Manager
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => selectTab('settings')}
-                          className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
-                        >
-                          Website &amp; AI Settings
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => selectTab('seo')}
-                          className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
-                        >
-                          SEO &amp; OpenGraph
-                        </button>
-                      </>
-                    )}
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Live Activity & Complaints + System Status */}
+                  <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+                    <div className="rounded-xl border border-[#E7E5E4] bg-white p-5 lg:col-span-7">
+                      <div className="flex items-center justify-between border-b border-[#F5F4F0] pb-3">
+                        <h3 className="text-sm font-bold text-[#1C1917]">
+                          Recent Activities
+                        </h3>
+                        {(isSuperAdmin || hasPermission('reports_view')) && (
+                          <button
+                            type="button"
+                            onClick={() => selectTab('logs')}
+                            className="cursor-pointer text-[11px] font-semibold text-[#DC1F26] hover:underline"
+                          >
+                            View All →
+                          </button>
+                        )}
+                      </div>
+                      {recentActivities.length === 0 ? (
+                        <p className="py-6 text-center text-xs text-[#78716C]">
+                          এখনো কোনো সাম্প্রতিক অ্যাক্টিভিটি লগ পাওয়া যায়নি।
+                        </p>
+                      ) : (
+                        <div className="divide-y divide-[#F5F4F0] text-xs">
+                          {recentActivities.slice(0, 6).map((act) => (
+                            <div
+                              key={act.id}
+                              className="flex items-start justify-between gap-3 py-2.5"
+                            >
+                              <div>
+                                <p className="font-semibold text-[#1C1917]">
+                                  <span className="rounded bg-[#F5F4F0] px-1.5 py-0.5 font-mono text-[10px] uppercase">
+                                    {act.action}
+                                  </span>{' '}
+                                  <span className="ml-1">{act.record_label || act.module}</span>
+                                </p>
+                                <p className="mt-0.5 text-[11px] text-[#57534E]">
+                                  {act.summary || act.module} ·{' '}
+                                  <span className="font-mono">{act.admin_email}</span>
+                                </p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-6 lg:col-span-5">
+                      <div className="rounded-xl border border-[#E7E5E4] bg-white p-5">
+                        <h3 className="border-b border-[#F5F4F0] pb-3 text-sm font-bold text-[#1C1917]">
+                          System &amp; Session Status
+                        </h3>
+                        <ul className="mt-3 space-y-2.5 text-xs">
+                          <li className="flex items-center justify-between">
+                            <span className="text-[#57534E]">Firebase Project</span>
+                            <span className="font-mono font-semibold text-[#1C1917]">
+                              {firebasePublicInfo.projectId}
+                            </span>
+                          </li>
+                          <li className="flex items-center justify-between">
+                            <span className="text-[#57534E]">Database Connection</span>
+                            <span className="inline-flex items-center gap-1 font-semibold text-emerald-700">
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                              {firebaseConnectionStatus}
+                            </span>
+                          </li>
+                          <li className="flex items-center justify-between">
+                            <span className="text-[#57534E]">Active Permissions</span>
+                            <span className="rounded bg-[#FAFAF8] px-2 py-0.5 font-mono font-bold text-[#1C1917]">
+                              {permissions.length} modules
+                            </span>
+                          </li>
+                          <li className="flex items-center justify-between">
+                            <span className="text-[#57534E]">Storefront Mode</span>
+                            <span className="rounded bg-[#FEFCE8] px-2 py-0.5 font-semibold text-[#9A3412]">
+                              Showcase Only
+                            </span>
+                          </li>
+                        </ul>
+                      </div>
+
+                      {canComplaints && (
+                        <div className="rounded-xl border border-[#E7E5E4] bg-white p-5">
+                          <div className="flex items-center justify-between border-b border-[#F5F4F0] pb-3">
+                            <h3 className="text-sm font-bold text-[#1C1917]">
+                              Recent Complaints
+                            </h3>
+                            <button
+                              type="button"
+                              onClick={() => selectTab('complaints')}
+                              className="cursor-pointer text-[11px] font-semibold text-[#DC1F26] hover:underline"
+                            >
+                              Manage →
+                            </button>
+                          </div>
+                          {complaints.length === 0 ? (
+                            <p className="py-5 text-center text-xs text-[#78716C]">
+                              কোনো অভিযোগ জমা পড়েনি।
+                            </p>
+                          ) : (
+                            <div className="divide-y divide-[#F5F4F0] text-xs">
+                              {complaints.slice(0, 4).map((c) => (
+                                <div key={c.id} className="flex items-center justify-between py-2.5">
+                                  <div>
+                                    <p className="font-semibold text-[#1C1917]">
+                                      {c.customerName}
+                                    </p>
+                                    <p className="font-mono text-[10px] text-[#78716C]">
+                                      {c.referenceCode} · {c.showroomName}
+                                    </p>
+                                  </div>
+                                  <span className="rounded bg-red-50 px-2 py-0.5 text-[10px] font-bold text-[#DC1F26]">
+                                    {c.status}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
+              )}
 
-            {activeTab === 'products' && isCatalogAdmin && <AdminProductsPanel />}
-            {activeTab === 'categories' && isCatalogAdmin && <AdminCategoriesPanel />}
-            {activeTab === 'occasions' && isCatalogAdmin && <AdminOccasionsPanel />}
-            {activeTab === 'showrooms' && isCatalogAdmin && <AdminShowroomsPanel />}
-            {activeTab === 'homepage' && isCatalogAdmin && <AdminHomepageSectionsPanel />}
-            {activeTab === 'banners' && isCatalogAdmin && <AdminBannersPanel />}
-            {activeTab === 'greetings' && isCatalogAdmin && <AdminGreetingPanel />}
-            {activeTab === 'media' && isCatalogAdmin && <AdminMediaLibraryPanel />}
+              {activeTab === 'products' && hasPermission('products_view') && (
+                <AdminProductsPanel />
+              )}
+              {activeTab === 'categories' && hasPermission('categories_manage') && (
+                <AdminCategoriesPanel />
+              )}
+              {activeTab === 'occasions' && hasPermission('categories_manage') && (
+                <AdminOccasionsPanel />
+              )}
+              {activeTab === 'showrooms' && hasPermission('showrooms_manage') && (
+                <AdminShowroomsPanel />
+              )}
+              {activeTab === 'homepage' && hasPermission('banners_manage') && (
+                <AdminHomepageSectionsPanel />
+              )}
+              {activeTab === 'banners' && hasPermission('banners_manage') && (
+                <AdminBannersPanel />
+              )}
+              {activeTab === 'greetings' && hasPermission('banners_manage') && (
+                <AdminGreetingPanel />
+              )}
+              {activeTab === 'media' && hasPermission('banners_manage') && (
+                <AdminMediaLibraryPanel />
+              )}
 
-            {activeTab === 'complaints' && isSupportStaff && (
-              <AdminComplaintsPanel complaints={complaints} />
-            )}
-            {activeTab === 'chat' && isSupportStaff && (
-              <AdminLiveChatPanel sessions={chatSessions} />
-            )}
+              {activeTab === 'complaints' && hasPermission('complaints_manage') && (
+                <AdminComplaintsPanel complaints={complaints} />
+              )}
+              {activeTab === 'chat' && hasPermission('chat_manage') && (
+                <AdminLiveChatPanel sessions={chatSessions} />
+              )}
+              {activeTab === 'reports' && hasPermission('reports_view') && (
+                <AdminReportsPanel
+                  complaints={complaints}
+                  chatSessions={chatSessions}
+                  staffRoles={staffRoles}
+                  recentActivities={recentActivities}
+                />
+              )}
 
-            {activeTab === 'seo' && isSuperAdmin && <AdminSeoPanel />}
-            {activeTab === 'settings' && isSuperAdmin && <AdminSettingsPanel />}
-            {activeTab === 'admins' && isSuperAdmin && <AdminRoleManagementPanel />}
-            {activeTab === 'users' && isSuperAdmin && <AdminUserManagementPanel />}
-            {activeTab === 'logs' && isSuperAdmin && <AdminActivityLogsPanel />}
-            {activeTab === 'system' && isSuperAdmin && <AdminSystemSettingsPanel />}
-            {activeTab === 'security' && isSuperAdmin && <AdminSecurityConfigPanel />}
+              {activeTab === 'seo' && hasPermission('seo_manage') && <AdminSeoPanel />}
+              {activeTab === 'settings' && hasPermission('settings_view') && (
+                <AdminSettingsPanel />
+              )}
+              {activeTab === 'admins' &&
+                (isSuperAdmin || hasPermission('manager_manage') || hasPermission('admin_manage')) && (
+                  <AdminRoleManagementPanel />
+                )}
+              {activeTab === 'users' && isSuperAdmin && <AdminUserManagementPanel />}
+              {activeTab === 'logs' &&
+                (isSuperAdmin || hasPermission('reports_view')) && (
+                  <AdminActivityLogsPanel />
+                )}
+              {activeTab === 'system' &&
+                (isSuperAdmin || hasPermission('settings_view')) && (
+                  <AdminSystemSettingsPanel />
+                )}
+              {activeTab === 'security' && isSuperAdmin && (
+                <AdminSecurityConfigPanel />
+              )}
+            </Suspense>
           </div>
         </div>
       </div>

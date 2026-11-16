@@ -1,18 +1,93 @@
-export type StaffRole = 'super_admin' | 'admin' | 'support_agent';
+export type StaffRole = 'super_admin' | 'admin' | 'manager' | 'support_agent';
 export type UserRole = StaffRole | 'customer';
-export type AccountStatus = 'active' | 'disabled';
+export type AccountStatus = 'active' | 'disabled' | 'suspended';
 export type PublishStatus = 'draft' | 'published' | 'archived';
+
+export type PermissionKey =
+  | 'dashboard_view'
+  | 'products_view'
+  | 'products_add'
+  | 'products_edit'
+  | 'products_delete'
+  | 'categories_manage'
+  | 'showrooms_manage'
+  | 'banners_manage'
+  | 'complaints_manage'
+  | 'chat_manage'
+  | 'reports_view'
+  | 'seo_manage'
+  | 'settings_view'
+  | 'admin_manage'
+  | 'manager_manage';
+
+export const ALL_PERMISSION_DEFINITIONS: ReadonlyArray<{
+  key: PermissionKey;
+  label: string;
+  labelBn: string;
+  group: 'Catalog' | 'CMS' | 'Support' | 'Governance';
+}> = [
+  { key: 'dashboard_view', label: 'Dashboard View', labelBn: 'ড্যাশবোর্ড দেখা', group: 'Governance' },
+  { key: 'products_view', label: 'Products View', labelBn: 'পণ্য দেখা', group: 'Catalog' },
+  { key: 'products_add', label: 'Products Add', labelBn: 'পণ্য যোগ', group: 'Catalog' },
+  { key: 'products_edit', label: 'Products Edit', labelBn: 'পণ্য এডিট', group: 'Catalog' },
+  { key: 'products_delete', label: 'Products Delete', labelBn: 'পণ্য স্থায়ী ডিলিট', group: 'Catalog' },
+  { key: 'categories_manage', label: 'Categories & Occasions', labelBn: 'ক্যাটাগরি ও উপলক্ষ', group: 'Catalog' },
+  { key: 'showrooms_manage', label: 'Showrooms Manage', labelBn: 'শোরুম ব্যবস্থাপনা', group: 'Catalog' },
+  { key: 'banners_manage', label: 'Banners, Sections & Greetings', labelBn: 'ব্যানার ও সেকশন', group: 'CMS' },
+  { key: 'complaints_manage', label: 'Complaints Manage', labelBn: 'অভিযোগ ব্যবস্থাপনা', group: 'Support' },
+  { key: 'chat_manage', label: 'Live Chat & AI Support', labelBn: 'লাইভ চ্যাট ও AI', group: 'Support' },
+  { key: 'reports_view', label: 'Reports & Activity Logs', labelBn: 'রিপোর্ট ও লগ', group: 'Governance' },
+  { key: 'seo_manage', label: 'SEO & OpenGraph', labelBn: 'এসইও সেটিংস', group: 'CMS' },
+  { key: 'settings_view', label: 'Website & System Settings', labelBn: 'সাইট সেটিংস', group: 'Governance' },
+  { key: 'manager_manage', label: 'Manager Management', labelBn: 'ম্যানেজার তৈরি ও নিয়ন্ত্রণ', group: 'Governance' },
+  { key: 'admin_manage', label: 'Admin Management', labelBn: 'অ্যাডমিন নিয়ন্ত্রণ', group: 'Governance' },
+];
+
+export const DEFAULT_ROLE_PERMISSIONS: Record<StaffRole, PermissionKey[]> = {
+  super_admin: ALL_PERMISSION_DEFINITIONS.map((p) => p.key),
+  admin: [
+    'dashboard_view',
+    'products_view',
+    'products_add',
+    'products_edit',
+    'products_delete',
+    'categories_manage',
+    'showrooms_manage',
+    'banners_manage',
+    'reports_view',
+  ],
+  manager: [
+    'dashboard_view',
+    'products_view',
+    'products_add',
+    'products_edit',
+    'categories_manage',
+    'showrooms_manage',
+    'complaints_manage',
+    'reports_view',
+  ],
+  support_agent: [
+    'dashboard_view',
+    'complaints_manage',
+    'chat_manage',
+  ],
+};
 
 export interface RbacRoleEntry {
   email: string;
   uid: string;
   username?: string;
   displayName: string;
+  phone?: string;
+  managerId?: string;
+  managerTitle?: string;
+  permissions?: PermissionKey[];
   role: StaffRole;
   status: AccountStatus;
   addedByEmail: string;
   createdAt?: unknown;
   updatedAt?: unknown;
+  lastLoginAt?: unknown;
 }
 
 export interface AdminRecord {
@@ -20,8 +95,14 @@ export interface AdminRecord {
   email: string;
   username: string;
   display_name: string;
+  phone?: string;
+  manager_id?: string;
+  manager_title?: string;
+  permissions?: PermissionKey[];
   role: StaffRole;
   active: boolean;
+  status?: AccountStatus;
+  created_by?: string;
   created_at?: unknown;
   updated_at?: unknown;
   last_login_at?: unknown;

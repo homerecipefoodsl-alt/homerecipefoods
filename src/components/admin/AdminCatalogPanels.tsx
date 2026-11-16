@@ -46,8 +46,12 @@ export function AdminProductsPanel() {
     allCategories,
     allOccasions,
     allShowrooms,
+    hasPermission,
     logAdminActivity,
   } = useStore();
+  const canAdd = hasPermission('products_add');
+  const canEdit = hasPermission('products_edit');
+  const canDelete = hasPermission('products_delete');
   const [editing, setEditing] = useState<Product | null>(null);
   const [isNew, setIsNew] = useState(false);
   const [search, setSearch] = useState('');
@@ -351,14 +355,16 @@ export function AdminProductsPanel() {
             নতুন পণ্য যোগ করুন, বাংলা ও English নাম-বিবরণ, পূর্বের মূল্য, ছাড়, ছবি এবং Show/Hide/Archive নিয়ন্ত্রণ করুন।
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => openEditor(null)}
-          className="inline-flex shrink-0 cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#DC1F26]"
-        >
-          <Plus className="h-4 w-4" />
-          <span>নতুন পণ্য যোগ করুন</span>
-        </button>
+        {canAdd && (
+          <button
+            type="button"
+            onClick={() => openEditor(null)}
+            className="inline-flex shrink-0 cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#DC1F26]"
+          >
+            <Plus className="h-4 w-4" />
+            <span>নতুন পণ্য যোগ করুন</span>
+          </button>
+        )}
       </div>
 
       {feedback && (
@@ -887,8 +893,11 @@ export function AdminProductsPanel() {
                   <td className="px-4 py-3">
                     <button
                       type="button"
-                      onClick={() => toggleVisibility(p)}
-                      className={`inline-flex cursor-pointer items-center gap-1 rounded px-2 py-1 text-[11px] font-semibold ${
+                      disabled={!canEdit}
+                      onClick={() => canEdit && toggleVisibility(p)}
+                      className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-semibold ${
+                        canEdit ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'
+                      } ${
                         p.visible !== false
                           ? 'bg-emerald-50 text-emerald-700'
                           : 'bg-[#F5F4F0] text-[#78716C]'
@@ -901,8 +910,11 @@ export function AdminProductsPanel() {
                   <td className="px-4 py-3">
                     <button
                       type="button"
-                      onClick={() => toggleFeatured(p)}
-                      className={`inline-flex cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold ${
+                      disabled={!canEdit}
+                      onClick={() => canEdit && toggleFeatured(p)}
+                      className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold ${
+                        canEdit ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'
+                      } ${
                         p.featured
                           ? 'bg-[#FEF9C3] text-[#854D0E]'
                           : 'bg-[#F5F4F0] text-[#78716C]'
@@ -914,27 +926,31 @@ export function AdminProductsPanel() {
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="inline-flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        title="Edit"
-                        onClick={() => openEditor(p)}
-                        className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-[#1C1917] hover:border-[#DC1F26]"
-                      >
-                        <Edit3 className="h-3.5 w-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        title={p.deleted ? 'Restore' : 'Safe Archive'}
-                        onClick={() => toggleArchive(p)}
-                        className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-[#57534E] hover:border-[#1C1917]"
-                      >
-                        {p.deleted ? (
-                          <RotateCcw className="h-3.5 w-3.5 text-emerald-700" />
-                        ) : (
-                          <Archive className="h-3.5 w-3.5" />
-                        )}
-                      </button>
-                      {p.deleted && (
+                      {canEdit && (
+                        <>
+                          <button
+                            type="button"
+                            title="Edit"
+                            onClick={() => openEditor(p)}
+                            className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-[#1C1917] hover:border-[#DC1F26]"
+                          >
+                            <Edit3 className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            title={p.deleted ? 'Restore' : 'Safe Archive'}
+                            onClick={() => toggleArchive(p)}
+                            className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-[#57534E] hover:border-[#1C1917]"
+                          >
+                            {p.deleted ? (
+                              <RotateCcw className="h-3.5 w-3.5 text-emerald-700" />
+                            ) : (
+                              <Archive className="h-3.5 w-3.5" />
+                            )}
+                          </button>
+                        </>
+                      )}
+                      {p.deleted && canDelete && (
                         <button
                           type="button"
                           title="Delete Permanently"
