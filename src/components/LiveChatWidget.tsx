@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertCircle,
   Bot,
   Headphones,
+  Loader2,
   MessageCircle,
   Send,
   UserCheck,
@@ -34,6 +36,7 @@ interface AiMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
+  isError?: boolean;
 }
 
 const SESSION_STORAGE_KEY = 'hrf_live_chat_session_id';
@@ -86,7 +89,8 @@ export function LiveChatWidget({
   }, [open, initialMode]);
 
   useEffect(() => {
-    scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (!open) return;
+    scrollEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, [aiMessages, humanMessages, mode, open]);
 
   useEffect(() => {
@@ -134,7 +138,35 @@ export function LiveChatWidget({
   const catalogContext = useMemo(() => {
     return {
       brand: siteSettings.brandName || 'Home Recipe Foods',
-      note: 'Showcase only. No online ordering or delivery checkout. Customers visit or call showrooms.',
+      tagline:
+        siteSettings.tagline || 'খাঁটি স্বাদ, সুন্দর মুহূর্তের বিশ্বস্ত সঙ্গী',
+      note: 'Showcase only. No online ordering, cart, or online checkout. Customers visit or call our showrooms to purchase or reserve custom items.',
+      aboutInfo: {
+        storyBn:
+          siteSettings.footerTextBn ||
+          'খাঁটি উপাদান, ঘরোয়া যত্ন ও আধুনিক বেকিং শিল্পের সমন্বয়ে তৈরি বাংলাদেশের অন্যতম প্রিমিয়াম ফুড ব্র্যান্ড। আমাদের নিজস্ব পেস্ট্রি ও সুইটস কিচেনে প্রতিদিন সকালে তৈরি হয় তাজা ব্রেড, বেলজিয়ান চকলেট কেক, স্পেশ্যাল জাফরান রসমালাই, শাহী আকদ বক্স এবং গরম ফাস্টফুড।',
+        storyEn:
+          siteSettings.footerTextEn ||
+          'Home Recipe Foods is a premier Bangladeshi artisanal bakery, traditional sweets, custom celebration cake, and luxury Akd gift box brand crafted fresh daily with pure ingredients.',
+        highlights: [
+          'নিউজিল্যান্ড বাটার, বেলজিয়ান চকলেট ও খাঁটি দুধের ছানা ব্যবহার',
+          'প্রতিদিন তাজা প্রস্তুতি ও পরিচ্ছন্ন রান্নাঘর',
+          'বিয়ে, আকদ ও জন্মদিনের বিশেষ আয়োজনের জন্য শোরুম প্রতিনিধির পরামর্শ',
+        ],
+      },
+      contactInfo: {
+        supportPhone: siteSettings.supportPhone,
+        brandEmail: siteSettings.brandEmail || '',
+        supportHours:
+          siteSettings.chatSupportHours || 'প্রতিদিন সকাল ৮:০০ – রাত ১১:০০',
+        whatsappUrl: siteSettings.whatsappUrl || '',
+        messengerUrl: siteSettings.messengerUrl || '',
+        facebookUrl: siteSettings.facebookUrl || '',
+        instagramUrl: siteSettings.instagramUrl || '',
+        youtubeUrl: siteSettings.youtubeUrl || '',
+        complaintBox:
+          'গ্রাহকরা ওয়েবসাইটের Complaint Box (/complaint) পেজ থেকে ১০০% গোপনীয়ভাবে মতামত বা অভিযোগ জানাতে পারেন।',
+      },
       supportPhone: siteSettings.supportPhone,
       supportHours: siteSettings.chatSupportHours || 'প্রতিদিন সকাল ৮:০০ – রাত ১১:০০',
       knowledgeBase: aiKnowledge.map((k) => ({
@@ -146,12 +178,14 @@ export function LiveChatWidget({
         answer_en: k.answer_en,
       })),
       categories: categories.map((c) => ({
+        slug: c.slug,
         nameBn: c.name_bn || c.name,
         nameEn: c.name_en || c.nameEn,
         descriptionBn: c.description_bn || c.description,
         descriptionEn: c.description_en || c.descriptionEn || '',
       })),
       occasions: occasions.map((o) => ({
+        slug: o.slug,
         nameBn: o.name_bn || o.name,
         nameEn: o.name_en || o.nameEn,
         descriptionBn: o.description_bn || o.description,
@@ -161,6 +195,7 @@ export function LiveChatWidget({
         id: s.id,
         nameBn: s.name_bn || s.name,
         nameEn: s.name_en || s.nameEn || s.name,
+        isMain: Boolean(s.isMain),
         areaBn: s.area,
         areaEn: s.areaEn || s.area,
         addressBn: s.address_bn || s.address,
@@ -170,11 +205,16 @@ export function LiveChatWidget({
         openingHoursEn: s.openingHoursEn || s.openingHours,
       })),
       products: products.map((p) => ({
+        slug: p.slug,
         nameBn: p.name_bn || p.name,
         nameEn: p.name_en || p.nameEn,
         categoryBn: p.categoryName,
         categoryEn: p.categoryNameEn || '',
+        productType: p.productType,
         priceBDT: p.price,
+        ...(p.price_label ? { priceLabel: p.price_label } : {}),
+        ...(typeof p.old_price === 'number' ? { oldPriceBDT: p.old_price } : {}),
+        ...(p.discount ? { discount: p.discount } : {}),
         priceUnit: p.priceUnit,
         shortDescriptionBn: p.short_description_bn || p.shortDescription,
         shortDescriptionEn: p.short_description_en || p.shortDescriptionEn || '',
@@ -183,11 +223,10 @@ export function LiveChatWidget({
         weight: p.weight,
         occasions: p.occasions,
         availability: p.availability,
-        availableShowrooms: p.showrooms
-          .map((sid) => {
-            const sr = showrooms.find((s) => s.id === sid);
-            return sr ? `${sr.name} (${sr.nameEn || sr.name})` : sid;
-          }),
+        availableShowrooms: p.showrooms.map((sid) => {
+          const sr = showrooms.find((s) => s.id === sid);
+          return sr ? `${sr.name} (${sr.nameEn || sr.name})` : sid;
+        }),
         importantNotes: p.importantNotes,
       })),
     };
@@ -198,9 +237,13 @@ export function LiveChatWidget({
     const trimmed = aiInput.trim();
     if (!trimmed || aiLoading) return;
 
+    const priorHistory = aiMessages
+      .slice(1)
+      .filter((m) => !m.isError)
+      .map((m) => ({ role: m.role, text: m.text }));
+
     const userMsg: AiMessage = { id: `u-${Date.now()}`, role: 'user', text: trimmed };
-    const nextHistory = [...aiMessages, userMsg];
-    setAiMessages(nextHistory);
+    setAiMessages((prev) => [...prev, userMsg]);
     setAiInput('');
     setAiLoading(true);
 
@@ -210,7 +253,7 @@ export function LiveChatWidget({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: trimmed,
-          history: nextHistory.slice(1).map((m) => ({ role: m.role, text: m.text })),
+          history: priorHistory,
           catalogContext,
           aiConfig: {
             aiSupportEnabled: siteSettings.aiSupportEnabled !== false,
@@ -220,25 +263,72 @@ export function LiveChatWidget({
           },
         }),
       });
-      const data = (await resp.json()) as { reply?: string };
+
+      const contentType = resp.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        throw new Error('NON_JSON_RESPONSE');
+      }
+
+      const data = (await resp.json()) as {
+        reply?: string;
+        code?: string;
+        error?: string;
+        message?: string;
+      };
+
+      if (!resp.ok) {
+        const errCode = String(data.code || data.error || '').toUpperCase();
+        let errorText = 'AI Assistant এখন সাময়িকভাবে unavailable। একটু পরে আবার চেষ্টা করুন।';
+        if (errCode === 'AI_CONFIG_MISSING' || errCode === 'AI_CONFIG_INVALID') {
+          errorText = 'AI service configuration is missing.';
+        } else if (resp.status === 429 || errCode === 'RATE_LIMITED') {
+          errorText = 'অনুগ্রহ করে কিছুক্ষণ পরে আবার চেষ্টা করুন।';
+        } else if (typeof data.message === 'string' && data.message.trim() && resp.status === 400) {
+          errorText = data.message.trim();
+        }
+
+        setAiMessages((prev) => [
+          ...prev,
+          {
+            id: `e-${Date.now()}`,
+            role: 'assistant',
+            text: errorText,
+            isError: true,
+          },
+        ]);
+        return;
+      }
+
+      const replyText = typeof data.reply === 'string' ? data.reply.trim() : '';
+      if (!replyText) {
+        setAiMessages((prev) => [
+          ...prev,
+          {
+            id: `e-${Date.now()}`,
+            role: 'assistant',
+            text: 'AI Assistant এখন সাময়িকভাবে unavailable। একটু পরে আবার চেষ্টা করুন।',
+            isError: true,
+          },
+        ]);
+        return;
+      }
+
       setAiMessages((prev) => [
         ...prev,
         {
           id: `a-${Date.now()}`,
           role: 'assistant',
-          text:
-            data.reply ||
-            siteSettings.aiFallbackMessage ||
-            'এই তথ্যটি নিশ্চিতভাবে জানার জন্য আমাদের একজন প্রতিনিধি সাথে যোগাযোগ করুন।',
+          text: replyText,
         },
       ]);
     } catch {
       setAiMessages((prev) => [
         ...prev,
         {
-          id: `a-${Date.now()}`,
+          id: `e-${Date.now()}`,
           role: 'assistant',
-          text: 'দুঃখিত, এই মুহূর্তে সংযোগে সমস্যা হচ্ছে। অনুগ্রহ করে কিছুক্ষণ পর চেষ্টা করুন অথবা সরাসরি প্রতিনিধির সাথে কথা বলুন।',
+          text: 'AI Assistant এখন সাময়িকভাবে unavailable। একটু পরে আবার চেষ্টা করুন।',
+          isError: true,
         },
       ]);
     } finally {
@@ -364,7 +454,7 @@ export function LiveChatWidget({
     <div
       role="dialog"
       aria-label="Home Recipe Foods Support Chat"
-      className="fixed bottom-16 right-3 left-3 z-50 flex h-[72vh] max-h-[560px] flex-col overflow-hidden rounded-2xl border border-[#D6D3D1] bg-white shadow-2xl sm:left-auto sm:bottom-6 sm:right-6 sm:w-[400px]"
+      className="fixed bottom-16 right-3 left-3 z-50 flex h-[min(74dvh,560px)] max-h-[calc(100dvh-5.5rem)] flex-col overflow-hidden rounded-2xl border border-[#D6D3D1] bg-white shadow-2xl sm:left-auto sm:bottom-6 sm:right-6 sm:w-[400px]"
     >
       {/* Header with Official Logo */}
       <div className="flex items-center justify-between border-b border-[#292524] bg-[#1C1917] px-4 py-2.5 text-white">
@@ -453,25 +543,32 @@ export function LiveChatWidget({
             {aiMessages.map((msg) => (
               <div
                 key={msg.id}
+                role={msg.isError ? 'alert' : undefined}
                 className={`flex flex-col ${
                   msg.role === 'user' ? 'items-end' : 'items-start'
                 }`}
               >
                 <div
-                  className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-xs leading-relaxed sm:text-sm ${
+                  className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-xs leading-relaxed whitespace-pre-wrap sm:text-sm ${
                     msg.role === 'user'
                       ? 'bg-[#1C1917] text-white'
+                      : msg.isError
+                      ? 'flex items-start gap-2 border border-red-200 bg-red-50 text-red-800'
                       : 'border border-[#E7E5E4] bg-white text-[#1C1917]'
                   }`}
                 >
-                  {msg.text}
+                  {msg.isError && (
+                    <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#DC1F26]" />
+                  )}
+                  <span>{msg.text}</span>
                 </div>
               </div>
             ))}
             {aiLoading && (
               <div className="flex items-start">
-                <div className="rounded-2xl border border-[#E7E5E4] bg-white px-3.5 py-2 text-xs text-[#78716C]">
-                  তথ্য যাচাই করা হচ্ছে...
+                <div className="inline-flex items-center gap-2 rounded-2xl border border-[#E7E5E4] bg-white px-3.5 py-2 text-xs text-[#57534E]">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[#DC1F26]" />
+                  <span>তথ্য যাচাই করা হচ্ছে...</span>
                 </div>
               </div>
             )}
@@ -492,16 +589,21 @@ export function LiveChatWidget({
                 type="text"
                 value={aiInput}
                 onChange={(e) => setAiInput(e.target.value)}
+                disabled={aiLoading}
                 placeholder="পণ্য, দাম বা শোরুম সম্পর্কে লিখুন..."
-                className="flex-1 rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3 py-2 text-xs text-[#1C1917] focus:border-[#DC1F26] focus:outline-none sm:text-sm"
+                className="flex-1 rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3 py-2 text-xs text-[#1C1917] focus:border-[#DC1F26] focus:outline-none disabled:opacity-70 sm:text-sm"
               />
               <button
                 type="submit"
                 disabled={aiLoading || !aiInput.trim()}
                 aria-label="Send message"
-                className="inline-flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-lg bg-[#DC1F26] text-white transition-colors hover:bg-[#B91C1C] disabled:opacity-40"
+                className="inline-flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-lg bg-[#DC1F26] text-white transition-colors hover:bg-[#B91C1C] disabled:cursor-not-allowed disabled:opacity-40"
               >
-                <Send className="h-4 w-4" />
+                {aiLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Send className="h-4 w-4" />
+                )}
               </button>
             </form>
           </div>

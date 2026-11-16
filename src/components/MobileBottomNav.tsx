@@ -10,14 +10,10 @@ export function MobileBottomNav({ onOpenChat }: MobileBottomNavProps) {
   const location = useLocation();
 
   const goSection = (id: string) => {
-    if (location.pathname === '/') {
-      document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' });
-    } else {
-      navigate('/');
-      window.setTimeout(() => {
-        document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' });
-      }, 150);
-    }
+    navigate(
+      { pathname: '/', hash: `#${id}` },
+      { state: { scrollTarget: id, scrollNonce: Date.now() } }
+    );
   };
 
   return (

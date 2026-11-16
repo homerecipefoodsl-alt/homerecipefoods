@@ -246,7 +246,7 @@ export function HomePage({ onOpenChat }: HomePageProps) {
           <section
             key={sec.id}
             id="categories"
-            className="mx-auto max-w-7xl px-4 py-14 sm:px-6 sm:py-18 lg:px-8"
+            className="mx-auto max-w-7xl scroll-mt-32 px-4 py-14 sm:scroll-mt-36 sm:px-6 sm:py-18 lg:px-8"
           >
             <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
               <div>
@@ -362,7 +362,7 @@ export function HomePage({ onOpenChat }: HomePageProps) {
           <section
             key={sec.id}
             id="occasions"
-            className="mx-auto max-w-7xl px-4 py-14 sm:px-6 sm:py-18 lg:px-8"
+            className="mx-auto max-w-7xl scroll-mt-32 px-4 py-14 sm:scroll-mt-36 sm:px-6 sm:py-18 lg:px-8"
           >
             <div className="max-w-2xl">
               <p className="text-xs font-semibold tracking-wider text-[#B91C1C]">
@@ -506,7 +506,7 @@ export function HomePage({ onOpenChat }: HomePageProps) {
           <section
             key={sec.id}
             id="showrooms"
-            className="border-t border-[#E7E5E4] bg-[#FAFAF8] py-14 sm:py-18"
+            className="scroll-mt-32 border-t border-[#E7E5E4] bg-[#FAFAF8] py-14 sm:scroll-mt-36 sm:py-18"
           >
             <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
               <div className="mb-8 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">

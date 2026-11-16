@@ -32,7 +32,6 @@ export function ProductDetailPage() {
   useEffect(() => {
     setActiveImageIdx(0);
     setShowContactSheet(false);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
   }, [slug]);
 
   const text = product ? getProductText(product, categories) : null;

@@ -1,11 +1,20 @@
-import React, { Suspense, lazy, useState } from 'react';
-import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
+import {
+  BrowserRouter,
+  Navigate,
+  NavigationType,
+  Route,
+  Routes,
+  useLocation,
+  useNavigationType,
+} from 'react-router-dom';
 import { Footer } from './components/Footer';
 import { Header } from './components/Header';
 import { LiveChatWidget } from './components/LiveChatWidget';
 import { LoadingScreen } from './components/LoadingScreen';
 import { MobileBottomNav } from './components/MobileBottomNav';
 import { StoreProvider, useStore } from './context/StoreContext';
+import { scrollToPageTop, scrollToSectionById } from './lib/scroll';
 import { HomePage } from './pages/HomePage';
 
 const ProductsPage = lazy(() =>
@@ -348,6 +357,85 @@ function RoutedLayout() {
   );
 }
 
+interface RouteScrollState {
+  scrollTarget?: string;
+  scrollNonce?: number;
+}
+
+function ScrollManager() {
+  const location = useLocation();
+  const navigationType = useNavigationType();
+  const prevPathnameRef = useRef(location.pathname);
+  const prevHashRef = useRef(location.hash);
+  const initialLoadHandledRef = useRef(false);
+
+  useEffect(() => {
+    const prevPathname = prevPathnameRef.current;
+    const prevHash = prevHashRef.current;
+    prevPathnameRef.current = location.pathname;
+    prevHashRef.current = location.hash;
+
+    const state = (location.state as RouteScrollState | null) ?? null;
+    const explicitTarget = state?.scrollTarget || '';
+    const hashTarget = location.hash ? location.hash.slice(1) : '';
+    const targetId = explicitTarget || hashTarget;
+
+    const isInitialMount = !initialLoadHandledRef.current;
+    initialLoadHandledRef.current = true;
+
+    let rafA = 0;
+    let rafB = 0;
+    let cancelled = false;
+    let attempts = 0;
+
+    const scheduleSectionScroll = (id: string) => {
+      const tryScroll = () => {
+        if (cancelled) return;
+        if (scrollToSectionById(id)) return;
+        attempts += 1;
+        if (attempts < 20) {
+          rafB = window.requestAnimationFrame(tryScroll);
+        }
+      };
+      // Wait two animation frames so drawer close / route layout settles before measuring header height
+      rafA = window.requestAnimationFrame(() => {
+        rafB = window.requestAnimationFrame(tryScroll);
+      });
+    };
+
+    if (isInitialMount) {
+      if (hashTarget) {
+        scheduleSectionScroll(hashTarget);
+      }
+      return () => {
+        cancelled = true;
+        if (rafA) window.cancelAnimationFrame(rafA);
+        if (rafB) window.cancelAnimationFrame(rafB);
+      };
+    }
+
+    // Preserve browser Back / Forward scroll restoration on POP navigations
+    if (navigationType === NavigationType.Pop) {
+      return;
+    }
+
+    if (targetId) {
+      scheduleSectionScroll(targetId);
+      return () => {
+        cancelled = true;
+        if (rafA) window.cancelAnimationFrame(rafA);
+        if (rafB) window.cancelAnimationFrame(rafB);
+      };
+    }
+
+    if (location.pathname !== prevPathname || (prevHash && !location.hash)) {
+      scrollToPageTop();
+    }
+  }, [location.pathname, location.hash, location.key, location.state, navigationType]);
+
+  return null;
+}
+
 function AppShell() {
   const { loading } = useStore();
 
@@ -355,6 +443,7 @@ function AppShell() {
     <>
       <LoadingScreen ready={!loading} />
       <BrowserRouter>
+        <ScrollManager />
         <RoutedLayout />
       </BrowserRouter>
     </>

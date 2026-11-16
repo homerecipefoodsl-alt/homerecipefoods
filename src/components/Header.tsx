@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, useNavigate } from 'react-router-dom';
 import { MapPin, Menu, MessageCircle, Search, X } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
@@ -23,7 +23,14 @@ export function Header({ onOpenChat }: HeaderProps) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    if (searchOpen) {
+      searchInputRef.current?.focus({ preventScroll: true });
+    }
+  }, [searchOpen]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -37,17 +44,10 @@ export function Header({ onOpenChat }: HeaderProps) {
     setMobileMenuOpen(false);
     if (to.startsWith('/#')) {
       const id = to.slice(2);
-      if (window.location.pathname === '/') {
-        const el = document.getElementById(id);
-        if (el) {
-          el.scrollIntoView({ behavior: 'smooth' });
-          return;
-        }
-      }
-      navigate('/');
-      window.setTimeout(() => {
-        document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' });
-      }, 150);
+      navigate(
+        { pathname: '/', hash: `#${id}` },
+        { state: { scrollTarget: id, scrollNonce: Date.now() } }
+      );
       return;
     }
     navigate(to);
@@ -59,7 +59,7 @@ export function Header({ onOpenChat }: HeaderProps) {
       : siteSettings.announcementBn || siteSettings.announcementEn;
 
   return (
-    <div className="sticky top-0 z-40">
+    <div className="sticky top-0 z-40" data-sticky-header="true">
       {siteSettings.announcementEnabled && announcementText && (
         <div className="bg-[#DC1F26] px-4 py-1.5 text-center text-xs font-semibold text-white">
           {siteSettings.announcementLink ? (
@@ -162,8 +162,8 @@ export function Header({ onOpenChat }: HeaderProps) {
               <div className="relative flex-1">
                 <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#78716C]" />
                 <input
+                  ref={searchInputRef}
                   type="text"
-                  autoFocus
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="খাবার খুঁজুন / Search: চকলেট কেক, Chocolate Cake, বার্গার..."

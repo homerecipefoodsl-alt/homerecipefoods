@@ -2,9 +2,9 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import express, { type Request, type Response } from 'express';
+import express, { type NextFunction, type Request, type Response } from 'express';
 import dotenv from 'dotenv';
-import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import { processAiChatRequest, type AiChatRequestBody } from './shared/aiChat';
 
 dotenv.config();
 
@@ -32,6 +32,25 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: '2mb' }));
+app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
+  if (
+    req.path.startsWith('/api/') &&
+    err &&
+    typeof err === 'object' &&
+    'type' in err &&
+    (err as { type?: unknown }).type === 'entity.parse.failed'
+  ) {
+    res.status(400).json({
+      success: false,
+      ok: false,
+      error: 'INVALID_REQUEST',
+      code: 'INVALID_REQUEST',
+      message: 'Invalid JSON request payload.',
+    });
+    return;
+  }
+  next(err);
+});
 
 // Ensure CORS & preflight headers on all /api/* routes and prevent caching
 app.use('/api', (req, res, next) => {
@@ -235,14 +254,7 @@ async function verifyFirebaseIdToken(idToken: string): Promise<VerifiedFirebaseT
   };
 }
 
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    },
-  },
-});
+// Gemini client initialized per request inside shared/aiChat.ts using process.env.GEMINI_API_KEY
 
 interface ServiceAccountConfig {
   project_id: string;
@@ -1528,99 +1540,36 @@ ${staticRoutes
   res.type('application/xml').send(xml);
 });
 
-interface ChatHistoryItem {
-  role: 'user' | 'assistant';
-  text: string;
-}
-
-interface AiConfigPayload {
-  aiSupportEnabled?: boolean;
-  aiAssistantName?: string;
-  aiFallbackMessage?: string;
-  aiCustomInstructions?: string;
-}
-
-app.post('/api/chat/ai', async (req, res) => {
+async function handleAiChatEndpoint(req: Request, res: Response) {
   try {
-    const { message, history, catalogContext, aiConfig } = (req.body || {}) as {
-      message?: string;
-      history?: ChatHistoryItem[];
-      catalogContext?: unknown;
-      aiConfig?: AiConfigPayload;
-    };
+    const body = (req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+      ? req.body
+      : {}) as AiChatRequestBody;
 
-    const fallbackMsg =
-      typeof aiConfig?.aiFallbackMessage === 'string' && aiConfig.aiFallbackMessage.trim()
-        ? aiConfig.aiFallbackMessage.trim().slice(0, 300)
-        : 'এই তথ্যটি নিশ্চিতভাবে জানার জন্য আমাদের একজন প্রতিনিধি সাথে যোগাযোগ করুন।';
-
-    if (aiConfig?.aiSupportEnabled === false) {
-      res.json({
-        reply: `AI সহায়তা সাময়িকভাবে বন্ধ আছে। ${fallbackMsg}`,
-      });
+    const result = await processAiChatRequest(body, process.env.GEMINI_API_KEY);
+    if (!result.ok) {
+      sendError(res, result.code, result.message, result.status);
       return;
     }
 
-    if (!message || typeof message !== 'string' || !message.trim()) {
-      sendError(res, 'VALIDATION_ERROR', 'Message is required.', 400);
-      return;
-    }
-
-    if (!process.env.GEMINI_API_KEY) {
-      res.status(503).json({ reply: fallbackMsg });
-      return;
-    }
-
-    const assistantName =
-      typeof aiConfig?.aiAssistantName === 'string' && aiConfig.aiAssistantName.trim()
-        ? aiConfig.aiAssistantName.trim().slice(0, 80)
-        : 'Home Recipe AI Assistant';
-    const customGuidance =
-      typeof aiConfig?.aiCustomInstructions === 'string' && aiConfig.aiCustomInstructions.trim()
-        ? `\nADDITIONAL BRAND GUIDANCE:\n${aiConfig.aiCustomInstructions.trim().slice(0, 1000)}`
-        : '';
-
-    const systemInstruction = `You are "${assistantName}", the official AI Product & Showroom Concierge for "Home Recipe Foods" (হোম রেসিপি ফুডস), a premium Bangladeshi food brand.
-
-STRICT BUSINESS & GROUNDING RULES:
-1. Home Recipe Foods website is a Product Showcase & Customer Information platform ONLY. Customers CANNOT place online orders, use a cart, or pay online. Always politely guide them to visit or call one of our showrooms to purchase or reserve custom items.
-2. You MUST ONLY answer using facts present in the LIVE DATABASE CONTEXT provided below (products, prices in BDT ৳, categories, ingredients, sizes/weights, suitable occasions, showrooms, phone numbers, opening hours).
-3. NEVER invent, guess, or extrapolate any product price, availability, ingredient, discount, delivery service, or showroom detail that is not explicitly in the LIVE DATABASE CONTEXT.
-4. If the user asks about anything not found in the LIVE DATABASE CONTEXT (or if you are not 100% certain from the provided data), you MUST respond with this exact sentence:
-"${fallbackMsg}"
-5. Match the customer's language naturally (Bengali or English). Keep responses warm, refined, concise, and helpful.${customGuidance}
-
-LIVE DATABASE CONTEXT:
-${JSON.stringify(catalogContext ?? {}, null, 2)}`;
-
-    const formattedHistory = Array.isArray(history)
-      ? history.slice(-8).map((item) => ({
-          role: item.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: String(item.text || '').slice(0, 1500) }],
-        }))
-      : [];
-
-    const response = await ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
-      contents: [
-        ...formattedHistory,
-        { role: 'user', parts: [{ text: message.trim().slice(0, 1500) }] },
-      ],
-      config: {
-        systemInstruction,
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      },
+    res.json({
+      success: true,
+      ok: true,
+      reply: result.reply,
+      ...(result.disabled ? { disabled: true } : {}),
     });
-
-    const reply = response.text?.trim() || fallbackMsg;
-    res.json({ reply });
-  } catch (err) {
-    console.error('AI Chat error:', err instanceof Error ? err.message : 'Unknown error');
-    res.status(500).json({
-      reply: 'এই তথ্যটি নিশ্চিতভাবে জানার জন্য আমাদের একজন প্রতিনিধি সাথে যোগাযোগ করুন।',
-    });
+  } catch {
+    sendError(
+      res,
+      'AI_UNAVAILABLE',
+      'AI Assistant এখন সাময়িকভাবে unavailable। একটু পরে আবার চেষ্টা করুন।',
+      500
+    );
   }
-});
+}
+
+app.post('/api/chat/ai', handleAiChatEndpoint);
+app.post('/api/ai-assistant', handleAiChatEndpoint);
 
 // JSON 404 guard so unmatched /api/* routes NEVER fall through to Vite/SPA HTML
 app.all('/api/*', (req, res) => {
