@@ -8,6 +8,7 @@ interface Env {
   ASSETS: CloudflareAssetsBinding;
   GEMINI_API_KEY?: string;
   APP_URL?: string;
+  FIREBASE_SERVICE_ACCOUNT_JSON?: string;
   VITE_FIREBASE_PROJECT_ID?: string;
   VITE_FIREBASE_API_KEY?: string;
   VITE_FIREBASE_FIRESTORE_DATABASE_ID?: string;
@@ -164,14 +165,151 @@ function getFirebaseRuntimeConfig(env: Env) {
   };
 }
 
+interface ServiceAccountConfig {
+  project_id?: string;
+  client_email: string;
+  private_key: string;
+}
+
+function parseServiceAccountJsonWorker(raw?: string): ServiceAccountConfig | null {
+  if (!raw || typeof raw !== 'string' || !raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<ServiceAccountConfig>;
+    if (
+      typeof parsed.client_email === 'string' &&
+      parsed.client_email.trim() &&
+      typeof parsed.private_key === 'string' &&
+      parsed.private_key.includes('PRIVATE KEY')
+    ) {
+      return {
+        project_id: typeof parsed.project_id === 'string' ? parsed.project_id.trim() : undefined,
+        client_email: parsed.client_email.trim(),
+        private_key: parsed.private_key.replace(/\\n/g, '\n'),
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+let cachedWorkerSaToken: { token: string; expiresAt: number; clientEmail: string } | null = null;
+
+function base64UrlEncodeBytes(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function base64UrlEncodeText(text: string): string {
+  return base64UrlEncodeBytes(new TextEncoder().encode(text));
+}
+
+function pemToPkcs8ArrayBuffer(pem: string): ArrayBuffer {
+  const b64 = pem
+    .replace(/-----BEGIN [A-Z0-9 ]+-----/g, '')
+    .replace(/-----END [A-Z0-9 ]+-----/g, '')
+    .replace(/\s+/g, '');
+  const bin = atob(b64);
+  const buffer = new ArrayBuffer(bin.length);
+  const view = new Uint8Array(buffer);
+  for (let i = 0; i < bin.length; i += 1) {
+    view[i] = bin.charCodeAt(i);
+  }
+  return buffer;
+}
+
+async function getGoogleAdminAccessTokenWorker(sa: ServiceAccountConfig): Promise<string> {
+  const now = Date.now();
+  if (
+    cachedWorkerSaToken &&
+    cachedWorkerSaToken.clientEmail === sa.client_email &&
+    now < cachedWorkerSaToken.expiresAt - 60_000
+  ) {
+    return cachedWorkerSaToken.token;
+  }
+
+  const iat = Math.floor(now / 1000);
+  const exp = iat + 3600;
+  const header = base64UrlEncodeText(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+  const claimSet = base64UrlEncodeText(
+    JSON.stringify({
+      iss: sa.client_email,
+      scope:
+        'https://www.googleapis.com/auth/identitytoolkit https://www.googleapis.com/auth/firebase',
+      aud: 'https://oauth2.googleapis.com/token',
+      iat,
+      exp,
+    })
+  );
+
+  const signingInput = `${header}.${claimSet}`;
+  const pkcs8 = pemToPkcs8ArrayBuffer(sa.private_key);
+  const privateKey = await crypto.subtle.importKey(
+    'pkcs8',
+    pkcs8,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+
+  const inputBytes = new TextEncoder().encode(signingInput);
+  const inputBuffer = new ArrayBuffer(inputBytes.byteLength);
+  new Uint8Array(inputBuffer).set(inputBytes);
+
+  const sigBuffer = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', privateKey, inputBuffer);
+  const signature = base64UrlEncodeBytes(new Uint8Array(sigBuffer));
+  const assertion = `${signingInput}.${signature}`;
+
+  const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion,
+    }).toString(),
+  });
+
+  const tokenJson = (await tokenResp.json()) as {
+    access_token?: string;
+    expires_in?: number;
+    error?: string;
+    error_description?: string;
+  };
+  if (!tokenResp.ok || !tokenJson.access_token) {
+    throw new Error(
+      tokenJson.error_description || tokenJson.error || 'Failed to obtain Service Account token'
+    );
+  }
+
+  cachedWorkerSaToken = {
+    token: tokenJson.access_token,
+    expiresAt: now + (tokenJson.expires_in || 3600) * 1000,
+    clientEmail: sa.client_email,
+  };
+  return tokenJson.access_token;
+}
+
 async function verifyCallerStaffAuthorityWorker(
   idToken: string,
   callerEmail: string,
   projectId: string,
   firestoreDatabaseId: string
-): Promise<{ allowed: boolean; isSuperAdmin: boolean; canManageManagers: boolean }> {
+): Promise<{
+  allowed: boolean;
+  isPrimarySuperAdmin: boolean;
+  isSuperAdmin: boolean;
+  canManageManagers: boolean;
+}> {
   if (callerEmail === PRIMARY_SUPER_ADMIN_EMAIL) {
-    return { allowed: true, isSuperAdmin: true, canManageManagers: true };
+    return {
+      allowed: true,
+      isPrimarySuperAdmin: true,
+      isSuperAdmin: true,
+      canManageManagers: true,
+    };
   }
 
   try {
@@ -184,7 +322,12 @@ async function verifyCallerStaffAuthorityWorker(
       headers: { Authorization: `Bearer ${idToken}` },
     });
     if (!resp.ok) {
-      return { allowed: false, isSuperAdmin: false, canManageManagers: false };
+      return {
+        allowed: false,
+        isPrimarySuperAdmin: false,
+        isSuperAdmin: false,
+        canManageManagers: false,
+      };
     }
     const docData = (await resp.json()) as {
       fields?: {
@@ -200,43 +343,48 @@ async function verifyCallerStaffAuthorityWorker(
       .filter(Boolean);
 
     const isActive = status === 'active';
-    const isSuper = isActive && role === 'super_admin' && callerEmail === PRIMARY_SUPER_ADMIN_EMAIL;
-    const canManageManagers = isActive && permissions.includes('manager_manage');
+    const isSuper = isActive && role === 'super_admin';
+    const canManageManagers = isActive && (isSuper || permissions.includes('manager_manage'));
     return {
       allowed: isSuper || canManageManagers,
+      isPrimarySuperAdmin: false,
       isSuperAdmin: isSuper,
       canManageManagers,
     };
   } catch {
-    return { allowed: false, isSuperAdmin: false, canManageManagers: false };
+    return {
+      allowed: false,
+      isPrimarySuperAdmin: false,
+      isSuperAdmin: false,
+      canManageManagers: false,
+    };
   }
 }
 
 function mapIdentityToolkitErrorWorker(code: string): { status: number; message: string } {
-  switch (code) {
-    case 'EMAIL_EXISTS':
-      return {
-        status: 409,
-        message:
-          'এই ইমেইল দিয়ে ইতিমধ্যেই Firebase Auth অ্যাকাউন্ট রয়েছে। "Existing Auth User" মোড ব্যবহার করুন অথবা ভিন্ন ইমেইল দিন।',
-      };
-    case 'INVALID_EMAIL':
-      return { status: 400, message: 'সঠিক ইমেইল ঠিকানা লিখুন।' };
-    case 'OPERATION_NOT_ALLOWED':
-      return {
-        status: 400,
-        message:
-          'Firebase Console-এ Email/Password Sign-in নিষ্ক্রিয় আছে। অনুগ্রহ করে Firebase Authentication → Sign-in method থেকে Email/Password চালু করুন।',
-      };
-    default:
-      if (code.startsWith('WEAK_PASSWORD')) {
-        return { status: 400, message: 'পাসওয়ার্ড কমপক্ষে ৬ অক্ষরের শক্তিশালী হতে হবে।' };
-      }
-      return {
-        status: 400,
-        message: `Firebase Auth অ্যাকাউন্ট তৈরি ব্যর্থ হয়েছে (${code || 'UNKNOWN'}).`,
-      };
+  if (code.includes('EMAIL_EXISTS') || code.includes('DUPLICATE_EMAIL')) {
+    return { status: 409, message: 'This email is already registered.' };
   }
+  if (code.includes('INVALID_EMAIL')) {
+    return { status: 400, message: 'Please enter a valid email address.' };
+  }
+  if (code.includes('OPERATION_NOT_ALLOWED')) {
+    return {
+      status: 400,
+      message:
+        'Email/Password sign-in is disabled in Firebase Authentication. Enable it under Firebase Console → Authentication → Sign-in method.',
+    };
+  }
+  if (code.includes('WEAK_PASSWORD')) {
+    return { status: 400, message: 'Password must be at least 8 characters.' };
+  }
+  if (code.includes('USER_NOT_FOUND')) {
+    return { status: 404, message: 'No Firebase Auth user found for this account.' };
+  }
+  return {
+    status: 400,
+    message: `Firebase Auth request failed (${code || 'UNKNOWN'}).`,
+  };
 }
 
 interface ChatHistoryItem {
@@ -376,11 +524,16 @@ async function handleSessionInit(request: Request, env: Env): Promise<Response> 
       );
     }
     const isPrimarySuperAdmin = decoded.email === PRIMARY_SUPER_ADMIN_EMAIL;
+    const hasAdminCredentials = Boolean(
+      parseServiceAccountJsonWorker(env.FIREBASE_SERVICE_ACCOUNT_JSON)
+    );
     return jsonResponse({
       verified: true,
       uid: decoded.uid,
       email: decoded.email,
+      isPrimarySuperAdmin,
       authorizedSuperAdmin: isPrimarySuperAdmin,
+      hasAdminCredentials,
       role: isPrimarySuperAdmin ? 'super_admin' : 'customer',
     });
   } catch {
@@ -397,7 +550,12 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
     }
 
     const { projectId, apiKey, firestoreDatabaseId } = getFirebaseRuntimeConfig(env);
-    const decoded = await verifyFirebaseIdTokenWorker(idToken, projectId);
+    let decoded: VerifiedFirebaseToken;
+    try {
+      decoded = await verifyFirebaseIdTokenWorker(idToken, projectId);
+    } catch {
+      return jsonResponse({ error: 'Invalid or expired Firebase ID token' }, 401);
+    }
     if (!decoded.email || !decoded.emailVerified) {
       return jsonResponse({ error: 'Verified administrator token required' }, 403);
     }
@@ -417,30 +575,92 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
       password?: string;
       displayName?: string;
       role?: string;
+      status?: string;
+      allowSuperAdminCreation?: boolean;
     };
 
     const cleanEmail = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
     const cleanName = typeof body.displayName === 'string' ? body.displayName.trim().slice(0, 120) : '';
     const cleanRole = typeof body.role === 'string' ? body.role.trim() : '';
+    const cleanStatus =
+      body.status === 'suspended' || body.status === 'disabled' ? body.status : 'active';
 
     if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-      return jsonResponse({ error: 'সঠিক ইমেইল ঠিকানা দিন।' }, 400);
+      return jsonResponse({ error: 'Please enter a valid email address.' }, 400);
     }
     if (cleanEmail === PRIMARY_SUPER_ADMIN_EMAIL) {
-      return jsonResponse({ error: 'Primary Super Admin অ্যাকাউন্ট পরিবর্তনযোগ্য নয়।' }, 403);
+      return jsonResponse({ error: 'This email is already registered.' }, 403);
     }
-    if (!['admin', 'manager', 'support_agent'].includes(cleanRole)) {
-      return jsonResponse({ error: 'অননুমোদিত রোল নির্ধারিত হয়েছে।' }, 400);
+    if (!['super_admin', 'admin', 'manager', 'support_agent'].includes(cleanRole)) {
+      return jsonResponse({ error: 'Invalid role selected.' }, 400);
+    }
+    if (cleanRole === 'super_admin') {
+      if (!authority.isPrimarySuperAdmin || body.allowSuperAdminCreation !== true) {
+        return jsonResponse(
+          {
+            error:
+              'Only the primary Super Admin can explicitly authorize creating another Super Admin account.',
+          },
+          403
+        );
+      }
     }
     if (!authority.isSuperAdmin && cleanRole !== 'manager') {
       return jsonResponse(
-        { error: 'শুধুমাত্র Super Admin নতুন Admin বা Support Agent তৈরি করতে পারবেন।' },
+        { error: 'Only a Super Admin can create Admin or Support Agent accounts.' },
         403
       );
     }
-    if (typeof body.password !== 'string' || body.password.length < 6) {
-      return jsonResponse({ error: 'পাসওয়ার্ড কমপক্ষে ৬ অক্ষরের হতে হবে।' }, 400);
+    if (typeof body.password !== 'string' || body.password.length < 8) {
+      return jsonResponse({ error: 'Password must be at least 8 characters.' }, 400);
     }
+
+    const sa = parseServiceAccountJsonWorker(env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    if (sa) {
+      const adminToken = await getGoogleAdminAccessTokenWorker(sa);
+      const targetProject = sa.project_id || projectId;
+      const createResp = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(
+          targetProject
+        )}/accounts`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({
+            email: cleanEmail,
+            password: body.password,
+            ...(cleanName ? { displayName: cleanName } : {}),
+            emailVerified: true,
+            disabled: cleanStatus !== 'active',
+          }),
+        }
+      );
+
+      const createJson = (await createResp.json()) as {
+        localId?: string;
+        email?: string;
+        error?: { message?: string };
+      };
+
+      if (!createResp.ok || !createJson.localId) {
+        const code = createJson.error?.message || 'ADMIN_CREATE_FAILED';
+        const mapped = mapIdentityToolkitErrorWorker(code);
+        return jsonResponse({ error: mapped.message, code }, mapped.status);
+      }
+
+      return jsonResponse({
+        ok: true,
+        uid: createJson.localId,
+        email: (createJson.email || cleanEmail).toLowerCase(),
+        emailVerified: true,
+        verificationEmailSent: false,
+        authMode: 'admin_sdk',
+      });
+    }
+
     if (!apiKey) {
       return jsonResponse({ error: 'Firebase Web API key missing on worker.' }, 500);
     }
@@ -526,10 +746,12 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
       uid: signUpJson.localId,
       email: (signUpJson.email || cleanEmail).toLowerCase(),
       rollbackToken: currentNewUserToken,
+      emailVerified: false,
       verificationEmailSent,
+      authMode: 'identity_toolkit',
     });
   } catch {
-    return jsonResponse({ error: 'নতুন স্টাফ অ্যাকাউন্ট তৈরি করতে সার্ভার ত্রুটি হয়েছে।' }, 500);
+    return jsonResponse({ error: 'Server error while creating user account.' }, 500);
   }
 }
 
@@ -542,7 +764,12 @@ async function handleAdminRollbackUser(request: Request, env: Env): Promise<Resp
     }
 
     const { projectId, apiKey, firestoreDatabaseId } = getFirebaseRuntimeConfig(env);
-    const decoded = await verifyFirebaseIdTokenWorker(idToken, projectId);
+    let decoded: VerifiedFirebaseToken;
+    try {
+      decoded = await verifyFirebaseIdTokenWorker(idToken, projectId);
+    } catch {
+      return jsonResponse({ error: 'Invalid or expired Firebase ID token' }, 401);
+    }
     if (!decoded.email || !decoded.emailVerified) {
       return jsonResponse({ error: 'Verified administrator token required' }, 403);
     }
@@ -557,7 +784,30 @@ async function handleAdminRollbackUser(request: Request, env: Env): Promise<Resp
       return jsonResponse({ error: 'Unauthorized rollback request' }, 403);
     }
 
-    const body = (await request.json()) as { rollbackToken?: string };
+    const body = (await request.json()) as { uid?: string; rollbackToken?: string };
+    const sa = parseServiceAccountJsonWorker(env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    if (sa && typeof body.uid === 'string' && body.uid.trim() && body.uid.trim() !== decoded.uid) {
+      const adminToken = await getGoogleAdminAccessTokenWorker(sa);
+      const targetProject = sa.project_id || projectId;
+      const delResp = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(
+          targetProject
+        )}/accounts:delete`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({ localId: body.uid.trim() }),
+        }
+      );
+      if (!delResp.ok) {
+        return jsonResponse({ error: 'Admin SDK rollback delete failed' }, 500);
+      }
+      return jsonResponse({ ok: true });
+    }
+
     if (typeof body.rollbackToken !== 'string' || !body.rollbackToken.trim() || !apiKey) {
       return jsonResponse({ error: 'Invalid rollback request' }, 400);
     }
@@ -579,6 +829,237 @@ async function handleAdminRollbackUser(request: Request, env: Env): Promise<Resp
     return jsonResponse({ ok: true });
   } catch {
     return jsonResponse({ error: 'Rollback failed' }, 500);
+  }
+}
+
+async function handleAdminUpdateUserStatus(request: Request, env: Env): Promise<Response> {
+  try {
+    const authHeader = request.headers.get('authorization') || '';
+    const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (!idToken) {
+      return jsonResponse({ error: 'Missing Authorization Bearer token' }, 401);
+    }
+
+    const { projectId, firestoreDatabaseId } = getFirebaseRuntimeConfig(env);
+    let decoded: VerifiedFirebaseToken;
+    try {
+      decoded = await verifyFirebaseIdTokenWorker(idToken, projectId);
+    } catch {
+      return jsonResponse({ error: 'Invalid or expired Firebase ID token' }, 401);
+    }
+    if (!decoded.email || !decoded.emailVerified) {
+      return jsonResponse({ error: 'Verified administrator token required' }, 403);
+    }
+
+    const authority = await verifyCallerStaffAuthorityWorker(
+      idToken,
+      decoded.email,
+      projectId,
+      firestoreDatabaseId
+    );
+    if (!authority.allowed) {
+      return jsonResponse({ error: 'Insufficient privileges' }, 403);
+    }
+
+    const body = (await request.json()) as {
+      uid?: string;
+      email?: string;
+      role?: string;
+      disabled?: boolean;
+    };
+    const cleanEmail = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    const cleanUid = typeof body.uid === 'string' ? body.uid.trim() : '';
+
+    if (cleanEmail === PRIMARY_SUPER_ADMIN_EMAIL || (cleanUid && cleanUid === decoded.uid)) {
+      return jsonResponse(
+        { error: 'Primary Super Admin or current session cannot be disabled.' },
+        403
+      );
+    }
+    if (!authority.isSuperAdmin && body.role !== 'manager') {
+      return jsonResponse(
+        { error: 'Only a Super Admin can modify non-manager accounts.' },
+        403
+      );
+    }
+
+    const sa = parseServiceAccountJsonWorker(env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    if (!sa || !cleanUid) {
+      return jsonResponse({ ok: true, authSynced: false });
+    }
+
+    const adminToken = await getGoogleAdminAccessTokenWorker(sa);
+    const targetProject = sa.project_id || projectId;
+    const updateResp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(
+        targetProject
+      )}/accounts:update`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify({
+          localId: cleanUid,
+          disableUser: Boolean(body.disabled),
+        }),
+      }
+    );
+
+    if (!updateResp.ok) {
+      const errJson = (await updateResp.json()) as { error?: { message?: string } };
+      return jsonResponse(
+        { error: errJson.error?.message || 'Failed to update Firebase Auth user status.' },
+        400
+      );
+    }
+
+    return jsonResponse({ ok: true, authSynced: true });
+  } catch {
+    return jsonResponse({ error: 'Failed to update user status.' }, 500);
+  }
+}
+
+async function handleAdminResetPassword(request: Request, env: Env): Promise<Response> {
+  try {
+    const authHeader = request.headers.get('authorization') || '';
+    const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (!idToken) {
+      return jsonResponse({ error: 'Missing Authorization Bearer token' }, 401);
+    }
+
+    const { projectId, apiKey, firestoreDatabaseId } = getFirebaseRuntimeConfig(env);
+    let decoded: VerifiedFirebaseToken;
+    try {
+      decoded = await verifyFirebaseIdTokenWorker(idToken, projectId);
+    } catch {
+      return jsonResponse({ error: 'Invalid or expired Firebase ID token' }, 401);
+    }
+    if (!decoded.email || !decoded.emailVerified) {
+      return jsonResponse({ error: 'Verified administrator token required' }, 403);
+    }
+
+    const authority = await verifyCallerStaffAuthorityWorker(
+      idToken,
+      decoded.email,
+      projectId,
+      firestoreDatabaseId
+    );
+    if (!authority.isSuperAdmin) {
+      return jsonResponse({ error: 'Only a Super Admin can send user password resets.' }, 403);
+    }
+
+    const body = (await request.json()) as { email?: string };
+    const cleanEmail = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return jsonResponse({ error: 'Valid target email address is required.' }, 400);
+    }
+    if (!apiKey) {
+      return jsonResponse({ error: 'Firebase Web API key missing on worker.' }, 500);
+    }
+
+    const resetResp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${encodeURIComponent(
+        apiKey
+      )}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requestType: 'PASSWORD_RESET',
+          email: cleanEmail,
+        }),
+      }
+    );
+
+    if (!resetResp.ok) {
+      const errJson = (await resetResp.json()) as { error?: { message?: string } };
+      const mapped = mapIdentityToolkitErrorWorker(errJson.error?.message || 'RESET_FAILED');
+      return jsonResponse({ error: mapped.message }, mapped.status);
+    }
+
+    return jsonResponse({ ok: true, email: cleanEmail });
+  } catch {
+    return jsonResponse({ error: 'Failed to send password reset email.' }, 500);
+  }
+}
+
+async function handleAdminDeleteUser(request: Request, env: Env): Promise<Response> {
+  try {
+    const authHeader = request.headers.get('authorization') || '';
+    const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (!idToken) {
+      return jsonResponse({ error: 'Missing Authorization Bearer token' }, 401);
+    }
+
+    const { projectId, firestoreDatabaseId } = getFirebaseRuntimeConfig(env);
+    let decoded: VerifiedFirebaseToken;
+    try {
+      decoded = await verifyFirebaseIdTokenWorker(idToken, projectId);
+    } catch {
+      return jsonResponse({ error: 'Invalid or expired Firebase ID token' }, 401);
+    }
+    if (!decoded.email || !decoded.emailVerified) {
+      return jsonResponse({ error: 'Verified administrator token required' }, 403);
+    }
+
+    const authority = await verifyCallerStaffAuthorityWorker(
+      idToken,
+      decoded.email,
+      projectId,
+      firestoreDatabaseId
+    );
+    if (!authority.isSuperAdmin) {
+      return jsonResponse({ error: 'Only a Super Admin can delete user accounts.' }, 403);
+    }
+
+    const body = (await request.json()) as { uid?: string; email?: string };
+    const cleanEmail = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    const cleanUid = typeof body.uid === 'string' ? body.uid.trim() : '';
+
+    if (cleanEmail === PRIMARY_SUPER_ADMIN_EMAIL || (cleanUid && cleanUid === decoded.uid)) {
+      return jsonResponse(
+        { error: 'Primary Super Admin or current account cannot be deleted.' },
+        403
+      );
+    }
+
+    const sa = parseServiceAccountJsonWorker(env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    if (!sa || !cleanUid) {
+      return jsonResponse({ ok: true, authDeleted: false });
+    }
+
+    const adminToken = await getGoogleAdminAccessTokenWorker(sa);
+    const targetProject = sa.project_id || projectId;
+    const delResp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(
+        targetProject
+      )}/accounts:delete`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify({ localId: cleanUid }),
+      }
+    );
+
+    if (!delResp.ok) {
+      const errJson = (await delResp.json()) as { error?: { message?: string } };
+      const code = errJson.error?.message || '';
+      if (!code.includes('USER_NOT_FOUND')) {
+        return jsonResponse(
+          { error: code || 'Failed to delete user from Firebase Authentication.' },
+          400
+        );
+      }
+    }
+
+    return jsonResponse({ ok: true, authDeleted: true });
+  } catch {
+    return jsonResponse({ error: 'Failed to delete Firebase Auth user.' }, 500);
   }
 }
 
@@ -604,6 +1085,18 @@ export default {
 
     if (url.pathname === '/api/admin/rollback-user' && request.method === 'POST') {
       return handleAdminRollbackUser(request, env);
+    }
+
+    if (url.pathname === '/api/admin/update-user-status' && request.method === 'POST') {
+      return handleAdminUpdateUserStatus(request, env);
+    }
+
+    if (url.pathname === '/api/admin/reset-password' && request.method === 'POST') {
+      return handleAdminResetPassword(request, env);
+    }
+
+    if (url.pathname === '/api/admin/delete-user' && request.method === 'POST') {
+      return handleAdminDeleteUser(request, env);
     }
 
     if (url.pathname === '/api/chat/ai' && request.method === 'POST') {

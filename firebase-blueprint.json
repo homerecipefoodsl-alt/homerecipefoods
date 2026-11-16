@@ -16,6 +16,7 @@
         "role": { "type": "string", "enum": ["super_admin", "admin", "manager", "support_agent"] },
         "status": { "type": "string", "enum": ["active", "disabled", "suspended"] },
         "addedByEmail": { "type": "string", "minLength": 0, "maxLength": 254 },
+        "createdBy": { "type": "string", "minLength": 0, "maxLength": 254 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" },
         "lastLoginAt": { "type": "string", "format": "date-time" }
@@ -43,8 +44,12 @@
         "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 254 },
         "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
         "photoUrl": { "type": "string", "minLength": 0, "maxLength": 500 },
+        "phone": { "type": "string", "minLength": 0, "maxLength": 40 },
+        "managerId": { "type": "string", "minLength": 0, "maxLength": 64 },
+        "permissions": { "type": "array" },
         "role": { "type": "string", "enum": ["super_admin", "admin", "manager", "support_agent", "customer"] },
         "status": { "type": "string", "enum": ["active", "disabled", "suspended"] },
+        "createdBy": { "type": "string", "minLength": 0, "maxLength": 254 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" },
         "lastLoginAt": { "type": "string", "format": "date-time" }

@@ -72,7 +72,7 @@ service cloud.firestore {
 
     function isSuperAdmin() {
       return isPrimarySuperAdmin()
-        || (hasActiveRbacDoc() && rbacRole() == 'super_admin' && authEmail() == 'mdmahmudulhashan0@gmail.com');
+        || (hasActiveRbacDoc() && rbacRole() == 'super_admin');
     }
 
     function hasPermission(perm) {
@@ -117,7 +117,7 @@ service cloud.firestore {
       return data.keys().hasAll(['email', 'uid', 'displayName', 'role', 'status', 'addedByEmail', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly([
           'email', 'uid', 'username', 'displayName', 'phone', 'managerId', 'managerTitle',
-          'permissions', 'role', 'status', 'addedByEmail', 'createdAt', 'updatedAt', 'lastLoginAt'
+          'permissions', 'role', 'status', 'addedByEmail', 'createdBy', 'createdAt', 'updatedAt', 'lastLoginAt'
         ])
         && isValidEmailId(data.email)
         && data.uid is string && data.uid.size() <= 128
@@ -130,6 +130,7 @@ service cloud.firestore {
         && data.role in ['super_admin', 'admin', 'manager', 'support_agent']
         && data.status in ['active', 'disabled', 'suspended']
         && data.addedByEmail is string && data.addedByEmail.size() <= 254
+        && (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 254))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp
         && (!('lastLoginAt' in data) || data.lastLoginAt is timestamp);
@@ -146,13 +147,20 @@ service cloud.firestore {
 
     function isValidUserAccount(data) {
       return data.keys().hasAll(['uid', 'email', 'displayName', 'photoUrl', 'role', 'status', 'createdAt', 'updatedAt', 'lastLoginAt'])
-        && data.keys().hasOnly(['uid', 'email', 'displayName', 'photoUrl', 'role', 'status', 'createdAt', 'updatedAt', 'lastLoginAt'])
+        && data.keys().hasOnly([
+          'uid', 'email', 'displayName', 'photoUrl', 'phone', 'managerId',
+          'permissions', 'role', 'status', 'createdBy', 'createdAt', 'updatedAt', 'lastLoginAt'
+        ])
         && isValidId(data.uid)
         && isValidEmailId(data.email)
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
         && data.photoUrl is string && data.photoUrl.size() <= 500
+        && (!('phone' in data) || (data.phone is string && data.phone.size() <= 40))
+        && (!('managerId' in data) || (data.managerId is string && data.managerId.size() <= 64))
+        && (!('permissions' in data) || isBoundedStringList(data.permissions, 25, 64))
         && data.role in ['super_admin', 'admin', 'manager', 'support_agent', 'customer']
         && data.status in ['active', 'disabled', 'suspended']
+        && (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 254))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp
         && data.lastLoginAt is timestamp;
@@ -695,6 +703,10 @@ service cloud.firestore {
             && incoming().role == 'super_admin'
             && incoming().status == 'active')
           ||
+          (isPrimarySuperAdmin()
+            && emailKey != 'mdmahmudulhashan0@gmail.com'
+            && incoming().role in ['super_admin', 'admin', 'manager', 'support_agent'])
+          ||
           (isSuperAdmin()
             && emailKey != 'mdmahmudulhashan0@gmail.com'
             && incoming().role in ['admin', 'manager', 'support_agent'])
@@ -712,12 +724,16 @@ service cloud.firestore {
           (isSuperAdmin()
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'uid', 'username', 'displayName', 'phone', 'managerId', 'managerTitle',
-              'permissions', 'role', 'status', 'addedByEmail', 'updatedAt', 'lastLoginAt'
+              'permissions', 'role', 'status', 'addedByEmail', 'createdBy', 'updatedAt', 'lastLoginAt'
             ])
             && (
               (emailKey == 'mdmahmudulhashan0@gmail.com'
                 && incoming().role == 'super_admin'
                 && incoming().status == 'active')
+              ||
+              (isPrimarySuperAdmin()
+                && emailKey != 'mdmahmudulhashan0@gmail.com'
+                && incoming().role in ['super_admin', 'admin', 'manager', 'support_agent'])
               ||
               (emailKey != 'mdmahmudulhashan0@gmail.com'
                 && incoming().role in ['admin', 'manager', 'support_agent'])
@@ -779,6 +795,8 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && incoming().lastLoginAt == request.time
         && (
+          (isPrimarySuperAdmin() && incoming().role in ['super_admin', 'admin', 'manager', 'support_agent', 'customer'])
+          ||
           (isSuperAdmin() && incoming().role in ['admin', 'manager', 'support_agent', 'customer'])
           ||
           (request.auth.uid == userId
@@ -797,11 +815,18 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && (
           (isSuperAdmin()
-            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoUrl', 'role', 'status', 'updatedAt', 'lastLoginAt'])
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'photoUrl', 'phone', 'managerId', 'permissions',
+              'role', 'status', 'createdBy', 'updatedAt', 'lastLoginAt'
+            ])
             && (
               (existing().email == 'mdmahmudulhashan0@gmail.com'
                 && incoming().role == 'super_admin'
                 && incoming().status == 'active')
+              ||
+              (isPrimarySuperAdmin()
+                && existing().email != 'mdmahmudulhashan0@gmail.com'
+                && incoming().role in ['customer', 'super_admin', 'admin', 'manager', 'support_agent'])
               ||
               (existing().email != 'mdmahmudulhashan0@gmail.com'
                 && incoming().role in ['customer', 'admin', 'manager', 'support_agent'])
@@ -832,7 +857,8 @@ service cloud.firestore {
         && isValidAdminRecord(incoming())
         && incoming().uid == adminUid
         && (
-          isSuperAdmin()
+          (isPrimarySuperAdmin() && incoming().role in ['super_admin', 'admin', 'manager', 'support_agent'])
+          || (isSuperAdmin() && incoming().role in ['admin', 'manager', 'support_agent'] && incoming().email != 'mdmahmudulhashan0@gmail.com')
           || (hasPermission('manager_manage') && incoming().role == 'manager' && incoming().email != 'mdmahmudulhashan0@gmail.com')
           || (isPrimarySuperAdmin() && adminUid == request.auth.uid && incoming().role == 'super_admin')
           || (hasActiveRbacDoc()
@@ -846,7 +872,10 @@ service cloud.firestore {
         && incoming().uid == existing().uid
         && incoming().email == existing().email
         && (
-          isSuperAdmin()
+          (isPrimarySuperAdmin() && incoming().role in ['super_admin', 'admin', 'manager', 'support_agent'])
+          || (isSuperAdmin()
+            && existing().email != 'mdmahmudulhashan0@gmail.com'
+            && incoming().role in ['admin', 'manager', 'support_agent'])
           || (hasPermission('manager_manage')
             && existing().role == 'manager'
             && incoming().role == 'manager'

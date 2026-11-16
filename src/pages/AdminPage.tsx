@@ -714,7 +714,7 @@ export function AdminPage() {
     if (isSuperAdmin || hasPermission('manager_manage') || hasPermission('admin_manage')) {
       items.push({
         id: 'admins',
-        label: 'Admins & Managers',
+        label: 'Admin Management',
         icon: <UserCog className="h-4 w-4" />,
       });
     }
@@ -1144,7 +1144,7 @@ export function AdminPage() {
                           onClick={() => selectTab('admins')}
                           className="cursor-pointer rounded-lg border border-[#1C1917] bg-[#1C1917] px-4 py-2 text-xs font-semibold text-white hover:bg-[#DC1F26]"
                         >
-                          + Create Admin / Manager
+                          + Add New User
                         </button>
                       )}
                     </div>

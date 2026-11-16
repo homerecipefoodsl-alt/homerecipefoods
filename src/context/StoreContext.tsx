@@ -162,6 +162,7 @@ interface StoreContextValue {
   adminProfile: AdminRecord | null;
   accountStatus: AccountStatus;
   isAdmin: boolean;
+  isPrimarySuperAdmin: boolean;
   isSuperAdmin: boolean;
   isCatalogAdmin: boolean;
   isSupportStaff: boolean;
@@ -497,7 +498,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           } else if (
             !isPrimarySuperAdminEmail &&
             resolvedStatus === 'active' &&
-            (resolvedRole === 'admin' ||
+            (resolvedRole === 'super_admin' ||
+              resolvedRole === 'admin' ||
               resolvedRole === 'manager' ||
               resolvedRole === 'support_agent')
           ) {
@@ -1158,6 +1160,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   );
 
   const isSuperAdmin = staffRole === 'super_admin';
+  const isPrimarySuperAdmin =
+    isSuperAdmin &&
+    Boolean(user?.emailVerified) &&
+    user?.email?.trim().toLowerCase() === PRIMARY_SUPER_ADMIN_EMAIL;
   const isCatalogAdmin =
     staffRole === 'super_admin' ||
     hasPermission('products_view') ||
@@ -1640,6 +1646,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         adminProfile,
         accountStatus,
         isAdmin,
+        isPrimarySuperAdmin,
         isSuperAdmin,
         isCatalogAdmin,
         isSupportStaff,

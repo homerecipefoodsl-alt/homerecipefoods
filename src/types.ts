@@ -85,6 +85,7 @@ export interface RbacRoleEntry {
   role: StaffRole;
   status: AccountStatus;
   addedByEmail: string;
+  createdBy?: string;
   createdAt?: unknown;
   updatedAt?: unknown;
   lastLoginAt?: unknown;
@@ -120,8 +121,12 @@ export interface UserAccount {
   email: string;
   displayName: string;
   photoUrl: string;
+  phone?: string;
+  managerId?: string;
+  permissions?: PermissionKey[];
   role: UserRole;
   status: AccountStatus;
+  createdBy?: string;
   createdAt?: unknown;
   updatedAt?: unknown;
   lastLoginAt?: unknown;
