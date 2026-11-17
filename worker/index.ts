@@ -1,5 +1,9 @@
 import firebaseConfig from '../firebase-applet-config.json';
-import { processAiChatRequest, type AiChatRequestBody } from '../shared/aiChat';
+import {
+  acquireAiRateLimitSlot,
+  processAiChatRequest,
+  type AiChatRequestBody,
+} from '../shared/aiChat';
 import {
   EXPECTED_FIREBASE_PROJECT_ID as SHARED_EXPECTED_FIREBASE_PROJECT_ID,
   inspectServiceAccountConfig as inspectSharedServiceAccountConfig,
@@ -76,16 +80,21 @@ const DEFAULT_ROLE_PERMISSIONS: Record<StaffRole, string[]> = {
 const CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Chat-Client-Id',
 };
 
-function jsonResponse(body: unknown, status = 200): Response {
+function jsonResponse(
+  body: unknown,
+  status = 200,
+  extraHeaders?: Record<string, string>
+): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'no-store',
       ...CORS_HEADERS,
+      ...(extraHeaders || {}),
     },
   });
 }
@@ -94,7 +103,8 @@ function errorResponse(
   errorCode: string,
   message: string,
   status = 400,
-  extra?: Record<string, unknown>
+  extra?: Record<string, unknown>,
+  extraHeaders?: Record<string, string>
 ): Response {
   return jsonResponse(
     {
@@ -105,7 +115,8 @@ function errorResponse(
       message,
       ...(extra || {}),
     },
-    status
+    status,
+    extraHeaders
   );
 }
 
@@ -684,14 +695,44 @@ async function handleAiChat(request: Request, env: Env): Promise<Response> {
     return errorResponse('INVALID_REQUEST', 'Invalid JSON request payload.', 400);
   }
 
+  const clientIp =
+    request.headers.get('cf-connecting-ip')?.trim() ||
+    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+    'worker-ip';
+  const headerClientId = request.headers.get('x-chat-client-id')?.trim() || '';
+  const rateLimitKey = headerClientId ? `${clientIp}:${headerClientId}` : clientIp;
+
+  const slot = acquireAiRateLimitSlot(rateLimitKey);
+  if (slot.allowed === false) {
+    return errorResponse(
+      slot.code,
+      slot.message,
+      slot.status,
+      {
+        upstreamStatus: 429,
+        retryAfterSec: slot.retryAfterSec,
+        reason: slot.reason,
+      },
+      { 'Retry-After': String(slot.retryAfterSec) }
+    );
+  }
+
   try {
     const result = await processAiChatRequest(payload, env.GEMINI_API_KEY);
     if (!result.ok) {
+      const retryHeaders =
+        result.status === 429
+          ? { 'Retry-After': String(result.retryAfterSec ?? 10) }
+          : undefined;
       return errorResponse(
         result.code,
         result.message,
         result.status,
-        result.upstreamStatus ? { upstreamStatus: result.upstreamStatus } : undefined
+        {
+          ...(result.upstreamStatus ? { upstreamStatus: result.upstreamStatus } : {}),
+          ...(result.retryAfterSec ? { retryAfterSec: result.retryAfterSec } : {}),
+        },
+        retryHeaders
       );
     }
     return jsonResponse({
@@ -706,6 +747,8 @@ async function handleAiChat(request: Request, env: Env): Promise<Response> {
       'Unexpected server error while processing AI Assistant request.',
       500
     );
+  } finally {
+    slot.release();
   }
 }
 

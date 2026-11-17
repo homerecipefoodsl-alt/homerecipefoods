@@ -4,7 +4,11 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import dotenv from 'dotenv';
-import { processAiChatRequest, type AiChatRequestBody } from './shared/aiChat';
+import {
+  acquireAiRateLimitSlot,
+  processAiChatRequest,
+  type AiChatRequestBody,
+} from './shared/aiChat';
 import {
   EXPECTED_FIREBASE_PROJECT_ID as SHARED_EXPECTED_FIREBASE_PROJECT_ID,
   inspectServiceAccountConfig,
@@ -61,7 +65,7 @@ app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
 app.use('/api', (req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Chat-Client-Id');
   res.setHeader('Cache-Control', 'no-store');
   if (req.method === 'OPTIONS') {
     res.status(204).end();
@@ -1437,6 +1441,29 @@ ${staticRoutes
 });
 
 async function handleAiChatEndpoint(req: Request, res: Response) {
+  const forwardedFor = req.headers['x-forwarded-for'];
+  const forwardedIp = Array.isArray(forwardedFor)
+    ? forwardedFor[0]
+    : typeof forwardedFor === 'string'
+    ? forwardedFor.split(',')[0]?.trim()
+    : '';
+  const clientIp = forwardedIp || req.ip || 'express-ip';
+  const rawHeaderClientId = req.headers['x-chat-client-id'];
+  const headerClientId =
+    (Array.isArray(rawHeaderClientId) ? rawHeaderClientId[0] : rawHeaderClientId)?.trim() || '';
+  const rateLimitKey = headerClientId ? `${clientIp}:${headerClientId}` : clientIp;
+
+  const slot = acquireAiRateLimitSlot(rateLimitKey);
+  if (slot.allowed === false) {
+    res.setHeader('Retry-After', String(slot.retryAfterSec));
+    sendError(res, slot.code, slot.message, slot.status, {
+      upstreamStatus: 429,
+      retryAfterSec: slot.retryAfterSec,
+      reason: slot.reason,
+    });
+    return;
+  }
+
   try {
     const body = (req.body && typeof req.body === 'object' && !Array.isArray(req.body)
       ? req.body
@@ -1444,13 +1471,13 @@ async function handleAiChatEndpoint(req: Request, res: Response) {
 
     const result = await processAiChatRequest(body, process.env.GEMINI_API_KEY);
     if (!result.ok) {
-      sendError(
-        res,
-        result.code,
-        result.message,
-        result.status,
-        result.upstreamStatus ? { upstreamStatus: result.upstreamStatus } : undefined
-      );
+      if (result.status === 429) {
+        res.setHeader('Retry-After', String(result.retryAfterSec ?? 10));
+      }
+      sendError(res, result.code, result.message, result.status, {
+        ...(result.upstreamStatus ? { upstreamStatus: result.upstreamStatus } : {}),
+        ...(result.retryAfterSec ? { retryAfterSec: result.retryAfterSec } : {}),
+      });
       return;
     }
 
@@ -1467,6 +1494,8 @@ async function handleAiChatEndpoint(req: Request, res: Response) {
       'Unexpected server error while processing AI Assistant request.',
       500
     );
+  } finally {
+    slot.release();
   }
 }
 

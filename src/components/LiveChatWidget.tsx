@@ -42,6 +42,24 @@ interface AiMessage {
 }
 
 const SESSION_STORAGE_KEY = 'hrf_live_chat_session_id';
+const AI_CLIENT_ID_STORAGE_KEY = 'hrf_ai_client_id';
+
+function getOrCreateAiClientId(): string {
+  try {
+    const existing = sessionStorage.getItem(AI_CLIENT_ID_STORAGE_KEY);
+    if (existing && existing.trim().length >= 8) {
+      return existing.trim();
+    }
+    const generated =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `hrf-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    sessionStorage.setItem(AI_CLIENT_ID_STORAGE_KEY, generated);
+    return generated;
+  } catch {
+    return `hrf-${Date.now()}`;
+  }
+}
 
 export function LiveChatWidget({
   open,
@@ -253,7 +271,10 @@ export function LiveChatWidget({
     try {
       const resp = await fetch('/api/chat/ai', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Chat-Client-Id': getOrCreateAiClientId(),
+        },
         body: JSON.stringify({
           message: trimmed,
           history: priorHistory,
@@ -277,37 +298,74 @@ export function LiveChatWidget({
         code?: string;
         error?: string;
         message?: string;
+        upstreamStatus?: number;
+        retryAfterSec?: number;
       };
 
       if (!resp.ok) {
         const rawCode = String(data.code || data.error || '').trim().toLowerCase();
+        const upstreamStatus =
+          typeof data.upstreamStatus === 'number' ? data.upstreamStatus : 0;
         let errorText =
-          'AI সার্ভার থেকে উত্তর পাওয়া যায়নি। অনুগ্রহ করে একটু পরে আবার চেষ্টা করুন।';
+          'Gemini API সার্ভারে সাময়িক ত্রুটি হয়েছে (500)। অনুগ্রহ করে একটু পর আবার চেষ্টা করুন।';
 
-        if (rawCode === 'missing_api_key' || rawCode === 'ai_config_missing' || rawCode === 'ai_config_invalid') {
+        if (
+          rawCode === 'missing_api_key' ||
+          rawCode === 'ai_config_missing' ||
+          rawCode === 'ai_config_invalid'
+        ) {
           errorText = 'AI service configuration is missing.';
         } else if (
+          resp.status === 401 ||
+          upstreamStatus === 401 ||
           rawCode === 'invalid_api_key' ||
-          rawCode === 'ai_key_invalid' ||
+          rawCode === 'ai_key_invalid'
+        ) {
+          errorText =
+            'Gemini API key সঠিক নয় বা মেয়াদোত্তীর্ণ হয়েছে (401)। অনুগ্রহ করে Cloudflare Worker Secret-এ বৈধ GEMINI_API_KEY যাচাই করুন।';
+        } else if (
+          resp.status === 403 ||
+          upstreamStatus === 403 ||
+          rawCode === 'permission_denied' ||
           rawCode === 'ai_permission_denied'
         ) {
           errorText =
-            'Gemini API key সঠিক নয় বা অনুমতি পায়নি (invalid_api_key)। অনুগ্রহ করে Cloudflare Worker Secret-এ বৈধ GEMINI_API_KEY সেট করুন।';
-        } else if (rawCode === 'model_not_found' || rawCode === 'ai_model_not_found') {
+            'এই Gemini API key-তে অনুরোধ করার অনুমতি নেই (403)। API permission ও restriction যাচাই করুন।';
+        } else if (
+          resp.status === 404 ||
+          upstreamStatus === 404 ||
+          rawCode === 'model_not_found' ||
+          rawCode === 'ai_model_not_found'
+        ) {
           errorText =
-            'নির্বাচিত Gemini মডেলটি পাওয়া যায়নি (model_not_found)। অনুগ্রহ করে পরে আবার চেষ্টা করুন।';
-        } else if (resp.status === 429 || rawCode === 'rate_limit' || rawCode === 'rate_limited') {
+            'নির্বাচিত Gemini মডেলটি পাওয়া যায়নি (404)। অনুগ্রহ করে কিছুক্ষণ পর আবার চেষ্টা করুন।';
+        } else if (
+          resp.status === 429 ||
+          upstreamStatus === 429 ||
+          rawCode === 'rate_limit' ||
+          rawCode === 'rate_limited'
+        ) {
+          const serverMsg =
+            typeof data.message === 'string' && /[\u0980-\u09FF]/.test(data.message)
+              ? data.message.trim()
+              : 'অনুরোধের সীমা অতিক্রম করেছে (429 rate_limit)। অনুগ্রহ করে কিছুক্ষণ অপেক্ষা করে আবার চেষ্টা করুন।';
+          const retryNote =
+            typeof data.retryAfterSec === 'number' && data.retryAfterSec > 0
+              ? ` (${data.retryAfterSec} সেকেন্ড পর চেষ্টা করুন)`
+              : '';
+          errorText = `${serverMsg}${retryNote}`;
+        } else if (resp.status === 504 || upstreamStatus === 504 || rawCode === 'api_timeout') {
           errorText =
-            'অনুরোধের সীমা অতিক্রম করেছে (rate_limit)। অনুগ্রহ করে কিছুক্ষণ অপেক্ষা করে আবার চেষ্টা করুন।';
-        } else if (resp.status === 504 || rawCode === 'api_timeout') {
+            'Gemini API থেকে উত্তর আসতে সময় বেশি লেগেছে (api_timeout)। অনুগ্রহ করে আবার চেষ্টা করুন।';
+        } else if (
+          resp.status === 500 ||
+          upstreamStatus === 500 ||
+          rawCode === 'worker_internal_error' ||
+          rawCode === 'gemini_api_error' ||
+          rawCode === 'ai_unavailable'
+        ) {
           errorText =
-            'Gemini API থেকে উত্তর আসতে সময় বেশি লেগেছে (api_timeout)। আবার চেষ্টা করুন।';
-        } else if (rawCode === 'gemini_api_error' || rawCode === 'ai_unavailable') {
-          errorText =
-            'Gemini API থেকে সংযোগ বা উত্তর পেতে সমস্যা হয়েছে (gemini_api_error)। আবার চেষ্টা করুন।';
-        } else if (rawCode === 'worker_internal_error') {
-          errorText =
-            'সার্ভারের অভ্যন্তরীণ ত্রুটি হয়েছে (worker_internal_error)। অনুগ্রহ করে আবার চেষ্টা করুন।';
+            'Gemini API বা সার্ভারের অভ্যন্তরীণ ত্রুটি হয়েছে (500)। অনুগ্রহ করে একটু পর আবার চেষ্টা করুন।';
         } else if (typeof data.message === 'string' && data.message.trim() && resp.status === 400) {
           errorText = data.message.trim();
         }
