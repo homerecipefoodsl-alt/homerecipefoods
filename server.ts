@@ -5,6 +5,11 @@ import { fileURLToPath } from 'url';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import dotenv from 'dotenv';
 import { processAiChatRequest, type AiChatRequestBody } from './shared/aiChat';
+import {
+  EXPECTED_FIREBASE_PROJECT_ID as SHARED_EXPECTED_FIREBASE_PROJECT_ID,
+  inspectServiceAccountConfig,
+  type ServiceAccountConfig,
+} from './shared/firebaseServiceAccount';
 
 dotenv.config();
 
@@ -256,132 +261,7 @@ async function verifyFirebaseIdToken(idToken: string): Promise<VerifiedFirebaseT
 
 // Gemini client initialized per request inside shared/aiChat.ts using process.env.GEMINI_API_KEY
 
-interface ServiceAccountConfig {
-  project_id: string;
-  client_email: string;
-  private_key: string;
-}
-
-type ServiceAccountDiagnostic =
-  | 'ready'
-  | 'missing'
-  | 'invalid_json'
-  | 'missing_fields'
-  | 'project_mismatch';
-
-type ServiceAccountValidation =
-  | {
-      ok: true;
-      config: ServiceAccountConfig;
-      diagnosticStatus: 'ready';
-    }
-  | {
-      ok: false;
-      errorCode: string;
-      status: number;
-      diagnosticStatus: Exclude<ServiceAccountDiagnostic, 'ready'>;
-      message: string;
-    };
-
-function inspectServiceAccountConfig(
-  raw: string | undefined,
-  expectedProjectId: string
-): ServiceAccountValidation {
-  if (typeof raw !== 'string' || !raw.trim()) {
-    return {
-      ok: false,
-      errorCode: 'FIREBASE_CONFIG_MISSING',
-      status: 500,
-      diagnosticStatus: 'missing',
-      message:
-        'Firebase Admin SDK credentials (FIREBASE_SERVICE_ACCOUNT_JSON) are not configured on the server.',
-    };
-  }
-
-  let normalized = raw.trim();
-  if (
-    (normalized.startsWith("'") && normalized.endsWith("'")) ||
-    (normalized.startsWith('"') && normalized.endsWith('"'))
-  ) {
-    try {
-      const unwrapped = JSON.parse(normalized);
-      if (typeof unwrapped === 'string') {
-        normalized = unwrapped.trim();
-      }
-    } catch {
-      // Keep original trimmed value
-    }
-  }
-
-  let parsed: Partial<ServiceAccountConfig>;
-  try {
-    const obj = JSON.parse(normalized);
-    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
-      return {
-        ok: false,
-        errorCode: 'SERVER_CONFIG_ERROR',
-        status: 500,
-        diagnosticStatus: 'invalid_json',
-        message: 'FIREBASE_SERVICE_ACCOUNT_JSON must be a valid JSON object.',
-      };
-    }
-    parsed = obj as Partial<ServiceAccountConfig>;
-  } catch {
-    return {
-      ok: false,
-      errorCode: 'SERVER_CONFIG_ERROR',
-      status: 500,
-      diagnosticStatus: 'invalid_json',
-      message: 'FIREBASE_SERVICE_ACCOUNT_JSON is malformed and could not be parsed as JSON.',
-    };
-  }
-
-  const projectIdVal = typeof parsed.project_id === 'string' ? parsed.project_id.trim() : '';
-  const clientEmailVal =
-    typeof parsed.client_email === 'string' ? parsed.client_email.trim() : '';
-  const privateKeyVal =
-    typeof parsed.private_key === 'string'
-      ? parsed.private_key.replace(/\\n/g, '\n').trim()
-      : '';
-
-  if (
-    !projectIdVal ||
-    !clientEmailVal ||
-    !clientEmailVal.includes('@') ||
-    !privateKeyVal ||
-    !privateKeyVal.includes('PRIVATE KEY')
-  ) {
-    return {
-      ok: false,
-      errorCode: 'SERVER_CONFIG_ERROR',
-      status: 500,
-      diagnosticStatus: 'missing_fields',
-      message:
-        'FIREBASE_SERVICE_ACCOUNT_JSON is missing required fields (project_id, client_email, or private_key).',
-    };
-  }
-
-  const requiredProject = expectedProjectId || EXPECTED_FIREBASE_PROJECT_ID;
-  if (projectIdVal !== requiredProject) {
-    return {
-      ok: false,
-      errorCode: 'PROJECT_MISMATCH',
-      status: 500,
-      diagnosticStatus: 'project_mismatch',
-      message: `Service account project_id (${projectIdVal}) does not match expected Firebase project (${requiredProject}).`,
-    };
-  }
-
-  return {
-    ok: true,
-    diagnosticStatus: 'ready',
-    config: {
-      project_id: projectIdVal,
-      client_email: clientEmailVal,
-      private_key: privateKeyVal,
-    },
-  };
-}
+// Firebase service account validation & private_key \n handling lives in ./shared/firebaseServiceAccount.ts
 
 let cachedServiceAccountToken: { token: string; expiresAt: number; clientEmail: string } | null =
   null;
@@ -423,7 +303,7 @@ async function getGoogleAdminAccessToken(sa: ServiceAccountConfig): Promise<stri
     signer.end();
     signature = base64UrlEncode(signer.sign(sa.private_key));
   } catch {
-    throw new Error('FIREBASE_ADMIN_INIT_FAILED: Invalid PKCS#8 private key format.');
+    throw new Error('Firebase Admin private key initialization failed.');
   }
 
   const assertion = `${signingInput}.${signature}`;
@@ -439,12 +319,9 @@ async function getGoogleAdminAccessToken(sa: ServiceAccountConfig): Promise<stri
   const tokenJson = (await tokenResp.json()) as {
     access_token?: string;
     expires_in?: number;
-    error?: string;
   };
   if (!tokenResp.ok || !tokenJson.access_token) {
-    throw new Error(
-      `FIREBASE_ADMIN_INIT_FAILED: Google OAuth token exchange rejected (${tokenJson.error || tokenResp.status}).`
-    );
+    throw new Error('Firebase Admin OAuth token initialization failed.');
   }
 
   cachedServiceAccountToken = {
@@ -818,8 +695,28 @@ app.post('/api/auth/session-init', async (req, res) => {
     const authority = await verifyCallerStaffAuthority(token, decoded.email);
     const saCheck = inspectServiceAccountConfig(
       process.env.FIREBASE_SERVICE_ACCOUNT_JSON,
-      firebaseProjectId
+      SHARED_EXPECTED_FIREBASE_PROJECT_ID || firebaseProjectId
     );
+    let cryptoInitialized = saCheck.ok;
+    if (saCheck.ok) {
+      try {
+        crypto.createPrivateKey(saCheck.config.private_key);
+      } catch {
+        cryptoInitialized = false;
+      }
+    }
+
+    const serviceAccountStatus = !saCheck.ok
+      ? saCheck.diagnosticStatus
+      : cryptoInitialized
+      ? 'ready'
+      : 'initialization_error';
+
+    const serviceAccountMessage = !saCheck.ok
+      ? saCheck.message
+      : cryptoInitialized
+      ? 'Admin SDK Status: Ready'
+      : 'Firebase Admin private key could not be initialized.';
 
     res.json({
       success: true,
@@ -829,11 +726,9 @@ app.post('/api/auth/session-init', async (req, res) => {
       email: decoded.email,
       isPrimarySuperAdmin: authority.isPrimarySuperAdmin,
       authorizedSuperAdmin: authority.isSuperAdmin,
-      hasAdminCredentials: saCheck.ok,
-      serviceAccountStatus: saCheck.diagnosticStatus,
-      serviceAccountMessage: saCheck.ok
-        ? 'Firebase Admin Service Account configured and verified.'
-        : saCheck.message,
+      hasAdminCredentials: saCheck.ok && cryptoInitialized,
+      serviceAccountStatus,
+      serviceAccountMessage,
       role: authority.isSuperAdmin
         ? 'super_admin'
         : authority.canManageManagers
@@ -995,7 +890,7 @@ async function handleCreateAdminUser(req: Request, res: Response) {
 
     const saCheck = inspectServiceAccountConfig(
       process.env.FIREBASE_SERVICE_ACCOUNT_JSON,
-      firebaseProjectId
+      SHARED_EXPECTED_FIREBASE_PROJECT_ID || firebaseProjectId
     );
     if (!saCheck.ok) {
       sendError(res, saCheck.errorCode, saCheck.message, saCheck.status);
@@ -1005,12 +900,13 @@ async function handleCreateAdminUser(req: Request, res: Response) {
     let adminToken: string;
     try {
       adminToken = await getGoogleAdminAccessToken(saCheck.config);
-    } catch (initErr) {
-      const msg =
-        initErr instanceof Error && initErr.message
-          ? initErr.message
-          : 'Failed to initialize Firebase Admin credentials.';
-      sendError(res, 'FIREBASE_ADMIN_INIT_FAILED', msg, 500);
+    } catch {
+      sendError(
+        res,
+        'FIREBASE_ADMIN_INIT_FAILED',
+        'Firebase Admin SDK initialization failed. Verify the FIREBASE_SERVICE_ACCOUNT_JSON secret.',
+        500
+      );
       return;
     }
 

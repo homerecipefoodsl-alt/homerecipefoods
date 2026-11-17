@@ -1047,13 +1047,12 @@ export function AdminRoleManagementPanel() {
                   Admin SDK Status:{' '}
                   {hasAdminCredentials ? (
                     <span className="font-semibold text-emerald-700">
-                      Firebase Admin Service Account Active (pre-verified creation + atomic Firestore profile + Auth rollback)
+                      Ready
                     </span>
                   ) : (
                     <span className="font-semibold text-[#B91C1C]">
-                      Not Ready ({serviceAccountStatus || 'missing'}) —{' '}
-                      {serviceAccountMessage ||
-                        'Configure FIREBASE_SERVICE_ACCOUNT_JSON secret in Cloudflare Worker.'}
+                      Not Ready ({serviceAccountStatus || 'missing_secret'})
+                      {serviceAccountMessage ? ` — ${serviceAccountMessage}` : ''}
                     </span>
                   )}
                 </div>

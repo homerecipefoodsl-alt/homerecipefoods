@@ -1,0 +1,217 @@
+export const EXPECTED_FIREBASE_PROJECT_ID = 'ai-studio-applet-webapp-e4b0f';
+
+export interface ServiceAccountConfig {
+  project_id: string;
+  client_email: string;
+  private_key: string;
+}
+
+export type ServiceAccountDiagnostic =
+  | 'ready'
+  | 'missing_secret'
+  | 'invalid_json'
+  | 'initialization_error';
+
+export type ServiceAccountValidation =
+  | {
+      ok: true;
+      config: ServiceAccountConfig;
+      diagnosticStatus: 'ready';
+    }
+  | {
+      ok: false;
+      errorCode: string;
+      status: number;
+      diagnosticStatus: Exclude<ServiceAccountDiagnostic, 'ready'>;
+      message: string;
+    };
+
+export function normalizePrivateKeyPem(rawKey: string): string {
+  return rawKey
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\r\n/g, '\n')
+    .trim();
+}
+
+export function pemToPkcs8ArrayBuffer(pem: string): ArrayBuffer {
+  const normalizedPem = normalizePrivateKeyPem(pem);
+  const b64 = normalizedPem
+    .replace(/-----BEGIN [A-Z0-9 ]+-----/g, '')
+    .replace(/-----END [A-Z0-9 ]+-----/g, '')
+    .replace(/\s+/g, '');
+
+  if (!b64 || b64.length % 4 !== 0 || !/^[A-Za-z0-9+/=]+$/.test(b64)) {
+    throw new Error('INVALID_PKCS8_BODY');
+  }
+
+  const bin = atob(b64);
+  if (bin.length < 32) {
+    throw new Error('INVALID_PKCS8_LENGTH');
+  }
+
+  const buffer = new ArrayBuffer(bin.length);
+  const view = new Uint8Array(buffer);
+  for (let i = 0; i < bin.length; i += 1) {
+    view[i] = bin.charCodeAt(i);
+  }
+  return buffer;
+}
+
+export async function verifyWebCryptoServiceAccountKey(
+  privateKeyPem: string
+): Promise<boolean> {
+  try {
+    const pkcs8 = pemToPkcs8ArrayBuffer(privateKeyPem);
+    await crypto.subtle.importKey(
+      'pkcs8',
+      pkcs8,
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function inspectServiceAccountConfig(
+  raw: unknown,
+  expectedProjectId: string = EXPECTED_FIREBASE_PROJECT_ID
+): ServiceAccountValidation {
+  if (typeof raw !== 'string') {
+    return {
+      ok: false,
+      errorCode: 'FIREBASE_CONFIG_MISSING',
+      status: 500,
+      diagnosticStatus: 'missing_secret',
+      message:
+        'FIREBASE_SERVICE_ACCOUNT_JSON secret is missing. Configure it as a Cloudflare Worker secret.',
+    };
+  }
+
+  // Strip optional UTF-8 BOM before checking emptiness or parsing JSON
+  const cleaned = raw.replace(/^\uFEFF/, '').trim();
+  if (!cleaned) {
+    return {
+      ok: false,
+      errorCode: 'FIREBASE_CONFIG_MISSING',
+      status: 500,
+      diagnosticStatus: 'missing_secret',
+      message:
+        'FIREBASE_SERVICE_ACCOUNT_JSON secret is empty. Configure it as a Cloudflare Worker secret.',
+    };
+  }
+
+  let parsedUnknown: unknown;
+  try {
+    parsedUnknown = JSON.parse(cleaned);
+  } catch {
+    return {
+      ok: false,
+      errorCode: 'INVALID_JSON',
+      status: 500,
+      diagnosticStatus: 'invalid_json',
+      message: 'FIREBASE_SERVICE_ACCOUNT_JSON is malformed and could not be parsed as JSON.',
+    };
+  }
+
+  // Do NOT blindly unwrap double-encoded JSON strings; clearly surface the config issue
+  if (typeof parsedUnknown === 'string') {
+    return {
+      ok: false,
+      errorCode: 'INVALID_JSON',
+      status: 500,
+      diagnosticStatus: 'invalid_json',
+      message:
+        'FIREBASE_SERVICE_ACCOUNT_JSON is double-encoded as a JSON string. Store the raw service account JSON object without extra string escaping or outer quotes.',
+    };
+  }
+
+  if (!parsedUnknown || typeof parsedUnknown !== 'object' || Array.isArray(parsedUnknown)) {
+    return {
+      ok: false,
+      errorCode: 'INVALID_JSON',
+      status: 500,
+      diagnosticStatus: 'invalid_json',
+      message: 'FIREBASE_SERVICE_ACCOUNT_JSON must be a valid JSON object.',
+    };
+  }
+
+  const parsed = parsedUnknown as Record<string, unknown>;
+  const accountType = typeof parsed.type === 'string' ? parsed.type.trim() : '';
+  const projectIdVal = typeof parsed.project_id === 'string' ? parsed.project_id.trim() : '';
+  const clientEmailVal = typeof parsed.client_email === 'string' ? parsed.client_email.trim() : '';
+  const rawPrivateKey = typeof parsed.private_key === 'string' ? parsed.private_key : '';
+  const privateKeyVal = normalizePrivateKeyPem(rawPrivateKey);
+
+  if (accountType && accountType !== 'service_account') {
+    return {
+      ok: false,
+      errorCode: 'FIREBASE_ADMIN_INIT_FAILED',
+      status: 500,
+      diagnosticStatus: 'initialization_error',
+      message: 'Service account JSON does not have type "service_account".',
+    };
+  }
+
+  if (!projectIdVal || !clientEmailVal || !clientEmailVal.includes('@') || !privateKeyVal) {
+    return {
+      ok: false,
+      errorCode: 'FIREBASE_ADMIN_INIT_FAILED',
+      status: 500,
+      diagnosticStatus: 'initialization_error',
+      message:
+        'Service account JSON is missing required credential fields (project_id, client_email, or private_key).',
+    };
+  }
+
+  const requiredProject = (expectedProjectId || EXPECTED_FIREBASE_PROJECT_ID).trim();
+  if (projectIdVal !== requiredProject) {
+    return {
+      ok: false,
+      errorCode: 'PROJECT_MISMATCH',
+      status: 500,
+      diagnosticStatus: 'initialization_error',
+      message: `Service account project does not match the configured Firebase project (${requiredProject}).`,
+    };
+  }
+
+  if (
+    !privateKeyVal.includes('-----BEGIN PRIVATE KEY-----') ||
+    !privateKeyVal.includes('-----END PRIVATE KEY-----')
+  ) {
+    return {
+      ok: false,
+      errorCode: 'FIREBASE_ADMIN_INIT_FAILED',
+      status: 500,
+      diagnosticStatus: 'initialization_error',
+      message:
+        'Firebase Admin private key format is invalid (expected PKCS#8 PEM with escaped \\n newlines).',
+    };
+  }
+
+  try {
+    pemToPkcs8ArrayBuffer(privateKeyVal);
+  } catch {
+    return {
+      ok: false,
+      errorCode: 'FIREBASE_ADMIN_INIT_FAILED',
+      status: 500,
+      diagnosticStatus: 'initialization_error',
+      message:
+        'Firebase Admin private key could not be decoded. Ensure private_key preserves valid PEM data and escaped \\n newlines.',
+    };
+  }
+
+  return {
+    ok: true,
+    diagnosticStatus: 'ready',
+    config: {
+      project_id: projectIdVal,
+      client_email: clientEmailVal,
+      private_key: privateKeyVal,
+    },
+  };
+}
