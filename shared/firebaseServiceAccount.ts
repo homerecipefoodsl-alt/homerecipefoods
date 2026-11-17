@@ -7,7 +7,7 @@ export interface ServiceAccountConfig {
 }
 
 export type ServiceAccountDiagnostic =
-  | 'ready'
+  | 'Ready'
   | 'missing_secret'
   | 'invalid_json'
   | 'initialization_error';
@@ -16,13 +16,13 @@ export type ServiceAccountValidation =
   | {
       ok: true;
       config: ServiceAccountConfig;
-      diagnosticStatus: 'ready';
+      diagnosticStatus: 'Ready';
     }
   | {
       ok: false;
       errorCode: string;
       status: number;
-      diagnosticStatus: Exclude<ServiceAccountDiagnostic, 'ready'>;
+      diagnosticStatus: Exclude<ServiceAccountDiagnostic, 'Ready'>;
       message: string;
     };
 
@@ -76,11 +76,57 @@ export async function verifyWebCryptoServiceAccountKey(
   }
 }
 
+function escapeRawNewlinesInJsonStrings(input: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    if (inString) {
+      if (escaped) {
+        out += ch;
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        out += ch;
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        out += ch;
+        inString = false;
+        continue;
+      }
+      if (ch === '\r') {
+        if (input[i + 1] === '\n') {
+          i += 1;
+        }
+        out += '\\n';
+        continue;
+      }
+      if (ch === '\n') {
+        out += '\\n';
+        continue;
+      }
+      out += ch;
+    } else {
+      if (ch === '"') {
+        inString = true;
+      }
+      out += ch;
+    }
+  }
+
+  return out;
+}
+
 export function inspectServiceAccountConfig(
   raw: unknown,
   expectedProjectId: string = EXPECTED_FIREBASE_PROJECT_ID
 ): ServiceAccountValidation {
-  if (typeof raw !== 'string') {
+  if (raw === undefined || raw === null) {
     return {
       ok: false,
       errorCode: 'FIREBASE_CONFIG_MISSING',
@@ -91,45 +137,132 @@ export function inspectServiceAccountConfig(
     };
   }
 
-  // Strip optional UTF-8 BOM before checking emptiness or parsing JSON
-  const cleaned = raw.replace(/^\uFEFF/, '').trim();
-  if (!cleaned) {
-    return {
-      ok: false,
-      errorCode: 'FIREBASE_CONFIG_MISSING',
-      status: 500,
-      diagnosticStatus: 'missing_secret',
-      message:
-        'FIREBASE_SERVICE_ACCOUNT_JSON secret is empty. Configure it as a Cloudflare Worker secret.',
-    };
-  }
-
   let parsedUnknown: unknown;
-  try {
-    parsedUnknown = JSON.parse(cleaned);
-  } catch {
-    return {
-      ok: false,
-      errorCode: 'INVALID_JSON',
-      status: 500,
-      diagnosticStatus: 'invalid_json',
-      message: 'FIREBASE_SERVICE_ACCOUNT_JSON is malformed and could not be parsed as JSON.',
-    };
-  }
 
-  // Do NOT blindly unwrap double-encoded JSON strings; clearly surface the config issue
-  if (typeof parsedUnknown === 'string') {
-    return {
-      ok: false,
-      errorCode: 'INVALID_JSON',
-      status: 500,
-      diagnosticStatus: 'invalid_json',
-      message:
-        'FIREBASE_SERVICE_ACCOUNT_JSON is double-encoded as a JSON string. Store the raw service account JSON object without extra string escaping or outer quotes.',
-    };
-  }
+  if (typeof raw === 'object') {
+    if (Array.isArray(raw)) {
+      return {
+        ok: false,
+        errorCode: 'INVALID_JSON',
+        status: 500,
+        diagnosticStatus: 'invalid_json',
+        message: 'FIREBASE_SERVICE_ACCOUNT_JSON must be a valid JSON object.',
+      };
+    }
+    parsedUnknown = raw;
+  } else if (typeof raw === 'string') {
+    // Strip optional UTF-8 BOM, zero-width characters, and non-breaking spaces from mobile/editor copy-paste
+    let cleaned = raw
+      .replace(/[\uFEFF\u200B-\u200D]/g, '')
+      .replace(/\u00A0/g, ' ')
+      .trim();
+    if (!cleaned) {
+      return {
+        ok: false,
+        errorCode: 'FIREBASE_CONFIG_MISSING',
+        status: 500,
+        diagnosticStatus: 'missing_secret',
+        message:
+          'FIREBASE_SERVICE_ACCOUNT_JSON secret is empty. Configure it as a Cloudflare Worker secret.',
+      };
+    }
 
-  if (!parsedUnknown || typeof parsedUnknown !== 'object' || Array.isArray(parsedUnknown)) {
+    // Explicitly detect Markdown code fences (e.g. ```json ... ```) as a configuration problem
+    if (/^```/i.test(cleaned) || /```$/.test(cleaned)) {
+      return {
+        ok: false,
+        errorCode: 'INVALID_JSON',
+        status: 500,
+        diagnosticStatus: 'invalid_json',
+        message:
+          'FIREBASE_SERVICE_ACCOUNT_JSON contains Markdown code fence markers (```). Remove ```json / ``` and store the raw JSON object only.',
+      };
+    }
+
+    // Try strict JSON.parse first so double-encoded JSON ("{\"type\":...}") is accurately detected as a string
+    try {
+      parsedUnknown = JSON.parse(cleaned);
+    } catch {
+      // Handle accidental outer quotation marks wrapping an unescaped JSON object (e.g. '{...}' or "{...}")
+      if (
+        (cleaned.startsWith("'") && cleaned.endsWith("'")) ||
+        (cleaned.startsWith('"') && cleaned.endsWith('"'))
+      ) {
+        const inner = cleaned.slice(1, -1).trim();
+        if (inner.startsWith('{') && inner.endsWith('}') && !inner.startsWith('{\\')) {
+          cleaned = inner;
+        }
+      }
+
+      try {
+        parsedUnknown = JSON.parse(cleaned);
+      } catch {
+        // Detect typographic smart/curly quotes introduced by mobile keyboards or rich-text editors
+        if (/[\u201C\u201D\u2018\u2019]/.test(cleaned)) {
+          return {
+            ok: false,
+            errorCode: 'INVALID_JSON',
+            status: 500,
+            diagnosticStatus: 'invalid_json',
+            message:
+              'FIREBASE_SERVICE_ACCOUNT_JSON contains curly/smart quotes instead of standard straight JSON quotes (").',
+          };
+        }
+
+        // Safely recover only literal unescaped CR/LF newlines inside JSON string values (e.g. pasted PEM lines)
+        let recovered = false;
+        if (cleaned.startsWith('{') && /[\r\n]/.test(cleaned)) {
+          try {
+            parsedUnknown = JSON.parse(escapeRawNewlinesInJsonStrings(cleaned));
+            recovered = true;
+          } catch {
+            recovered = false;
+          }
+        }
+
+        if (!recovered) {
+          let reason =
+            'FIREBASE_SERVICE_ACCOUNT_JSON is malformed and could not be parsed as JSON. Re-paste the complete minified single-line JSON object in Cloudflare Secrets.';
+          if (!cleaned.startsWith('{')) {
+            reason =
+              "FIREBASE_SERVICE_ACCOUNT_JSON does not start with '{'. Store the full Firebase service account JSON object, not a partial key.";
+          } else if (!cleaned.endsWith('}')) {
+            reason =
+              "FIREBASE_SERVICE_ACCOUNT_JSON appears truncated (missing closing '}'). Re-paste the complete minified single-line JSON object in Cloudflare Secrets.";
+          }
+          return {
+            ok: false,
+            errorCode: 'INVALID_JSON',
+            status: 500,
+            diagnosticStatus: 'invalid_json',
+            message: reason,
+          };
+        }
+      }
+    }
+
+    // Do NOT blindly unwrap double-encoded JSON strings; clearly surface the config issue
+    if (typeof parsedUnknown === 'string') {
+      return {
+        ok: false,
+        errorCode: 'INVALID_JSON',
+        status: 500,
+        diagnosticStatus: 'invalid_json',
+        message:
+          'FIREBASE_SERVICE_ACCOUNT_JSON is double-encoded as a JSON string. Store the raw service account JSON object without extra string escaping.',
+      };
+    }
+
+    if (!parsedUnknown || typeof parsedUnknown !== 'object' || Array.isArray(parsedUnknown)) {
+      return {
+        ok: false,
+        errorCode: 'INVALID_JSON',
+        status: 500,
+        diagnosticStatus: 'invalid_json',
+        message: 'FIREBASE_SERVICE_ACCOUNT_JSON must be a valid JSON object.',
+      };
+    }
+  } else {
     return {
       ok: false,
       errorCode: 'INVALID_JSON',
@@ -207,7 +340,7 @@ export function inspectServiceAccountConfig(
 
   return {
     ok: true,
-    diagnosticStatus: 'ready',
+    diagnosticStatus: 'Ready',
     config: {
       project_id: projectIdVal,
       client_email: clientEmailVal,

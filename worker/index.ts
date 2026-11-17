@@ -743,7 +743,7 @@ async function handleSessionInit(request: Request, env: Env): Promise<Response> 
     const serviceAccountStatus = !saCheck.ok
       ? saCheck.diagnosticStatus
       : cryptoInitialized
-      ? 'ready'
+      ? 'Ready'
       : 'initialization_error';
 
     const serviceAccountMessage = !saCheck.ok

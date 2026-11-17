@@ -709,7 +709,7 @@ app.post('/api/auth/session-init', async (req, res) => {
     const serviceAccountStatus = !saCheck.ok
       ? saCheck.diagnosticStatus
       : cryptoInitialized
-      ? 'ready'
+      ? 'Ready'
       : 'initialization_error';
 
     const serviceAccountMessage = !saCheck.ok
