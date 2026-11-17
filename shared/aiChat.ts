@@ -38,10 +38,36 @@ export const DEFAULT_AI_FALLBACK_MESSAGE =
 
 export const AI_ERROR_MESSAGES = {
   CONFIG_MISSING: 'AI service configuration is missing.',
+  KEY_INVALID: 'Configured GEMINI_API_KEY is invalid or rejected by Gemini API.',
+  PERMISSION_DENIED: 'Configured GEMINI_API_KEY does not have permission for Gemini API.',
+  MODEL_NOT_FOUND: 'AI Assistant মডেল সাময়িকভাবে পাওয়া যাচ্ছে না। একটু পরে আবার চেষ্টা করুন।',
   RATE_LIMITED: 'অনুগ্রহ করে কিছুক্ষণ পরে আবার চেষ্টা করুন।',
   UNAVAILABLE: 'AI Assistant এখন সাময়িকভাবে unavailable। একটু পরে আবার চেষ্টা করুন।',
   EMPTY_MESSAGE: 'অনুগ্রহ করে আপনার প্রশ্ন বা বার্তা লিখুন।',
 } as const;
+
+export function normalizeGeminiApiKey(rawKey: unknown): string {
+  if (typeof rawKey !== 'string') return '';
+  let normalized = rawKey.trim();
+  if (
+    (normalized.startsWith('"') && normalized.endsWith('"')) ||
+    (normalized.startsWith("'") && normalized.endsWith("'"))
+  ) {
+    normalized = normalized.slice(1, -1).trim();
+  }
+  if (
+    !normalized ||
+    normalized === 'MY_GEMINI_API_KEY' ||
+    normalized === 'YOUR_GEMINI_API_KEY'
+  ) {
+    return '';
+  }
+  return normalized;
+}
+
+export function hasConfiguredGeminiApiKey(rawKey: unknown): boolean {
+  return normalizeGeminiApiKey(rawKey).length > 0;
+}
 
 function sanitizeHistory(rawHistory: unknown, currentMessage: string): Array<{
   role: 'user' | 'model';
@@ -143,18 +169,27 @@ function classifyGeminiError(err: unknown): {
     numericStatus === 401
   ) {
     return {
-      status: 503,
-      code: 'AI_CONFIG_MISSING',
-      message: AI_ERROR_MESSAGES.CONFIG_MISSING,
+      status: 502,
+      code: 'AI_KEY_INVALID',
+      message: AI_ERROR_MESSAGES.KEY_INVALID,
       retryable: false,
     };
   }
 
   if (numericStatus === 403 || upper.includes('PERMISSION_DENIED')) {
     return {
-      status: 503,
-      code: 'AI_CONFIG_MISSING',
-      message: AI_ERROR_MESSAGES.CONFIG_MISSING,
+      status: 502,
+      code: 'AI_PERMISSION_DENIED',
+      message: AI_ERROR_MESSAGES.PERMISSION_DENIED,
+      retryable: false,
+    };
+  }
+
+  if (numericStatus === 404 || upper.includes('NOT_FOUND')) {
+    return {
+      status: 502,
+      code: 'AI_MODEL_NOT_FOUND',
+      message: AI_ERROR_MESSAGES.MODEL_NOT_FOUND,
       retryable: false,
     };
   }
@@ -214,8 +249,8 @@ export async function processAiChatRequest(
     };
   }
 
-  const apiKey = typeof geminiApiKey === 'string' ? geminiApiKey.trim() : '';
-  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+  const apiKey = normalizeGeminiApiKey(geminiApiKey);
+  if (!apiKey) {
     return {
       ok: false,
       status: 503,
