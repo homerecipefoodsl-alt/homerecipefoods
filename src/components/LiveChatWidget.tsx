@@ -5,6 +5,7 @@ import {
   Headphones,
   Loader2,
   MessageCircle,
+  RotateCcw,
   Send,
   UserCheck,
   X,
@@ -37,6 +38,7 @@ interface AiMessage {
   role: 'user' | 'assistant';
   text: string;
   isError?: boolean;
+  retryPrompt?: string;
 }
 
 const SESSION_STORAGE_KEY = 'hrf_live_chat_session_id';
@@ -232,9 +234,8 @@ export function LiveChatWidget({
     };
   }, [products, categories, occasions, showrooms, aiKnowledge, siteSettings]);
 
-  const handleSendAi = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmed = aiInput.trim();
+  const submitAiPrompt = async (promptText: string, appendUserMessage: boolean) => {
+    const trimmed = promptText.trim();
     if (!trimmed || aiLoading) return;
 
     const priorHistory = aiMessages
@@ -242,9 +243,11 @@ export function LiveChatWidget({
       .filter((m) => !m.isError)
       .map((m) => ({ role: m.role, text: m.text }));
 
-    const userMsg: AiMessage = { id: `u-${Date.now()}`, role: 'user', text: trimmed };
-    setAiMessages((prev) => [...prev, userMsg]);
-    setAiInput('');
+    if (appendUserMessage) {
+      const userMsg: AiMessage = { id: `u-${Date.now()}`, role: 'user', text: trimmed };
+      setAiMessages((prev) => [...prev, userMsg]);
+      setAiInput('');
+    }
     setAiLoading(true);
 
     try {
@@ -277,12 +280,34 @@ export function LiveChatWidget({
       };
 
       if (!resp.ok) {
-        const errCode = String(data.code || data.error || '').toUpperCase();
-        let errorText = 'AI Assistant এখন সাময়িকভাবে unavailable। একটু পরে আবার চেষ্টা করুন।';
-        if (errCode === 'AI_CONFIG_MISSING' || errCode === 'AI_CONFIG_INVALID') {
+        const rawCode = String(data.code || data.error || '').trim().toLowerCase();
+        let errorText =
+          'AI সার্ভার থেকে উত্তর পাওয়া যায়নি। অনুগ্রহ করে একটু পরে আবার চেষ্টা করুন।';
+
+        if (rawCode === 'missing_api_key' || rawCode === 'ai_config_missing' || rawCode === 'ai_config_invalid') {
           errorText = 'AI service configuration is missing.';
-        } else if (resp.status === 429 || errCode === 'RATE_LIMITED') {
-          errorText = 'অনুগ্রহ করে কিছুক্ষণ পরে আবার চেষ্টা করুন।';
+        } else if (
+          rawCode === 'invalid_api_key' ||
+          rawCode === 'ai_key_invalid' ||
+          rawCode === 'ai_permission_denied'
+        ) {
+          errorText =
+            'Gemini API key সঠিক নয় বা অনুমতি পায়নি (invalid_api_key)। অনুগ্রহ করে Cloudflare Worker Secret-এ বৈধ GEMINI_API_KEY সেট করুন।';
+        } else if (rawCode === 'model_not_found' || rawCode === 'ai_model_not_found') {
+          errorText =
+            'নির্বাচিত Gemini মডেলটি পাওয়া যায়নি (model_not_found)। অনুগ্রহ করে পরে আবার চেষ্টা করুন।';
+        } else if (resp.status === 429 || rawCode === 'rate_limit' || rawCode === 'rate_limited') {
+          errorText =
+            'অনুরোধের সীমা অতিক্রম করেছে (rate_limit)। অনুগ্রহ করে কিছুক্ষণ অপেক্ষা করে আবার চেষ্টা করুন।';
+        } else if (resp.status === 504 || rawCode === 'api_timeout') {
+          errorText =
+            'Gemini API থেকে উত্তর আসতে সময় বেশি লেগেছে (api_timeout)। আবার চেষ্টা করুন।';
+        } else if (rawCode === 'gemini_api_error' || rawCode === 'ai_unavailable') {
+          errorText =
+            'Gemini API থেকে সংযোগ বা উত্তর পেতে সমস্যা হয়েছে (gemini_api_error)। আবার চেষ্টা করুন।';
+        } else if (rawCode === 'worker_internal_error') {
+          errorText =
+            'সার্ভারের অভ্যন্তরীণ ত্রুটি হয়েছে (worker_internal_error)। অনুগ্রহ করে আবার চেষ্টা করুন।';
         } else if (typeof data.message === 'string' && data.message.trim() && resp.status === 400) {
           errorText = data.message.trim();
         }
@@ -294,6 +319,7 @@ export function LiveChatWidget({
             role: 'assistant',
             text: errorText,
             isError: true,
+            retryPrompt: trimmed,
           },
         ]);
         return;
@@ -306,8 +332,9 @@ export function LiveChatWidget({
           {
             id: `e-${Date.now()}`,
             role: 'assistant',
-            text: 'AI Assistant এখন সাময়িকভাবে unavailable। একটু পরে আবার চেষ্টা করুন।',
+            text: 'Gemini API থেকে উত্তর পাওয়া যায়নি (gemini_api_error)। আবার চেষ্টা করুন।',
             isError: true,
+            retryPrompt: trimmed,
           },
         ]);
         return;
@@ -327,13 +354,25 @@ export function LiveChatWidget({
         {
           id: `e-${Date.now()}`,
           role: 'assistant',
-          text: 'AI Assistant এখন সাময়িকভাবে unavailable। একটু পরে আবার চেষ্টা করুন।',
+          text: 'সার্ভারের সাথে সংযোগ ব্যর্থ হয়েছে (worker_internal_error)। আবার চেষ্টা করুন।',
           isError: true,
+          retryPrompt: trimmed,
         },
       ]);
     } finally {
       setAiLoading(false);
     }
+  };
+
+  const handleSendAi = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await submitAiPrompt(aiInput, true);
+  };
+
+  const handleRetryAi = async (errorMsgId: string, promptText: string) => {
+    if (aiLoading) return;
+    setAiMessages((prev) => prev.filter((m) => m.id !== errorMsgId));
+    await submitAiPrompt(promptText, false);
   };
 
   const startHumanSession = async (e: React.FormEvent) => {
@@ -560,7 +599,22 @@ export function LiveChatWidget({
                   {msg.isError && (
                     <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#DC1F26]" />
                   )}
-                  <span>{msg.text}</span>
+                  <div className="space-y-1.5">
+                    <span>{msg.text}</span>
+                    {msg.isError && msg.retryPrompt && (
+                      <div>
+                        <button
+                          type="button"
+                          onClick={() => handleRetryAi(msg.id, msg.retryPrompt!)}
+                          disabled={aiLoading}
+                          className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-red-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-[#B91C1C] transition-colors hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <RotateCcw className="h-3 w-3" />
+                          <span>আবার চেষ্টা করুন</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             ))}

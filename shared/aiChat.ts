@@ -19,6 +19,16 @@ export interface AiChatRequestBody {
   aiConfig?: AiConfigPayload;
 }
 
+export type AiErrorCode =
+  | 'missing_api_key'
+  | 'invalid_api_key'
+  | 'model_not_found'
+  | 'rate_limit'
+  | 'api_timeout'
+  | 'gemini_api_error'
+  | 'worker_internal_error'
+  | 'VALIDATION_ERROR';
+
 export type AiChatResult =
   | {
       ok: true;
@@ -29,22 +39,25 @@ export type AiChatResult =
   | {
       ok: false;
       status: number;
-      code: string;
+      code: AiErrorCode;
       message: string;
+      upstreamStatus?: number;
     };
 
 export const DEFAULT_AI_FALLBACK_MESSAGE =
   'এই তথ্যটি নিশ্চিতভাবে জানার জন্য আমাদের একজন প্রতিনিধি সাথে যোগাযোগ করুন।';
 
 export const AI_ERROR_MESSAGES = {
-  CONFIG_MISSING: 'AI service configuration is missing.',
-  KEY_INVALID: 'Configured GEMINI_API_KEY is invalid or rejected by Gemini API.',
-  PERMISSION_DENIED: 'Configured GEMINI_API_KEY does not have permission for Gemini API.',
-  MODEL_NOT_FOUND: 'AI Assistant মডেল সাময়িকভাবে পাওয়া যাচ্ছে না। একটু পরে আবার চেষ্টা করুন।',
-  RATE_LIMITED: 'অনুগ্রহ করে কিছুক্ষণ পরে আবার চেষ্টা করুন।',
-  UNAVAILABLE: 'AI Assistant এখন সাময়িকভাবে unavailable। একটু পরে আবার চেষ্টা করুন।',
+  MISSING_API_KEY: 'AI service configuration is missing.',
+  INVALID_API_KEY: 'Configured GEMINI_API_KEY is invalid or rejected by Gemini API.',
+  MODEL_NOT_FOUND: 'Requested Gemini model is currently unavailable or not found.',
+  RATE_LIMIT: 'Gemini API rate limit or quota reached. Please wait a moment and try again.',
+  API_TIMEOUT: 'Gemini API request timed out. Please try again.',
+  GEMINI_API_ERROR: 'Gemini API failed to generate a response. Please try again.',
   EMPTY_MESSAGE: 'অনুগ্রহ করে আপনার প্রশ্ন বা বার্তা লিখুন।',
 } as const;
+
+const GEMINI_REQUEST_TIMEOUT_MS = 20_000;
 
 export function normalizeGeminiApiKey(rawKey: unknown): string {
   if (typeof rawKey !== 'string') return '';
@@ -90,7 +103,6 @@ function sanitizeHistory(rawHistory: unknown, currentMessage: string): Array<{
     const text = rawText.trim().slice(0, 1500);
     if (!text) continue;
     const role: 'user' | 'model' = rawRole === 'assistant' ? 'model' : 'user';
-    // Merge or avoid adjacent identical-role turns if malformed history was sent
     const prev = cleaned[cleaned.length - 1];
     if (prev && prev.role === role) {
       prev.text = `${prev.text}\n${text}`.slice(0, 1500);
@@ -99,7 +111,6 @@ function sanitizeHistory(rawHistory: unknown, currentMessage: string): Array<{
     }
   }
 
-  // Prevent duplicating the current user message if already included at end of history
   const last = cleaned[cleaned.length - 1];
   if (last && last.role === 'user' && last.text === currentMessage) {
     cleaned.pop();
@@ -120,7 +131,7 @@ function buildSystemInstruction(
   return `You are "${assistantName}", the official AI Product & Showroom Concierge for "Home Recipe Foods" (হোম রেসিপি ফুডস), a premium Bangladeshi food, bakery, sweets, and celebration brand.
 
 STRICT BUSINESS & GROUNDING RULES:
-1. Home Recipe Foods website is a Product Showcase & Customer Information platform ONLY. Customers CANNOT place online orders, add items to a cart, or pay online. Always politely guide them to visit or call one of our showrooms to purchase or reserve custom items.
+1. Home Recipe Foods website is a Product Showcase & Customer Information platform ONLY. Customers CANNOT place online orders, add items to a cart, or pay online. Always politely guide them to visit or call our showrooms to purchase or reserve custom items.
 2. You help customers with accurate information about Home Recipe Foods' Products, Categories, Occasions, Showrooms, Contact Information, About/Brand Information, and Knowledge Base from the LIVE DATABASE CONTEXT below.
 3. For greetings (such as "Hello", "Hi", "হ্যালো", "আসসালামু আলাইকুম"), warmly greet the customer and briefly mention how you can assist with products, prices, categories, showrooms, or contact details.
 4. NEVER invent, guess, or extrapolate any product price, availability, ingredient, weight, discount, delivery service, or showroom detail that is not explicitly present in the LIVE DATABASE CONTEXT.
@@ -132,9 +143,9 @@ LIVE DATABASE CONTEXT:
 ${JSON.stringify(catalogContext ?? {}, null, 2)}`;
 }
 
-function classifyGeminiError(err: unknown): {
+export function classifyGeminiError(err: unknown): {
   status: number;
-  code: string;
+  code: Exclude<AiErrorCode, 'missing_api_key' | 'worker_internal_error' | 'VALIDATION_ERROR'>;
   message: string;
   retryable: boolean;
   upstreamStatus: number;
@@ -142,6 +153,7 @@ function classifyGeminiError(err: unknown): {
   const errObj =
     err && typeof err === 'object'
       ? (err as {
+          name?: unknown;
           status?: unknown;
           statusCode?: unknown;
           code?: unknown;
@@ -150,6 +162,7 @@ function classifyGeminiError(err: unknown): {
         })
       : {};
 
+  const errName = typeof errObj.name === 'string' ? errObj.name.toUpperCase() : '';
   const numericStatus =
     typeof errObj.status === 'number'
       ? errObj.status
@@ -167,6 +180,25 @@ function classifyGeminiError(err: unknown): {
   const upper = rawMessage.toUpperCase();
 
   if (
+    errName === 'ABORTERROR' ||
+    errName === 'TIMEOUTERROR' ||
+    numericStatus === 504 ||
+    upper.includes('API_TIMEOUT') ||
+    upper.includes('DEADLINE_EXCEEDED') ||
+    upper.includes('TIMED OUT') ||
+    upper.includes('TIMEOUT') ||
+    upper.includes('ABORT')
+  ) {
+    return {
+      status: 504,
+      code: 'api_timeout',
+      message: AI_ERROR_MESSAGES.API_TIMEOUT,
+      retryable: true,
+      upstreamStatus: numericStatus || 504,
+    };
+  }
+
+  if (
     numericStatus === 429 ||
     upper.includes('429') ||
     upper.includes('RESOURCE_EXHAUSTED') ||
@@ -175,45 +207,37 @@ function classifyGeminiError(err: unknown): {
   ) {
     return {
       status: 429,
-      code: 'RATE_LIMITED',
-      message: AI_ERROR_MESSAGES.RATE_LIMITED,
+      code: 'rate_limit',
+      message: AI_ERROR_MESSAGES.RATE_LIMIT,
       retryable: false,
       upstreamStatus: numericStatus || 429,
     };
   }
 
   if (
+    numericStatus === 401 ||
+    numericStatus === 403 ||
     upper.includes('API_KEY_INVALID') ||
     upper.includes('API KEY NOT VALID') ||
     upper.includes('API KEY EXPIRED') ||
     upper.includes('API_KEY_EXPIRED') ||
     upper.includes('API KEY IS MISSING') ||
-    (numericStatus === 400 && upper.includes('API')) ||
-    numericStatus === 401
+    upper.includes('PERMISSION_DENIED') ||
+    (numericStatus === 400 && (upper.includes('API_KEY') || upper.includes('API KEY')))
   ) {
     return {
       status: 502,
-      code: 'AI_KEY_INVALID',
-      message: AI_ERROR_MESSAGES.KEY_INVALID,
+      code: 'invalid_api_key',
+      message: AI_ERROR_MESSAGES.INVALID_API_KEY,
       retryable: false,
-      upstreamStatus: numericStatus || 400,
+      upstreamStatus: numericStatus || 401,
     };
   }
 
-  if (numericStatus === 403 || upper.includes('PERMISSION_DENIED')) {
+  if (numericStatus === 404 || upper.includes('NOT_FOUND') || upper.includes('MODEL IS NOT FOUND')) {
     return {
       status: 502,
-      code: 'AI_PERMISSION_DENIED',
-      message: AI_ERROR_MESSAGES.PERMISSION_DENIED,
-      retryable: false,
-      upstreamStatus: numericStatus || 403,
-    };
-  }
-
-  if (numericStatus === 404 || upper.includes('NOT_FOUND')) {
-    return {
-      status: 502,
-      code: 'AI_MODEL_NOT_FOUND',
+      code: 'model_not_found',
       message: AI_ERROR_MESSAGES.MODEL_NOT_FOUND,
       retryable: false,
       upstreamStatus: numericStatus || 404,
@@ -224,19 +248,16 @@ function classifyGeminiError(err: unknown): {
     numericStatus === 500 ||
     numericStatus === 502 ||
     numericStatus === 503 ||
-    numericStatus === 504 ||
     upper.includes('UNAVAILABLE') ||
     upper.includes('INTERNAL') ||
-    upper.includes('DEADLINE_EXCEEDED') ||
-    upper.includes('TIMEOUT') ||
     upper.includes('ECONNRESET') ||
     upper.includes('FETCH FAILED') ||
-    /\b(500|502|503|504)\b/.test(upper);
+    /\b(500|502|503)\b/.test(upper);
 
   return {
     status: 502,
-    code: 'AI_UNAVAILABLE',
-    message: AI_ERROR_MESSAGES.UNAVAILABLE,
+    code: 'gemini_api_error',
+    message: AI_ERROR_MESSAGES.GEMINI_API_ERROR,
     retryable,
     upstreamStatus: numericStatus,
   };
@@ -281,8 +302,8 @@ export async function processAiChatRequest(
     return {
       ok: false,
       status: 503,
-      code: 'AI_CONFIG_MISSING',
-      message: AI_ERROR_MESSAGES.CONFIG_MISSING,
+      code: 'missing_api_key',
+      message: AI_ERROR_MESSAGES.MISSING_API_KEY,
     };
   }
 
@@ -324,6 +345,11 @@ export async function processAiChatRequest(
   let lastClassified: ReturnType<typeof classifyGeminiError> | null = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort(new Error('API_TIMEOUT'));
+    }, GEMINI_REQUEST_TIMEOUT_MS);
+
     try {
       const response = await ai.models.generateContent({
         model: 'gemini-4-hydrogen',
@@ -331,6 +357,7 @@ export async function processAiChatRequest(
         config: {
           systemInstruction,
           thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          abortSignal: controller.signal,
         },
       });
 
@@ -360,16 +387,20 @@ export async function processAiChatRequest(
           status: classified.status,
           code: classified.code,
           message: classified.message,
+          ...(classified.upstreamStatus ? { upstreamStatus: classified.upstreamStatus } : {}),
         };
       }
       await waitMs(350);
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
   return {
     ok: false,
     status: lastClassified?.status ?? 502,
-    code: lastClassified?.code ?? 'AI_UNAVAILABLE',
-    message: lastClassified?.message ?? AI_ERROR_MESSAGES.UNAVAILABLE,
+    code: lastClassified?.code ?? 'gemini_api_error',
+    message: lastClassified?.message ?? AI_ERROR_MESSAGES.GEMINI_API_ERROR,
+    ...(lastClassified?.upstreamStatus ? { upstreamStatus: lastClassified.upstreamStatus } : {}),
   };
 }

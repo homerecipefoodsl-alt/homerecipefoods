@@ -1444,7 +1444,13 @@ async function handleAiChatEndpoint(req: Request, res: Response) {
 
     const result = await processAiChatRequest(body, process.env.GEMINI_API_KEY);
     if (!result.ok) {
-      sendError(res, result.code, result.message, result.status);
+      sendError(
+        res,
+        result.code,
+        result.message,
+        result.status,
+        result.upstreamStatus ? { upstreamStatus: result.upstreamStatus } : undefined
+      );
       return;
     }
 
@@ -1457,8 +1463,8 @@ async function handleAiChatEndpoint(req: Request, res: Response) {
   } catch {
     sendError(
       res,
-      'AI_UNAVAILABLE',
-      'AI Assistant এখন সাময়িকভাবে unavailable। একটু পরে আবার চেষ্টা করুন।',
+      'worker_internal_error',
+      'Unexpected server error while processing AI Assistant request.',
       500
     );
   }
