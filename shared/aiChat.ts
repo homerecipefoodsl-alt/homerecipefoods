@@ -48,17 +48,23 @@ export const AI_ERROR_MESSAGES = {
 
 export function normalizeGeminiApiKey(rawKey: unknown): string {
   if (typeof rawKey !== 'string') return '';
-  let normalized = rawKey.trim();
+  let normalized = rawKey
+    .replace(/[\uFEFF\u200B-\u200D]/g, '')
+    .replace(/\u00A0/g, ' ')
+    .trim();
   if (
     (normalized.startsWith('"') && normalized.endsWith('"')) ||
     (normalized.startsWith("'") && normalized.endsWith("'"))
   ) {
     normalized = normalized.slice(1, -1).trim();
   }
+  const upper = normalized.toUpperCase();
   if (
     !normalized ||
-    normalized === 'MY_GEMINI_API_KEY' ||
-    normalized === 'YOUR_GEMINI_API_KEY'
+    upper === 'MY_GEMINI_API_KEY' ||
+    upper === 'YOUR_GEMINI_API_KEY' ||
+    upper === 'GEMINI_API_KEY' ||
+    upper.startsWith('REPLACE_')
   ) {
     return '';
   }
@@ -131,10 +137,17 @@ function classifyGeminiError(err: unknown): {
   code: string;
   message: string;
   retryable: boolean;
+  upstreamStatus: number;
 } {
   const errObj =
     err && typeof err === 'object'
-      ? (err as { status?: unknown; statusCode?: unknown; code?: unknown; message?: unknown })
+      ? (err as {
+          status?: unknown;
+          statusCode?: unknown;
+          code?: unknown;
+          message?: unknown;
+          error?: { code?: unknown; status?: unknown; message?: unknown };
+        })
       : {};
 
   const numericStatus =
@@ -142,8 +155,15 @@ function classifyGeminiError(err: unknown): {
       ? errObj.status
       : typeof errObj.statusCode === 'number'
       ? errObj.statusCode
+      : typeof errObj.error?.code === 'number'
+      ? errObj.error.code
       : 0;
-  const rawMessage = typeof errObj.message === 'string' ? errObj.message : String(err || '');
+  const rawMessage =
+    typeof errObj.error?.message === 'string'
+      ? errObj.error.message
+      : typeof errObj.message === 'string'
+      ? errObj.message
+      : String(err || '');
   const upper = rawMessage.toUpperCase();
 
   if (
@@ -158,14 +178,17 @@ function classifyGeminiError(err: unknown): {
       code: 'RATE_LIMITED',
       message: AI_ERROR_MESSAGES.RATE_LIMITED,
       retryable: false,
+      upstreamStatus: numericStatus || 429,
     };
   }
 
   if (
     upper.includes('API_KEY_INVALID') ||
     upper.includes('API KEY NOT VALID') ||
+    upper.includes('API KEY EXPIRED') ||
+    upper.includes('API_KEY_EXPIRED') ||
     upper.includes('API KEY IS MISSING') ||
-    (numericStatus === 400 && upper.includes('API_KEY')) ||
+    (numericStatus === 400 && upper.includes('API')) ||
     numericStatus === 401
   ) {
     return {
@@ -173,6 +196,7 @@ function classifyGeminiError(err: unknown): {
       code: 'AI_KEY_INVALID',
       message: AI_ERROR_MESSAGES.KEY_INVALID,
       retryable: false,
+      upstreamStatus: numericStatus || 400,
     };
   }
 
@@ -182,6 +206,7 @@ function classifyGeminiError(err: unknown): {
       code: 'AI_PERMISSION_DENIED',
       message: AI_ERROR_MESSAGES.PERMISSION_DENIED,
       retryable: false,
+      upstreamStatus: numericStatus || 403,
     };
   }
 
@@ -191,6 +216,7 @@ function classifyGeminiError(err: unknown): {
       code: 'AI_MODEL_NOT_FOUND',
       message: AI_ERROR_MESSAGES.MODEL_NOT_FOUND,
       retryable: false,
+      upstreamStatus: numericStatus || 404,
     };
   }
 
@@ -212,6 +238,7 @@ function classifyGeminiError(err: unknown): {
     code: 'AI_UNAVAILABLE',
     message: AI_ERROR_MESSAGES.UNAVAILABLE,
     retryable,
+    upstreamStatus: numericStatus,
   };
 }
 
@@ -325,7 +352,7 @@ export async function processAiChatRequest(
       const classified = classifyGeminiError(err);
       lastClassified = classified;
       console.error(
-        `Gemini API request failed (attempt ${attempt}/${maxAttempts}, code=${classified.code}, status=${classified.status})`
+        `Gemini API request failed (attempt ${attempt}/${maxAttempts}, code=${classified.code}, status=${classified.status}, upstreamStatus=${classified.upstreamStatus})`
       );
       if (!classified.retryable || attempt >= maxAttempts) {
         return {
