@@ -17,7 +17,7 @@ export function Footer({ onOpenChat }: FooterProps) {
       : siteSettings.footerTextBn || siteSettings.footerTextEn;
 
   return (
-    <footer className="border-t border-[#292524] bg-[#1C1917] pb-20 text-[#E7E5E4] md:pb-0">
+    <footer className="border-t border-[#292524] bg-[#1C1917] pb-[calc(4.75rem+env(safe-area-inset-bottom))] text-[#E7E5E4] md:pb-0">
       <div className="mx-auto max-w-7xl px-4 py-14 sm:px-6 lg:px-8">
         <div className="grid grid-cols-1 gap-10 sm:grid-cols-2 lg:grid-cols-4">
           {/* Brand Column */}
@@ -97,6 +97,16 @@ export function Footer({ onOpenChat }: FooterProps) {
               <li>
                 <Link to="/showrooms" className="transition-colors hover:text-[#FACC15]">
                   Showrooms
+                </Link>
+              </li>
+              <li>
+                <Link to="/jobs" className="transition-colors hover:text-[#FACC15]">
+                  JobApplications / নিয়োগ
+                </Link>
+              </li>
+              <li>
+                <Link to="/application-status" className="transition-colors hover:text-[#FACC15]">
+                  Application Status
                 </Link>
               </li>
               <li>

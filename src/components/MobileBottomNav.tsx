@@ -19,9 +19,9 @@ export function MobileBottomNav({ onOpenChat }: MobileBottomNavProps) {
   return (
     <nav
       aria-label="Mobile Bottom Navigation"
-      className="fixed bottom-0 left-0 right-0 z-30 border-t border-[#E7E5E4] bg-[#FAFAF8]/95 backdrop-blur-md md:hidden"
+      className="fixed bottom-0 left-0 right-0 z-30 border-t border-[#E7E5E4] bg-[#FAFAF8]/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-md md:hidden"
     >
-      <div className="grid h-14 grid-cols-6 items-center">
+      <div className="grid h-12 grid-cols-6 items-center">
         <button
           type="button"
           onClick={() => navigate('/')}

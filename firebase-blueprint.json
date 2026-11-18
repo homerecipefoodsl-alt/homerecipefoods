@@ -376,6 +376,180 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "sessionId", "senderRole", "senderName", "text", "createdAt"]
+    },
+    "JobPosting": {
+      "title": "JobPosting",
+      "description": "Employee recruitment job circular published by Home Recipe Foods admins",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[a-z0-9\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "titleEn": { "type": "string", "minLength": 0, "maxLength": 160 },
+        "department": { "type": "string", "minLength": 0, "maxLength": 100 },
+        "category": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "vacancies": { "type": "integer" },
+        "salary": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "salaryType": { "type": "string", "minLength": 0, "maxLength": 60 },
+        "workplace": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "employmentType": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "workingHours": { "type": "string", "minLength": 0, "maxLength": 120 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "responsibilities": { "type": "array" },
+        "requirements": { "type": "array" },
+        "educationRequirement": { "type": "string", "minLength": 0, "maxLength": 300 },
+        "experienceRequirement": { "type": "string", "minLength": 0, "maxLength": 300 },
+        "benefits": { "type": "array" },
+        "startDate": { "type": "string", "minLength": 8, "maxLength": 32 },
+        "deadline": { "type": "string", "minLength": 8, "maxLength": 32 },
+        "status": { "type": "string", "enum": ["Draft", "Published", "Hidden", "Closed"] },
+        "contactInfo": { "type": "string", "minLength": 0, "maxLength": 300 },
+        "instructions": { "type": "string", "minLength": 0, "maxLength": 1000 },
+        "deleted": { "type": "boolean" },
+        "createdBy": { "type": "string", "minLength": 0, "maxLength": 254 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id", "slug", "title", "category", "vacancies", "salary",
+        "workplace", "employmentType", "description", "responsibilities",
+        "requirements", "startDate", "deadline", "status", "createdAt", "updatedAt"
+      ]
+    },
+    "JobApplication": {
+      "title": "JobApplication",
+      "description": "Strictly private job candidate application submitted via /apply/:slug",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "applicationCode": { "type": "string", "minLength": 6, "maxLength": 32 },
+        "jobId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "jobSlug": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "jobTitle": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "jobCategory": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "fatherName": { "type": "string", "minLength": 0, "maxLength": 120 },
+        "motherName": { "type": "string", "minLength": 0, "maxLength": 120 },
+        "dateOfBirth": { "type": "string", "minLength": 4, "maxLength": 32 },
+        "gender": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "maritalStatus": { "type": "string", "minLength": 0, "maxLength": 40 },
+        "nationality": { "type": "string", "minLength": 0, "maxLength": 60 },
+        "nidNumber": { "type": "string", "minLength": 0, "maxLength": 40 },
+        "passportNumber": { "type": "string", "minLength": 0, "maxLength": 40 },
+        "mobile": { "type": "string", "minLength": 10, "maxLength": 32 },
+        "alternativeMobile": { "type": "string", "minLength": 0, "maxLength": 32 },
+        "email": { "type": "string", "minLength": 0, "maxLength": 254 },
+        "presentAddress": { "type": "string", "minLength": 3, "maxLength": 400 },
+        "permanentAddress": { "type": "string", "minLength": 0, "maxLength": 400 },
+        "educationLevel": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "institution": { "type": "string", "minLength": 0, "maxLength": 160 },
+        "subjectDepartment": { "type": "string", "minLength": 0, "maxLength": 160 },
+        "passingYear": { "type": "string", "minLength": 0, "maxLength": 20 },
+        "resultGpa": { "type": "string", "minLength": 0, "maxLength": 40 },
+        "hasPreviousExperience": { "type": "boolean" },
+        "experienceYears": { "type": "string", "minLength": 0, "maxLength": 40 },
+        "previousOrganization": { "type": "string", "minLength": 0, "maxLength": 160 },
+        "currentOccupation": { "type": "string", "minLength": 0, "maxLength": 120 },
+        "expectedSalary": { "type": "string", "minLength": 0, "maxLength": 60 },
+        "appliedPosition": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "computerSkills": { "type": "string", "minLength": 0, "maxLength": 400 },
+        "languageSkills": { "type": "string", "minLength": 0, "maxLength": 400 },
+        "aboutSelf": { "type": "string", "minLength": 0, "maxLength": 1500 },
+        "skills": { "type": "string", "minLength": 0, "maxLength": 600 },
+        "referenceInfo": { "type": "string", "minLength": 0, "maxLength": 400 },
+        "photoUrl": { "type": "string", "minLength": 0, "maxLength": 2000 },
+        "photoStoragePath": { "type": "string", "minLength": 0, "maxLength": 400 },
+        "photoDataUrl": { "type": "string", "minLength": 0, "maxLength": 400000 },
+        "cvUrlOrNote": { "type": "string", "minLength": 0, "maxLength": 1000 },
+        "declarationAccepted": { "type": "boolean" },
+        "status": {
+          "type": "string",
+          "enum": ["Submitted", "Under Review", "Shortlisted", "Exam Scheduled", "Exam Completed", "Interview", "Selected", "Rejected", "On Hold", "Withdrawn"]
+        },
+        "shortlisted": { "type": "boolean" },
+        "adminNotes": { "type": "string", "minLength": 0, "maxLength": 2000 },
+        "notes": { "type": "string", "minLength": 0, "maxLength": 2000 },
+        "reviewedBy": { "type": "string", "minLength": 0, "maxLength": 254 },
+        "reviewedAt": { "type": "string", "minLength": 0, "maxLength": 64 },
+        "archived": { "type": "boolean" },
+        "deleted": { "type": "boolean" },
+        "submittedDateText": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id", "applicationCode", "jobId", "jobSlug", "jobTitle", "jobCategory",
+        "fullName", "dateOfBirth", "gender", "mobile", "email", "presentAddress",
+        "educationLevel", "hasPreviousExperience", "appliedPosition", "photoDataUrl",
+        "cvUrlOrNote", "status", "adminNotes", "submittedDateText", "createdAt", "updatedAt"
+      ]
+    },
+    "JobApplicationLock": {
+      "title": "JobApplicationLock",
+      "description": "Zero-PII atomic deduplication key preventing duplicate applications per circular and mobile/NID hash",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 8, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "jobId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "keyHash": { "type": "string", "minLength": 16, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "jobId", "keyHash", "createdAt"]
+    },
+    "JobApplicationCounter": {
+      "title": "JobApplicationCounter",
+      "description": "Zero-PII annual monotonic sequence counter for SN-JOB-YYYY-00001 ID generation",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 4, "maxLength": 4, "pattern": "^20[2-9][0-9]$" },
+        "lastSeq": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "lastSeq", "updatedAt"]
+    },
+    "JobExamTemplate": {
+      "title": "JobExamTemplate",
+      "description": "Recruitment exam definition created by authorized staff and assignable to shortlisted candidates",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "jobId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "jobTitle": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "examDate": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "startTime": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "endTime": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "duration": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "location": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "examType": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "instructions": { "type": "string", "minLength": 0, "maxLength": 1000 },
+        "totalMarks": { "type": "integer" },
+        "passMarks": { "type": "integer" },
+        "createdBy": { "type": "string", "minLength": 0, "maxLength": 254 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "jobId", "jobTitle", "examDate", "startTime", "endTime", "duration", "location", "examType", "totalMarks", "passMarks", "createdAt", "updatedAt"]
+    },
+    "JobApplicationStatusSummary": {
+      "title": "JobApplicationStatusSummary",
+      "description": "Zero-PII status tracker keyed by Application Code (SN-JOB-YYYY-00001)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 6, "maxLength": 32, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "jobId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "jobTitle": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "jobCategory": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "mobileHash": { "type": "string", "minLength": 0, "maxLength": 128 },
+        "status": {
+          "type": "string",
+          "enum": ["Submitted", "Under Review", "Shortlisted", "Exam Scheduled", "Exam Completed", "Interview", "Selected", "Rejected", "On Hold", "Withdrawn"]
+        },
+        "submittedDateText": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "jobId", "jobTitle", "jobCategory", "status", "submittedDateText", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -454,6 +628,30 @@
     "/activity_logs/{logId}": {
       "schema": { "$ref": "#/entities/ActivityLog" },
       "description": "Immutable admin activity audit logs"
+    },
+    "/jobPostings/{jobId}": {
+      "schema": { "$ref": "#/entities/JobPosting" },
+      "description": "Employee recruitment circulars (publicly readable only when Published)"
+    },
+    "/jobApplications/{applicationId}": {
+      "schema": { "$ref": "#/entities/JobApplication" },
+      "description": "Strictly private job applications readable only by authorized recruitment staff & Super Admin"
+    },
+    "/jobApplicationLocks/{lockId}": {
+      "schema": { "$ref": "#/entities/JobApplicationLock" },
+      "description": "Zero-PII duplicate application guard keyed by job + hashed mobile/NID"
+    },
+    "/jobApplicationCounters/{yearId}": {
+      "schema": { "$ref": "#/entities/JobApplicationCounter" },
+      "description": "Zero-PII sequential counter for SN-JOB-YYYY-00001 application IDs"
+    },
+    "/jobExams/{examId}": {
+      "schema": { "$ref": "#/entities/JobExamTemplate" },
+      "description": "Recruitment exams managed by Super Admin and authorized recruitment staff"
+    },
+    "/jobApplicationStatuses/{statusId}": {
+      "schema": { "$ref": "#/entities/JobApplicationStatusSummary" },
+      "description": "Zero-PII candidate status lookup document keyed by application code"
     }
   }
 }

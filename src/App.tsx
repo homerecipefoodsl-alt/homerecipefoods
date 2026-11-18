@@ -40,6 +40,20 @@ const ContactPage = lazy(() =>
 const AdminPage = lazy(() =>
   import('./pages/AdminPage').then((m) => ({ default: m.AdminPage }))
 );
+const JobsPage = lazy(() =>
+  import('./pages/JobsPage').then((m) => ({ default: m.JobsPage }))
+);
+const JobDetailPage = lazy(() =>
+  import('./pages/JobDetailPage').then((m) => ({ default: m.JobDetailPage }))
+);
+const JobApplyPage = lazy(() =>
+  import('./pages/JobApplyPage').then((m) => ({ default: m.JobApplyPage }))
+);
+const ApplicationStatusPage = lazy(() =>
+  import('./pages/ApplicationStatusPage').then((m) => ({
+    default: m.ApplicationStatusPage,
+  }))
+);
 const NotFoundPage = lazy(() =>
   import('./pages/NotFoundPage').then((m) => ({ default: m.NotFoundPage }))
 );
@@ -328,6 +342,12 @@ function RoutedLayout() {
             <Route path="/category/:categorySlug" element={<ProductsPage />} />
             <Route path="/occasion/:occasionSlug" element={<ProductsPage />} />
             <Route path="/showrooms" element={<ShowroomsPage />} />
+            <Route path="/jobs" element={<JobsPage />} />
+            <Route path="/career" element={<JobsPage />} />
+            <Route path="/jobs/:slug" element={<JobDetailPage />} />
+            <Route path="/apply/:slug" element={<JobApplyPage />} />
+            <Route path="/jobs/:slug/apply" element={<JobApplyPage />} />
+            <Route path="/application-status" element={<ApplicationStatusPage />} />
             <Route path="/complaint" element={<ComplaintPage />} />
             <Route path="/about" element={<AboutPage />} />
             <Route

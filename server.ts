@@ -90,6 +90,7 @@ const VALID_PERMISSIONS = [
   'banners_manage',
   'complaints_manage',
   'chat_manage',
+  'recruitment_manage',
   'reports_view',
   'seo_manage',
   'settings_view',
@@ -110,6 +111,7 @@ const DEFAULT_ROLE_PERMISSIONS: Record<StaffRole, string[]> = {
     'categories_manage',
     'showrooms_manage',
     'banners_manage',
+    'recruitment_manage',
     'reports_view',
   ],
   manager: [
@@ -120,6 +122,7 @@ const DEFAULT_ROLE_PERMISSIONS: Record<StaffRole, string[]> = {
     'categories_manage',
     'showrooms_manage',
     'complaints_manage',
+    'recruitment_manage',
     'reports_view',
   ],
   support_agent: ['dashboard_view', 'complaints_manage', 'chat_manage'],

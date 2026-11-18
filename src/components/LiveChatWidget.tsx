@@ -539,10 +539,11 @@ export function LiveChatWidget({
           onOpen();
         }}
         aria-label="Open Live Chat & AI Support"
-        className="fixed bottom-16 right-4 z-40 inline-flex cursor-pointer items-center gap-2.5 rounded-full bg-[#DC1F26] px-4 py-3 text-xs font-semibold text-white shadow-lg transition-transform duration-200 hover:-translate-y-0.5 hover:bg-[#B91C1C] focus-visible:outline-2 focus-visible:outline-[#FACC15] sm:bottom-6 sm:right-6 sm:px-5 sm:text-sm"
+        className="fixed right-3 bottom-[calc(3.5rem+env(safe-area-inset-bottom))] z-30 inline-flex h-10 cursor-pointer items-center gap-2 rounded-full bg-[#DC1F26] px-3.5 text-xs font-semibold text-white shadow-md transition-transform duration-200 hover:-translate-y-0.5 hover:bg-[#B91C1C] focus-visible:outline-2 focus-visible:outline-[#FACC15] sm:right-5 sm:bottom-5 sm:h-11 sm:gap-2.5 sm:px-4"
       >
-        <MessageCircle className="h-4 w-4 text-[#FACC15]" />
-        <span className="whitespace-nowrap">সাহায্য ও লাইভ চ্যাট</span>
+        <MessageCircle className="h-4 w-4 shrink-0 text-[#FACC15]" />
+        <span className="whitespace-nowrap sm:hidden">লাইভ চ্যাট</span>
+        <span className="hidden whitespace-nowrap sm:inline">সহায়তা ও লাইভ চ্যাট</span>
       </button>
     );
   }
@@ -551,7 +552,7 @@ export function LiveChatWidget({
     <div
       role="dialog"
       aria-label="Home Recipe Foods Support Chat"
-      className="fixed bottom-16 right-3 left-3 z-50 flex h-[min(74dvh,560px)] max-h-[calc(100dvh-5.5rem)] flex-col overflow-hidden rounded-2xl border border-[#D6D3D1] bg-white shadow-2xl sm:left-auto sm:bottom-6 sm:right-6 sm:w-[400px]"
+      className="fixed right-3 bottom-[calc(3.5rem+env(safe-area-inset-bottom))] left-3 z-50 flex h-[min(72dvh,540px)] max-h-[calc(100dvh-6rem)] flex-col overflow-hidden rounded-2xl border border-[#D6D3D1] bg-white shadow-2xl sm:right-5 sm:bottom-5 sm:left-auto sm:w-[400px]"
     >
       {/* Header with Official Logo */}
       <div className="flex items-center justify-between border-b border-[#292524] bg-[#1C1917] px-4 py-2.5 text-white">

@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   BadgeCheck,
   BarChart3,
+  Briefcase,
   CheckCircle2,
   Database,
   Eye,
@@ -141,6 +142,11 @@ const AdminReportsPanel = lazy(() =>
     default: m.AdminReportsPanel,
   }))
 );
+const AdminRecruitmentPanel = lazy(() =>
+  import('../components/admin/AdminRecruitmentPanel').then((m) => ({
+    default: m.AdminRecruitmentPanel,
+  }))
+);
 
 export type AdminTab =
   | 'dashboard'
@@ -153,6 +159,7 @@ export type AdminTab =
   | 'greetings'
   | 'complaints'
   | 'chat'
+  | 'recruitment'
   | 'media'
   | 'reports'
   | 'seo'
@@ -574,6 +581,8 @@ export function AdminPage() {
 
   const canComplaints = hasPermission('complaints_manage');
   const canChat = hasPermission('chat_manage');
+  const canRecruitment =
+    isSuperAdmin || hasPermission('recruitment_manage') || staffRole === 'admin';
   const canStaffDirectory = isSuperAdmin || hasPermission('manager_manage');
   const canLogs = isSuperAdmin || hasPermission('dashboard_view') || hasPermission('reports_view');
 
@@ -751,6 +760,14 @@ export function AdminPage() {
       });
     }
 
+    if (canRecruitment) {
+      items.push({
+        id: 'recruitment',
+        label: 'Recruitment · নিয়োগ',
+        icon: <Briefcase className="h-4 w-4" />,
+      });
+    }
+
     if (hasPermission('reports_view')) {
       items.push({
         id: 'reports',
@@ -821,6 +838,7 @@ export function AdminPage() {
     accountStatus,
     hasPermission,
     isSuperAdmin,
+    canRecruitment,
     openComplaints,
     activeChats,
   ]);
@@ -1194,6 +1212,15 @@ export function AdminPage() {
                           লাইভ চ্যাট ও AI ({activeChats})
                         </button>
                       )}
+                      {canRecruitment && (
+                        <button
+                          type="button"
+                          onClick={() => selectTab('recruitment')}
+                          className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
+                        >
+                          নিয়োগ ও আবেদন (Recruitment)
+                        </button>
+                      )}
                       {hasPermission('reports_view') && (
                         <button
                           type="button"
@@ -1369,6 +1396,9 @@ export function AdminPage() {
               )}
               {activeTab === 'chat' && hasPermission('chat_manage') && (
                 <AdminLiveChatPanel sessions={chatSessions} />
+              )}
+              {activeTab === 'recruitment' && canRecruitment && (
+                <AdminRecruitmentPanel />
               )}
               {activeTab === 'reports' && hasPermission('reports_view') && (
                 <AdminReportsPanel

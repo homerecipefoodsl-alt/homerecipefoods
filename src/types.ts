@@ -17,6 +17,7 @@ export type PermissionKey =
   | 'reports_view'
   | 'seo_manage'
   | 'settings_view'
+  | 'recruitment_manage'
   | 'admin_manage'
   | 'manager_manage';
 
@@ -36,6 +37,7 @@ export const ALL_PERMISSION_DEFINITIONS: ReadonlyArray<{
   { key: 'banners_manage', label: 'Banners, Sections & Greetings', labelBn: 'ব্যানার ও সেকশন', group: 'CMS' },
   { key: 'complaints_manage', label: 'Complaints Manage', labelBn: 'অভিযোগ ব্যবস্থাপনা', group: 'Support' },
   { key: 'chat_manage', label: 'Live Chat & AI Support', labelBn: 'লাইভ চ্যাট ও AI', group: 'Support' },
+  { key: 'recruitment_manage', label: 'Recruitment & Applications', labelBn: 'নিয়োগ ও চাকরির আবেদন', group: 'Governance' },
   { key: 'reports_view', label: 'Reports & Activity Logs', labelBn: 'রিপোর্ট ও লগ', group: 'Governance' },
   { key: 'seo_manage', label: 'SEO & OpenGraph', labelBn: 'এসইও সেটিংস', group: 'CMS' },
   { key: 'settings_view', label: 'Website & System Settings', labelBn: 'সাইট সেটিংস', group: 'Governance' },
@@ -54,6 +56,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<StaffRole, PermissionKey[]> = {
     'categories_manage',
     'showrooms_manage',
     'banners_manage',
+    'recruitment_manage',
     'reports_view',
   ],
   manager: [
@@ -64,6 +67,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<StaffRole, PermissionKey[]> = {
     'categories_manage',
     'showrooms_manage',
     'complaints_manage',
+    'recruitment_manage',
     'reports_view',
   ],
   support_agent: [
@@ -561,3 +565,220 @@ export interface AdminUser {
   createdAt?: unknown;
   updatedAt?: unknown;
 }
+
+// ==========================================
+// Employee Recruitment Module Types
+// ==========================================
+
+export type JobCircularStatus = 'Draft' | 'Published' | 'Hidden' | 'Closed';
+
+export type JobApplicationStatus =
+  | 'Submitted'
+  | 'Under Review'
+  | 'Shortlisted'
+  | 'Exam Scheduled'
+  | 'Exam Completed'
+  | 'Interview'
+  | 'Selected'
+  | 'Rejected'
+  | 'On Hold'
+  | 'Withdrawn';
+
+export interface JobPosting {
+  id: string;
+  slug: string;
+  title: string;
+  titleEn?: string;
+  department?: string;
+  category: string;
+  vacancies: number;
+  salary: string;
+  salaryType?: string;
+  workplace: string;
+  employmentType: string;
+  workingHours?: string;
+  description: string;
+  responsibilities: string[];
+  requirements: string[];
+  educationRequirement: string;
+  experienceRequirement: string;
+  benefits?: string[];
+  startDate: string;
+  deadline: string;
+  status: JobCircularStatus;
+  contactInfo?: string;
+  instructions?: string;
+  deleted?: boolean;
+  createdBy?: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface JobExamSchedule {
+  examId?: string;
+  examTitle?: string;
+  examDate: string;
+  startTime?: string;
+  endTime?: string;
+  duration?: string;
+  examTime: string;
+  examLocation: string;
+  examType: string;
+  examInstructions: string;
+  totalMarks?: number;
+  passMarks?: number;
+  scheduledBy?: string;
+  scheduledAt?: string;
+}
+
+export interface JobExamTemplate {
+  id: string;
+  title: string;
+  jobId: string;
+  jobTitle: string;
+  examDate: string;
+  startTime: string;
+  endTime: string;
+  duration: string;
+  location: string;
+  examType: string;
+  instructions: string;
+  totalMarks: number;
+  passMarks: number;
+  createdBy?: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export type JobInterviewStatus = 'scheduled' | 'completed' | 'cancelled';
+
+export interface JobInterviewSchedule {
+  interviewDate: string;
+  interviewTime: string;
+  interviewLocation: string;
+  interviewType?: string;
+  interviewStatus?: JobInterviewStatus;
+  interviewNotes: string;
+  scheduledBy?: string;
+  scheduledAt?: string;
+}
+
+export interface JobApplicationHistoryItem {
+  status: string;
+  note?: string;
+  changedAt: string;
+  changedBy?: string;
+}
+
+export interface JobApplicationDocumentRef {
+  name: string;
+  docType: 'nid_birth_cert' | 'cv' | 'educational_cert' | 'other';
+  url: string;
+  storagePath: string;
+  mimeType: string;
+  sizeBytes: number;
+}
+
+export interface JobApplicationDocumentUrls {
+  nidOrBirthCert?: JobApplicationDocumentRef;
+  cv?: JobApplicationDocumentRef;
+  educationalCert?: JobApplicationDocumentRef;
+  otherDoc?: JobApplicationDocumentRef;
+}
+
+export interface JobApplication {
+  id: string;
+  applicationCode: string;
+  jobId: string;
+  jobSlug: string;
+  jobTitle: string;
+  jobCategory: string;
+  // Personal Information
+  fullName: string;
+  fatherName: string;
+  motherName: string;
+  dateOfBirth: string;
+  gender: string;
+  maritalStatus?: string;
+  nationality?: string;
+  nidNumber?: string;
+  passportNumber?: string;
+  // Contact Information
+  mobile: string;
+  alternativeMobile?: string;
+  email: string;
+  presentAddress: string;
+  permanentAddress: string;
+  // Educational Information
+  educationLevel: string;
+  institution: string;
+  subjectDepartment?: string;
+  passingYear: string;
+  resultGpa: string;
+  // Employment & Experience
+  hasPreviousExperience: boolean;
+  experienceYears: string;
+  previousOrganization: string;
+  currentOccupation: string;
+  expectedSalary: string;
+  appliedPosition: string;
+  // Skills & Additional Information
+  computerSkills?: string;
+  languageSkills?: string;
+  aboutSelf: string;
+  skills: string;
+  referenceInfo: string;
+  // Media & Documents (Firebase Storage URLs + backward-compatible fields)
+  photoUrl?: string;
+  photoStoragePath?: string;
+  photoDataUrl: string;
+  documentUrls?: JobApplicationDocumentUrls;
+  cvUrlOrNote: string;
+  declarationAccepted?: boolean;
+  // Review & Workflow
+  status: JobApplicationStatus;
+  shortlisted?: boolean;
+  exam?: JobExamSchedule;
+  interview?: JobInterviewSchedule;
+  adminNotes: string;
+  notes?: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  statusHistory?: JobApplicationHistoryItem[];
+  archived?: boolean;
+  deleted?: boolean;
+  submittedDateText: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface JobApplicationStatusSummary {
+  id: string;
+  jobId: string;
+  jobTitle: string;
+  jobCategory: string;
+  mobileHash?: string;
+  status: JobApplicationStatus;
+  submittedDateText: string;
+  examTitle?: string;
+  examDate?: string;
+  examStartTime?: string;
+  examEndTime?: string;
+  examDuration?: string;
+  examTime?: string;
+  examLocation?: string;
+  examType?: string;
+  examInstructions?: string;
+  examTotalMarks?: number;
+  examPassMarks?: number;
+  interviewDate?: string;
+  interviewTime?: string;
+  interviewLocation?: string;
+  interviewType?: string;
+  interviewStatus?: JobInterviewStatus;
+  interviewNotes?: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+

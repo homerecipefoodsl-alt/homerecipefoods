@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { Link, NavLink, useNavigate } from 'react-router-dom';
 import { MapPin, Menu, MessageCircle, Search, X } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
@@ -15,27 +15,19 @@ const NAV_LINKS = [
   { label: 'Categories', to: '/#categories' },
   { label: 'Occasions', to: '/#occasions' },
   { label: 'Showrooms', to: '/showrooms' },
+  { label: 'JobApplications', to: '/jobs' },
   { label: 'Complaint', to: '/complaint' },
 ];
 
 export function Header({ onOpenChat }: HeaderProps) {
   const { siteSettings, languageMode } = useStore();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const navigate = useNavigate();
-
-  useEffect(() => {
-    if (searchOpen) {
-      searchInputRef.current?.focus({ preventScroll: true });
-    }
-  }, [searchOpen]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const q = searchQuery.trim();
-    setSearchOpen(false);
     setMobileMenuOpen(false);
     navigate(q ? `/products?q=${encodeURIComponent(q)}` : '/products');
   };
@@ -61,7 +53,7 @@ export function Header({ onOpenChat }: HeaderProps) {
   return (
     <div className="sticky top-0 z-40" data-sticky-header="true">
       {siteSettings.announcementEnabled && announcementText && (
-        <div className="bg-[#DC1F26] px-4 py-1.5 text-center text-xs font-semibold text-white">
+        <div className="bg-[#DC1F26] px-3 py-1 text-center text-[11px] font-semibold text-white sm:text-xs">
           {siteSettings.announcementLink ? (
             <Link to={siteSettings.announcementLink} className="hover:underline">
               {announcementText}
@@ -72,20 +64,20 @@ export function Header({ onOpenChat }: HeaderProps) {
         </div>
       )}
       <header className="border-b border-[#292524] bg-[#1C1917]">
-        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-4 sm:h-[72px] sm:gap-6 sm:px-6 lg:px-8">
+        <div className="mx-auto flex h-12 max-w-7xl items-center justify-between gap-3 px-3 sm:h-14 sm:px-6 lg:gap-6 lg:px-8">
           {/* Official Brand Logo */}
           <Link
             to="/"
             aria-label={`${siteSettings.brandName || 'Home Recipe Foods'} Home`}
-            className="inline-flex shrink-0 items-center rounded-md py-1 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#FACC15]"
+            className="inline-flex shrink-0 items-center rounded-md py-0.5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#FACC15]"
           >
-            <BrandLogo variant="header" />
+            <BrandLogo variant="header" className="h-7 w-auto sm:h-9 lg:h-10" />
           </Link>
 
           {/* Desktop Navigation */}
           <nav
             aria-label="Primary Navigation"
-            className="hidden items-center gap-5 lg:flex xl:gap-6"
+            className="hidden items-center gap-4 lg:flex xl:gap-5"
           >
             {NAV_LINKS.map((item) =>
               item.to.startsWith('/#') ? (
@@ -93,7 +85,7 @@ export function Header({ onOpenChat }: HeaderProps) {
                   key={item.to}
                   type="button"
                   onClick={() => handleAnchorNav(item.to)}
-                  className="shrink-0 cursor-pointer whitespace-nowrap text-sm font-medium text-[#E7E5E4] underline-offset-4 transition-colors hover:text-[#FACC15] hover:underline focus-visible:outline-2 focus-visible:outline-[#FACC15]"
+                  className="shrink-0 cursor-pointer whitespace-nowrap text-[13px] font-medium text-[#E7E5E4] underline-offset-4 transition-colors hover:text-[#FACC15] hover:underline focus-visible:outline-2 focus-visible:outline-[#FACC15]"
                 >
                   {item.label}
                 </button>
@@ -102,7 +94,7 @@ export function Header({ onOpenChat }: HeaderProps) {
                   key={item.to}
                   to={item.to}
                   className={({ isActive }) =>
-                    `shrink-0 whitespace-nowrap text-sm font-medium underline-offset-4 transition-colors focus-visible:outline-2 focus-visible:outline-[#FACC15] ${
+                    `shrink-0 whitespace-nowrap text-[13px] font-medium underline-offset-4 transition-colors focus-visible:outline-2 focus-visible:outline-[#FACC15] ${
                       isActive
                         ? 'text-[#FACC15] underline'
                         : 'text-[#E7E5E4] hover:text-[#FACC15] hover:underline'
@@ -116,81 +108,70 @@ export function Header({ onOpenChat }: HeaderProps) {
             <button
               type="button"
               onClick={() => onOpenChat()}
-              className="shrink-0 cursor-pointer whitespace-nowrap text-sm font-medium text-[#E7E5E4] underline-offset-4 transition-colors hover:text-[#FACC15] hover:underline focus-visible:outline-2 focus-visible:outline-[#FACC15]"
+              className="shrink-0 cursor-pointer whitespace-nowrap text-[13px] font-medium text-[#E7E5E4] underline-offset-4 transition-colors hover:text-[#FACC15] hover:underline focus-visible:outline-2 focus-visible:outline-[#FACC15]"
             >
               Support
             </button>
           </nav>
 
-          {/* Right Action Controls */}
-          <div className="flex shrink-0 items-center gap-2 sm:gap-3">
-            <button
-              type="button"
-              onClick={() => setSearchOpen((v) => !v)}
-              aria-label="Search products"
-              className="inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-lg border border-[#44403C] bg-[#292524] text-[#FAFAF8] transition-colors hover:border-[#FACC15] hover:text-[#FACC15] focus-visible:outline-2 focus-visible:outline-[#FACC15]"
+          {/* Compact Desktop Search + Action Controls */}
+          <div className="flex items-center justify-end gap-2 sm:gap-2.5">
+            <form
+              onSubmit={handleSearchSubmit}
+              role="search"
+              className="hidden h-9 w-48 items-center rounded-full border border-[#44403C] bg-[#292524] pl-3 pr-1.5 transition-colors focus-within:border-[#FACC15] md:flex lg:w-52 xl:w-60"
             >
-              <Search className="h-4 w-4" />
-            </button>
+              <Search className="mr-1.5 h-3.5 w-3.5 shrink-0 text-[#A8A29E]" aria-hidden="true" />
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="পণ্য খুঁজুন..."
+                aria-label="পণ্য খুঁজুন"
+                className="min-w-0 flex-1 bg-transparent text-xs text-[#FAFAF8] placeholder:text-[#A8A29E] focus:outline-none"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  aria-label="Clear search"
+                  className="inline-flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-full text-[#A8A29E] hover:text-white"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </form>
+
+            <Link
+              to="/products"
+              aria-label="পণ্য খুঁজুন"
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[#44403C] bg-[#292524] text-[#FAFAF8] transition-colors hover:border-[#FACC15] md:hidden"
+            >
+              <Search className="h-3.5 w-3.5" />
+            </Link>
 
             <Link
               to="/showrooms"
-              className="hidden shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-[#DC1F26] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#B91C1C] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#FACC15] sm:inline-flex"
+              className="inline-flex h-8 shrink-0 items-center gap-1 whitespace-nowrap rounded-lg bg-[#DC1F26] px-2.5 text-[11px] font-semibold text-white transition-colors hover:bg-[#B91C1C] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#FACC15] sm:h-9 sm:gap-1.5 sm:px-3.5 sm:text-xs"
             >
               <MapPin className="h-3.5 w-3.5" />
-              <span>Find Showroom</span>
+              <span>শোরুম</span>
             </Link>
 
             <button
               type="button"
               onClick={() => setMobileMenuOpen((v) => !v)}
               aria-label="Toggle navigation menu"
-              className="inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-lg border border-[#44403C] bg-[#292524] text-[#FAFAF8] hover:border-[#FACC15] lg:hidden"
+              className="inline-flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-lg border border-[#44403C] bg-[#292524] text-[#FAFAF8] hover:border-[#FACC15] sm:h-9 sm:w-9 lg:hidden"
             >
-              {mobileMenuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+              {mobileMenuOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
             </button>
           </div>
         </div>
 
-        {/* Expandable Search Bar */}
-        {searchOpen && (
-          <div className="border-t border-[#292524] bg-[#FAFAF8] px-4 py-3 sm:px-6 lg:px-8">
-            <form
-              onSubmit={handleSearchSubmit}
-              className="mx-auto flex max-w-3xl items-center gap-2"
-            >
-              <div className="relative flex-1">
-                <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#78716C]" />
-                <input
-                  ref={searchInputRef}
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="খাবার খুঁজুন / Search: চকলেট কেক, Chocolate Cake, বার্গার..."
-                  className="w-full rounded-lg border border-[#D6D3D1] bg-white py-2.5 pl-10 pr-4 text-sm text-[#1C1917] placeholder:text-[#78716C] focus:border-[#DC1F26] focus:outline-none"
-                />
-              </div>
-              <button
-                type="submit"
-                className="shrink-0 cursor-pointer whitespace-nowrap rounded-lg bg-[#DC1F26] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#B91C1C]"
-              >
-                খুঁজুন
-              </button>
-              <button
-                type="button"
-                onClick={() => setSearchOpen(false)}
-                aria-label="Close search"
-                className="inline-flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-lg border border-[#D6D3D1] bg-white text-[#57534E] hover:bg-[#F5F4F0]"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </form>
-          </div>
-        )}
-
         {/* Mobile Drawer Menu */}
         {mobileMenuOpen && (
-          <div className="border-t border-[#292524] bg-[#1C1917] px-4 py-4 lg:hidden">
+          <div className="border-t border-[#292524] bg-[#1C1917] px-4 py-3 lg:hidden">
             <div className="flex flex-col gap-1">
               {NAV_LINKS.map((item) => (
                 <button
@@ -232,7 +213,7 @@ export function Header({ onOpenChat }: HeaderProps) {
         )}
       </header>
 
-      {/* Dynamic Animated Greeting Immediately Under Logo/Header */}
+      {/* Compact Dynamic Greeting Strip */}
       <DynamicGreetingStrip />
     </div>
   );

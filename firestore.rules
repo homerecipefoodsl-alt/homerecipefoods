@@ -81,11 +81,11 @@ service cloud.firestore {
           ('permissions' in rbacDoc() && rbacDoc().permissions is list && perm in rbacDoc().permissions)
           || (!('permissions' in rbacDoc()) && rbacDoc().role == 'admin' && perm in [
             'dashboard_view', 'products_view', 'products_add', 'products_edit', 'products_delete',
-            'categories_manage', 'showrooms_manage', 'banners_manage', 'reports_view'
+            'categories_manage', 'showrooms_manage', 'banners_manage', 'recruitment_manage', 'reports_view'
           ])
           || (!('permissions' in rbacDoc()) && rbacDoc().role == 'manager' && perm in [
             'dashboard_view', 'products_view', 'products_add', 'products_edit',
-            'categories_manage', 'showrooms_manage', 'complaints_manage', 'reports_view'
+            'categories_manage', 'showrooms_manage', 'complaints_manage', 'recruitment_manage', 'reports_view'
           ])
           || (!('permissions' in rbacDoc()) && rbacDoc().role == 'support_agent' && perm in [
             'dashboard_view', 'complaints_manage', 'chat_manage'
@@ -104,6 +104,12 @@ service cloud.firestore {
 
     function isSupportStaff() {
       return isSuperAdmin() || hasPermission('complaints_manage') || hasPermission('chat_manage');
+    }
+
+    function isRecruitmentStaff() {
+      return isSuperAdmin()
+        || hasPermission('recruitment_manage')
+        || (hasActiveRbacDoc() && rbacRole() == 'admin');
     }
 
     function isBoundedStringList(arr, maxLen, maxItemLen) {
@@ -686,6 +692,212 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidJobPosting(data) {
+      return data.keys().hasAll([
+          'id', 'slug', 'title', 'category', 'vacancies', 'salary',
+          'workplace', 'employmentType', 'description', 'responsibilities',
+          'requirements', 'startDate', 'deadline', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'slug', 'title', 'titleEn', 'department', 'category', 'vacancies', 'salary', 'salaryType',
+          'workplace', 'employmentType', 'workingHours', 'description', 'responsibilities',
+          'requirements', 'educationRequirement', 'experienceRequirement', 'benefits',
+          'startDate', 'deadline', 'status', 'contactInfo', 'instructions',
+          'deleted', 'createdBy', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && isValidSlug(data.slug)
+        && data.title is string && data.title.size() >= 2 && data.title.size() <= 160
+        && (!('titleEn' in data) || (data.titleEn is string && data.titleEn.size() <= 160))
+        && (!('department' in data) || (data.department is string && data.department.size() <= 100))
+        && data.category is string && data.category.size() >= 1 && data.category.size() <= 100
+        && data.vacancies is int && data.vacancies >= 1 && data.vacancies <= 1000
+        && data.salary is string && data.salary.size() >= 1 && data.salary.size() <= 120
+        && (!('salaryType' in data) || (data.salaryType is string && data.salaryType.size() <= 60))
+        && data.workplace is string && data.workplace.size() >= 1 && data.workplace.size() <= 160
+        && data.employmentType is string && data.employmentType.size() >= 1 && data.employmentType.size() <= 80
+        && (!('workingHours' in data) || (data.workingHours is string && data.workingHours.size() <= 120))
+        && data.description is string && data.description.size() >= 5 && data.description.size() <= 4000
+        && isBoundedStringList(data.responsibilities, 30, 300)
+        && isBoundedStringList(data.requirements, 30, 300)
+        && (!('educationRequirement' in data) || (data.educationRequirement is string && data.educationRequirement.size() <= 300))
+        && (!('experienceRequirement' in data) || (data.experienceRequirement is string && data.experienceRequirement.size() <= 300))
+        && (!('benefits' in data) || isBoundedStringList(data.benefits, 20, 200))
+        && data.startDate is string && data.startDate.size() >= 8 && data.startDate.size() <= 32
+        && data.deadline is string && data.deadline.size() >= 8 && data.deadline.size() <= 32
+        && data.status in ['Draft', 'Published', 'Hidden', 'Closed']
+        && (!('contactInfo' in data) || (data.contactInfo is string && data.contactInfo.size() <= 300))
+        && (!('instructions' in data) || (data.instructions is string && data.instructions.size() <= 1000))
+        && (!('deleted' in data) || data.deleted is bool)
+        && (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 254))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidJobApplication(data) {
+      return data.keys().hasAll([
+          'id', 'applicationCode', 'jobId', 'jobSlug', 'jobTitle', 'jobCategory',
+          'fullName', 'dateOfBirth', 'gender', 'mobile', 'email', 'presentAddress',
+          'educationLevel', 'hasPreviousExperience', 'appliedPosition', 'photoDataUrl',
+          'cvUrlOrNote', 'status', 'adminNotes', 'submittedDateText', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'applicationCode', 'jobId', 'jobSlug', 'jobTitle', 'jobCategory',
+          'fullName', 'fatherName', 'motherName', 'dateOfBirth', 'gender',
+          'maritalStatus', 'nationality', 'nidNumber', 'passportNumber',
+          'mobile', 'alternativeMobile', 'email', 'presentAddress', 'permanentAddress',
+          'educationLevel', 'institution', 'subjectDepartment', 'passingYear', 'resultGpa',
+          'hasPreviousExperience', 'experienceYears', 'previousOrganization',
+          'currentOccupation', 'expectedSalary', 'appliedPosition',
+          'computerSkills', 'languageSkills', 'aboutSelf', 'skills', 'referenceInfo',
+          'photoUrl', 'photoStoragePath', 'photoDataUrl', 'documentUrls', 'cvUrlOrNote', 'declarationAccepted',
+          'status', 'shortlisted', 'exam', 'interview', 'adminNotes', 'notes',
+          'reviewedBy', 'reviewedAt', 'statusHistory', 'archived', 'deleted',
+          'submittedDateText', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.applicationCode is string && data.applicationCode.size() >= 6 && data.applicationCode.size() <= 32 && data.applicationCode.matches('^[A-Z0-9\\-]+$')
+        && isValidId(data.jobId)
+        && isValidSlug(data.jobSlug)
+        && data.jobTitle is string && data.jobTitle.size() >= 1 && data.jobTitle.size() <= 160
+        && data.jobCategory is string && data.jobCategory.size() >= 1 && data.jobCategory.size() <= 100
+        && data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 120
+        && (!('fatherName' in data) || (data.fatherName is string && data.fatherName.size() <= 120))
+        && (!('motherName' in data) || (data.motherName is string && data.motherName.size() <= 120))
+        && data.dateOfBirth is string && data.dateOfBirth.size() >= 4 && data.dateOfBirth.size() <= 32
+        && data.gender is string && data.gender.size() >= 1 && data.gender.size() <= 32
+        && (!('maritalStatus' in data) || (data.maritalStatus is string && data.maritalStatus.size() <= 40))
+        && (!('nationality' in data) || (data.nationality is string && data.nationality.size() <= 60))
+        && (!('nidNumber' in data) || (data.nidNumber is string && data.nidNumber.size() <= 40))
+        && (!('passportNumber' in data) || (data.passportNumber is string && data.passportNumber.size() <= 40))
+        && data.mobile is string && data.mobile.size() >= 10 && data.mobile.size() <= 32
+        && (!('alternativeMobile' in data) || (data.alternativeMobile is string && data.alternativeMobile.size() <= 32))
+        && data.email is string && data.email.size() <= 254
+        && data.presentAddress is string && data.presentAddress.size() >= 3 && data.presentAddress.size() <= 400
+        && (!('permanentAddress' in data) || (data.permanentAddress is string && data.permanentAddress.size() <= 400))
+        && data.educationLevel is string && data.educationLevel.size() >= 1 && data.educationLevel.size() <= 120
+        && (!('institution' in data) || (data.institution is string && data.institution.size() <= 160))
+        && (!('subjectDepartment' in data) || (data.subjectDepartment is string && data.subjectDepartment.size() <= 160))
+        && (!('passingYear' in data) || (data.passingYear is string && data.passingYear.size() <= 20))
+        && (!('resultGpa' in data) || (data.resultGpa is string && data.resultGpa.size() <= 40))
+        && data.hasPreviousExperience is bool
+        && (!('experienceYears' in data) || (data.experienceYears is string && data.experienceYears.size() <= 40))
+        && (!('previousOrganization' in data) || (data.previousOrganization is string && data.previousOrganization.size() <= 160))
+        && (!('currentOccupation' in data) || (data.currentOccupation is string && data.currentOccupation.size() <= 120))
+        && (!('expectedSalary' in data) || (data.expectedSalary is string && data.expectedSalary.size() <= 60))
+        && data.appliedPosition is string && data.appliedPosition.size() >= 1 && data.appliedPosition.size() <= 160
+        && (!('computerSkills' in data) || (data.computerSkills is string && data.computerSkills.size() <= 400))
+        && (!('languageSkills' in data) || (data.languageSkills is string && data.languageSkills.size() <= 400))
+        && (!('aboutSelf' in data) || (data.aboutSelf is string && data.aboutSelf.size() <= 1500))
+        && (!('skills' in data) || (data.skills is string && data.skills.size() <= 600))
+        && (!('referenceInfo' in data) || (data.referenceInfo is string && data.referenceInfo.size() <= 400))
+        && (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 2000))
+        && (!('photoStoragePath' in data) || (data.photoStoragePath is string && data.photoStoragePath.size() <= 400))
+        && data.photoDataUrl is string && data.photoDataUrl.size() <= 400000
+        && (!('documentUrls' in data) || data.documentUrls is map)
+        && data.cvUrlOrNote is string && data.cvUrlOrNote.size() <= 1000
+        && (!('declarationAccepted' in data) || data.declarationAccepted is bool)
+        && data.status in ['Submitted', 'Under Review', 'Shortlisted', 'Exam Scheduled', 'Exam Completed', 'Interview', 'Selected', 'Rejected', 'On Hold', 'Withdrawn']
+        && (!('shortlisted' in data) || data.shortlisted is bool)
+        && (!('exam' in data) || data.exam is map)
+        && (!('interview' in data) || data.interview is map)
+        && data.adminNotes is string && data.adminNotes.size() <= 2000
+        && (!('notes' in data) || (data.notes is string && data.notes.size() <= 2000))
+        && (!('reviewedBy' in data) || (data.reviewedBy is string && data.reviewedBy.size() <= 254))
+        && (!('reviewedAt' in data) || (data.reviewedAt is string && data.reviewedAt.size() <= 64))
+        && (!('statusHistory' in data) || (data.statusHistory is list && data.statusHistory.size() <= 30))
+        && (!('archived' in data) || data.archived is bool)
+        && (!('deleted' in data) || data.deleted is bool)
+        && data.submittedDateText is string && data.submittedDateText.size() >= 4 && data.submittedDateText.size() <= 40
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidJobApplicationLock(data) {
+      return data.keys().hasAll(['id', 'jobId', 'keyHash', 'createdAt'])
+        && data.keys().hasOnly(['id', 'jobId', 'keyHash', 'createdAt'])
+        && isValidId(data.id)
+        && isValidId(data.jobId)
+        && data.keyHash is string && data.keyHash.size() >= 16 && data.keyHash.size() <= 128
+        && data.createdAt is timestamp;
+    }
+
+    function isValidJobApplicationStatus(data) {
+      return data.keys().hasAll(['id', 'jobId', 'jobTitle', 'jobCategory', 'status', 'submittedDateText', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'jobId', 'jobTitle', 'jobCategory', 'mobileHash', 'status', 'submittedDateText',
+          'examTitle', 'examDate', 'examStartTime', 'examEndTime', 'examDuration',
+          'examTime', 'examLocation', 'examType', 'examInstructions',
+          'examTotalMarks', 'examPassMarks',
+          'interviewDate', 'interviewTime', 'interviewLocation', 'interviewType',
+          'interviewStatus', 'interviewNotes',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.jobId)
+        && data.jobTitle is string && data.jobTitle.size() >= 1 && data.jobTitle.size() <= 160
+        && data.jobCategory is string && data.jobCategory.size() >= 1 && data.jobCategory.size() <= 100
+        && (!('mobileHash' in data) || (data.mobileHash is string && data.mobileHash.size() <= 128))
+        && data.status in ['Submitted', 'Under Review', 'Shortlisted', 'Exam Scheduled', 'Exam Completed', 'Interview', 'Selected', 'Rejected', 'On Hold', 'Withdrawn']
+        && data.submittedDateText is string && data.submittedDateText.size() >= 4 && data.submittedDateText.size() <= 40
+        && (!('examTitle' in data) || (data.examTitle is string && data.examTitle.size() <= 160))
+        && (!('examDate' in data) || (data.examDate is string && data.examDate.size() <= 40))
+        && (!('examStartTime' in data) || (data.examStartTime is string && data.examStartTime.size() <= 40))
+        && (!('examEndTime' in data) || (data.examEndTime is string && data.examEndTime.size() <= 40))
+        && (!('examDuration' in data) || (data.examDuration is string && data.examDuration.size() <= 60))
+        && (!('examTime' in data) || (data.examTime is string && data.examTime.size() <= 60))
+        && (!('examLocation' in data) || (data.examLocation is string && data.examLocation.size() <= 200))
+        && (!('examType' in data) || (data.examType is string && data.examType.size() <= 80))
+        && (!('examInstructions' in data) || (data.examInstructions is string && data.examInstructions.size() <= 1000))
+        && (!('examTotalMarks' in data) || (data.examTotalMarks is int && data.examTotalMarks >= 0 && data.examTotalMarks <= 10000))
+        && (!('examPassMarks' in data) || (data.examPassMarks is int && data.examPassMarks >= 0 && data.examPassMarks <= 10000))
+        && (!('interviewDate' in data) || (data.interviewDate is string && data.interviewDate.size() <= 40))
+        && (!('interviewTime' in data) || (data.interviewTime is string && data.interviewTime.size() <= 40))
+        && (!('interviewLocation' in data) || (data.interviewLocation is string && data.interviewLocation.size() <= 200))
+        && (!('interviewType' in data) || (data.interviewType is string && data.interviewType.size() <= 80))
+        && (!('interviewStatus' in data) || (data.interviewStatus in ['scheduled', 'completed', 'cancelled']))
+        && (!('interviewNotes' in data) || (data.interviewNotes is string && data.interviewNotes.size() <= 600))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidJobApplicationCounter(data) {
+      return data.keys().hasAll(['id', 'lastSeq', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'lastSeq', 'updatedAt'])
+        && data.id is string && data.id.matches('^20[2-9][0-9]$')
+        && data.lastSeq is int && data.lastSeq >= 1 && data.lastSeq <= 9999999
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidJobExam(data) {
+      return data.keys().hasAll([
+          'id', 'title', 'jobId', 'jobTitle', 'examDate', 'startTime', 'endTime',
+          'duration', 'location', 'examType', 'instructions', 'totalMarks', 'passMarks',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'title', 'jobId', 'jobTitle', 'examDate', 'startTime', 'endTime',
+          'duration', 'location', 'examType', 'instructions', 'totalMarks', 'passMarks',
+          'createdBy', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.title is string && data.title.size() >= 2 && data.title.size() <= 160
+        && isValidId(data.jobId)
+        && data.jobTitle is string && data.jobTitle.size() >= 1 && data.jobTitle.size() <= 160
+        && data.examDate is string && data.examDate.size() >= 4 && data.examDate.size() <= 40
+        && data.startTime is string && data.startTime.size() >= 1 && data.startTime.size() <= 40
+        && data.endTime is string && data.endTime.size() >= 1 && data.endTime.size() <= 40
+        && data.duration is string && data.duration.size() >= 1 && data.duration.size() <= 60
+        && data.location is string && data.location.size() >= 1 && data.location.size() <= 200
+        && data.examType is string && data.examType.size() >= 1 && data.examType.size() <= 80
+        && data.instructions is string && data.instructions.size() <= 1000
+        && data.totalMarks is int && data.totalMarks >= 1 && data.totalMarks <= 10000
+        && data.passMarks is int && data.passMarks >= 0 && data.passMarks <= data.totalMarks
+        && (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 254))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     // ==============================================
     // Collection Rules
     // ==============================================
@@ -1254,6 +1466,133 @@ service cloud.firestore {
         && incoming().admin_uid == request.auth.uid
         && incoming().timestamp == request.time;
       allow update, delete: if false;
+    }
+
+    // Employee Recruitment Circulars (/jobPostings/{jobId})
+    match /jobPostings/{jobId} {
+      allow get: if isValidId(jobId) && (
+        isRecruitmentStaff()
+        || (existing().status == 'Published' && !('deleted' in existing() && existing().deleted == true))
+      );
+      allow list: if isRecruitmentStaff()
+        || (resource.data.status == 'Published' && !('deleted' in resource.data && resource.data.deleted == true));
+      allow create: if isRecruitmentStaff()
+        && isValidId(jobId)
+        && isValidJobPosting(incoming())
+        && incoming().id == jobId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isRecruitmentStaff()
+        && isValidId(jobId)
+        && isValidJobPosting(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isSuperAdmin() && isValidId(jobId);
+    }
+
+    // Strictly Private Job Applications (/jobApplications/{applicationId})
+    // Public can create only for an active Published job; public get/list is strictly denied (zero PII exposure)
+    match /jobApplications/{applicationId} {
+      allow get, list: if isRecruitmentStaff();
+      allow create: if isValidId(applicationId)
+        && isValidJobApplication(incoming())
+        && incoming().id == applicationId
+        && incoming().status == 'Submitted'
+        && incoming().adminNotes == ''
+        && (!('shortlisted' in incoming()) || incoming().shortlisted == false)
+        && (!('archived' in incoming()) || incoming().archived == false)
+        && (!('deleted' in incoming()) || incoming().deleted == false)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/jobPostings/$(incoming().jobId))
+        && get(/databases/$(database)/documents/jobPostings/$(incoming().jobId)).data.status == 'Published'
+        && !('deleted' in get(/databases/$(database)/documents/jobPostings/$(incoming().jobId)).data
+          && get(/databases/$(database)/documents/jobPostings/$(incoming().jobId)).data.deleted == true);
+      allow update: if isRecruitmentStaff()
+        && isValidId(applicationId)
+        && isValidJobApplication(incoming())
+        && incoming().id == existing().id
+        && incoming().applicationCode == existing().applicationCode
+        && incoming().jobId == existing().jobId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'shortlisted', 'exam', 'interview', 'adminNotes', 'notes',
+          'reviewedBy', 'reviewedAt', 'statusHistory', 'archived', 'deleted', 'updatedAt'
+        ]);
+      allow delete: if isSuperAdmin() && isValidId(applicationId);
+    }
+
+    // Zero-PII Atomic Deduplication Locks (/jobApplicationLocks/{lockId})
+    match /jobApplicationLocks/{lockId} {
+      allow get: if isValidId(lockId);
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(lockId)
+        && isValidJobApplicationLock(incoming())
+        && incoming().id == lockId
+        && incoming().createdAt == request.time
+        && exists(/databases/$(database)/documents/jobPostings/$(incoming().jobId))
+        && get(/databases/$(database)/documents/jobPostings/$(incoming().jobId)).data.status == 'Published';
+      allow update: if false;
+      allow delete: if isSuperAdmin() && isValidId(lockId);
+    }
+
+    // Zero-PII Annual Sequential ID Counter (/jobApplicationCounters/{yearId})
+    match /jobApplicationCounters/{yearId} {
+      allow get: if yearId.matches('^20[2-9][0-9]$');
+      allow list: if isRecruitmentStaff();
+      allow create: if yearId.matches('^20[2-9][0-9]$')
+        && isValidJobApplicationCounter(incoming())
+        && incoming().id == yearId
+        && incoming().lastSeq == 1
+        && incoming().updatedAt == request.time;
+      allow update: if yearId.matches('^20[2-9][0-9]$')
+        && isValidJobApplicationCounter(incoming())
+        && incoming().id == existing().id
+        && incoming().lastSeq == existing().lastSeq + 1
+        && incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // Recruitment Exam Definitions (/jobExams/{examId})
+    match /jobExams/{examId} {
+      allow get, list: if isRecruitmentStaff();
+      allow create: if isRecruitmentStaff()
+        && isValidId(examId)
+        && isValidJobExam(incoming())
+        && incoming().id == examId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isRecruitmentStaff()
+        && isValidId(examId)
+        && isValidJobExam(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isSuperAdmin() && isValidId(examId);
+    }
+
+    // Zero-PII Candidate Status Tracker (/jobApplicationStatuses/{statusId})
+    match /jobApplicationStatuses/{statusId} {
+      allow get: if isValidId(statusId);
+      allow list: if isRecruitmentStaff();
+      allow create: if isValidId(statusId)
+        && isValidJobApplicationStatus(incoming())
+        && incoming().id == statusId
+        && incoming().status == 'Submitted'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/jobPostings/$(incoming().jobId))
+        && get(/databases/$(database)/documents/jobPostings/$(incoming().jobId)).data.status == 'Published';
+      allow update: if isRecruitmentStaff()
+        && isValidId(statusId)
+        && isValidJobApplicationStatus(incoming())
+        && incoming().id == existing().id
+        && incoming().jobId == existing().jobId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isSuperAdmin() && isValidId(statusId);
     }
   }
 }

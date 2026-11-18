@@ -1,0 +1,39 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Recruitment candidate photos (JPG/JPEG/PNG, max 2 MB)
+    match /job-applications/{applicationId}/photo/{fileName} {
+      allow create: if applicationId.matches('^(SN-JOB|HRF)-[0-9]{4}-[A-Z0-9]{4,10}$')
+        && request.resource != null
+        && request.resource.size <= 2 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|jpg|png)');
+      allow read, delete: if request.auth != null
+        && request.auth.token.email_verified == true;
+      allow update: if false;
+    }
+
+    // Recruitment candidate documents (JPG/JPEG/PNG/PDF/DOC/DOCX, max 5 MB)
+    match /job-applications/{applicationId}/documents/{fileName} {
+      allow create: if applicationId.matches('^(SN-JOB|HRF)-[0-9]{4}-[A-Z0-9]{4,10}$')
+        && request.resource != null
+        && request.resource.size <= 5 * 1024 * 1024
+        && (
+          request.resource.contentType.matches('image/(jpeg|jpg|png)')
+          || request.resource.contentType == 'application/pdf'
+          || request.resource.contentType == 'application/msword'
+          || request.resource.contentType == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        );
+      allow read, delete: if request.auth != null
+        && request.auth.token.email_verified == true;
+      allow update: if false;
+    }
+
+    // Existing CMS / Media Library uploads (verified staff only)
+    match /media/{folder}/{fileName} {
+      allow read: if true;
+      allow write: if request.auth != null
+        && request.auth.token.email_verified == true
+        && request.resource.size <= 10 * 1024 * 1024;
+    }
+  }
+}

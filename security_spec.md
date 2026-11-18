@@ -29,3 +29,10 @@
 8. Customer cannot `get` or `list` another customer's complaint
 9. Customer cannot `list` `/chat_sessions` or `get`/`list` another authenticated customer's chat session/messages
 10. Super Admin can add, change role (`admin` <-> `support_agent`), disable/enable, and remove non-Super-Admin roles
+
+## 3. Recruitment Module Privacy & Role Boundary
+1. **`/jobPostings`**: Public visitors can only `get` or `list` documents where `status == 'Published'`. `Draft`, `Hidden`, and `Closed` circulars are readable/writable strictly by `Super Admin`, `Admin`, or staff with `recruitment_manage`. Hard deletion is strictly `Super Admin` only.
+2. **`/jobApplications`**: Strictly private. Unauthenticated visitors can `create` with initial `status == 'Submitted'` and `adminNotes == ''` targeting an active `Published` circular. Public `get` and `list` are strictly `false`. Authorized recruitment staff can review, shortlist, schedule exams/interviews, add notes/reviewedBy/reviewedAt, and archive. Permanent `delete` is strictly `Super Admin` only.
+3. **`/jobApplicationLocks`, `/jobApplicationCounters` & `/jobApplicationStatuses`**: Zero-PII helper collections (`allow list: if false` for public) enabling monotonic `SN-JOB-YYYY-00001` ID reservation, atomic duplicate prevention per job + mobile/NID SHA-256 hash, and mobile-hash-verified Application ID status tracking without exposing any candidate personal details or admin notes.
+4. **`/jobExams`**: Strictly staff-only (`isRecruitmentStaff()` read/create/update, `isSuperAdmin()` delete).
+5. **Firebase Storage (`job-applications/{applicationId}/photo/*` & `job-applications/{applicationId}/documents/*`)**: Public uploads restricted by MIME type (`JPG/JPEG/PNG` for photos <= 2MB, `JPG/JPEG/PNG/PDF/DOC/DOCX` for documents <= 5MB); reads/deletes restricted exclusively to verified staff/Super Admin.
