@@ -9,6 +9,7 @@ import {
   Scale,
   Sparkles,
   Store,
+  UtensilsCrossed,
 } from 'lucide-react';
 import { ProductCard } from '../components/ProductCard';
 import { useStore } from '../context/StoreContext';
@@ -17,15 +18,16 @@ import {
   getOccasionText,
   getProductText,
   getShowroomText,
+  matchesProductCategory,
 } from '../lib/bilingual';
 import { formatBdtPrice } from '../lib/utils';
 
 export function ProductDetailPage() {
   const { slug } = useParams();
-  const { products, categories, showrooms, occasions, languageMode, loading } =
+  const { products, categories, showrooms, occasions, languageMode, productsLoading } =
     useStore();
 
-  const product = products.find((p) => p.slug === slug);
+  const product = products.find((p) => p.slug === slug || p.id === slug);
   const [activeImageIdx, setActiveImageIdx] = useState(0);
   const [showContactSheet, setShowContactSheet] = useState(false);
 
@@ -43,7 +45,7 @@ export function ProductDetailPage() {
     }
   }, [text, product]);
 
-  if (loading && !product) {
+  if (productsLoading && !product) {
     return (
       <div className="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
         <div className="h-[480px] animate-pulse rounded-2xl bg-[#F5F4F0]" />
@@ -71,20 +73,37 @@ export function ProductDetailPage() {
     );
   }
 
-  const gallery =
-    product.images && product.images.length > 0
-      ? product.images
-      : ['/src/assets/images/hero_bakery_clean_1794746110066.jpg'];
-  const currentImg = resolveAssetUrl(gallery[activeImageIdx] ?? gallery[0]);
+  const gallery = Array.from(
+    new Set(
+      [
+        ...(Array.isArray(product.images) ? product.images : []),
+        product.image,
+        product.imageUrl,
+      ].filter((u): u is string => typeof u === 'string' && u.trim().length > 0)
+    )
+  );
+  const hasRealImage = gallery.length > 0;
+  const currentImg = hasRealImage
+    ? resolveAssetUrl(gallery[activeImageIdx] ?? gallery[0])
+    : '';
+
+  const productShowroomIds = Array.isArray(product.showrooms) ? product.showrooms : [];
+  const productOccasionSlugs = Array.isArray(product.occasions) ? product.occasions : [];
+  const productSizes = Array.isArray(product.sizes) ? product.sizes : [];
+  const productIngredients = Array.isArray(product.ingredients) ? product.ingredients : [];
 
   const productShowrooms = showrooms.filter((s) =>
-    product.showrooms.includes(s.id)
+    productShowroomIds.includes(s.id)
   );
   const productOccasions = occasions.filter((o) =>
-    product.occasions.includes(o.slug)
+    productOccasionSlugs.includes(o.slug)
   );
   const relatedProducts = products
-    .filter((p) => p.category === product.category && p.id !== product.id)
+    .filter(
+      (p) =>
+        p.id !== product.id &&
+        matchesProductCategory(p, product.category, categories)
+    )
     .slice(0, 4);
 
   const structuredData = {
@@ -135,12 +154,24 @@ export function ProductDetailPage() {
         <div className="lg:col-span-6">
           <div className="overflow-hidden rounded-2xl border border-[#E7E5E4] bg-white">
             <div className="aspect-[4/3] w-full bg-[#F5F4F0]">
-              <img
-                src={currentImg}
-                alt={`${text.nameBn} - ${text.nameEn}`}
-                referrerPolicy="no-referrer"
-                className="h-full w-full object-cover"
-              />
+              {hasRealImage ? (
+                <img
+                  src={currentImg}
+                  alt={`${text.nameBn} - ${text.nameEn}`}
+                  referrerPolicy="no-referrer"
+                  className="h-full w-full object-cover"
+                />
+              ) : (
+                <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-gradient-to-br from-[#F5F4F0] to-[#E7E5E4] p-6 text-center">
+                  <UtensilsCrossed className="h-10 w-10 text-[#B91C1C]/60" />
+                  <p className="font-display text-lg font-bold text-[#1C1917]">
+                    {text.nameBn}
+                  </p>
+                  <p className="text-xs text-[#78716C]">
+                    এই পণ্যের ছবি শীঘ্রই Admin Panel থেকে যুক্ত করা হবে
+                  </p>
+                </div>
+              )}
             </div>
           </div>
 
@@ -225,7 +256,9 @@ export function ProductDetailPage() {
                 {product.discount}
               </span>
             )}
-            <span className="text-sm text-[#57534E]">{product.priceUnit}</span>
+            <span className="text-sm text-[#57534E]">
+              {text.unit || product.priceUnit}
+            </span>
           </div>
 
           {/* Bilingual Short & Full Description */}
@@ -271,11 +304,11 @@ export function ProductDetailPage() {
               </div>
             )}
 
-            {product.sizes.length > 0 && (
+            {productSizes.length > 0 && (
               <div className="text-sm">
                 <p className="font-semibold text-[#1C1917]">উপলব্ধ সাইজ / ভ্যারিয়েন্ট:</p>
                 <div className="mt-1.5 flex flex-wrap gap-2">
-                  {product.sizes.map((sz) => (
+                  {productSizes.map((sz) => (
                     <span
                       key={sz}
                       className="rounded-lg border border-[#E7E5E4] bg-white px-3 py-1.5 text-xs font-medium text-[#44403C]"
@@ -287,11 +320,11 @@ export function ProductDetailPage() {
               </div>
             )}
 
-            {product.ingredients.length > 0 && (
+            {productIngredients.length > 0 && (
               <div className="text-sm">
                 <p className="font-semibold text-[#1C1917]">প্রধান উপাদানসমূহ:</p>
                 <ul className="mt-1.5 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-                  {product.ingredients.map((ing) => (
+                  {productIngredients.map((ing) => (
                     <li key={ing} className="flex items-center gap-2 text-xs text-[#57534E] sm:text-sm">
                       <Check className="h-3.5 w-3.5 shrink-0 text-[#DC1F26]" />
                       <span>{ing}</span>

@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   User,
   onAuthStateChanged,
@@ -11,6 +11,7 @@ import {
   collection,
   doc,
   getDoc,
+  getDocs,
   onSnapshot,
   orderBy,
   query,
@@ -19,6 +20,12 @@ import {
   updateDoc,
   writeBatch,
 } from 'firebase/firestore';
+import {
+  MAHALLABIA_CATEGORY,
+  PRODUCT_MASTER_LIST,
+  buildProductMatchKey,
+  normalizeMasterText,
+} from '../data/productMasterList';
 import {
   SEED_CATEGORIES,
   SEED_GREETING,
@@ -29,6 +36,7 @@ import {
   SEED_SHOWROOMS,
   SEED_SITE_SETTINGS,
 } from '../data/seedData';
+import { toSlug } from '../lib/utils';
 import {
   OperationType,
   applyAuthPersistence,
@@ -149,8 +157,10 @@ interface StoreContextValue {
   languageMode: DisplayLanguage;
   setLanguageMode: (lang: DisplayLanguage) => void;
   loading: boolean;
+  productsLoading: boolean;
   firestoreEmpty: boolean;
   error: string | null;
+  productsError: string | null;
 
   // Auth & RBAC state
   user: User | null;
@@ -187,6 +197,23 @@ interface StoreContextValue {
     summary?: string
   ) => Promise<void>;
   seedDemoCatalog: () => Promise<{ createdCount: number }>;
+  importProductMasterList: () => Promise<MasterImportSummary>;
+  masterImportStats: {
+    totalMaster: number;
+    syncedCount: number;
+    missingCount: number;
+    missingImageCount: number;
+  };
+  masterImportRunning: boolean;
+  lastMasterImportSummary: MasterImportSummary | null;
+}
+
+export interface MasterImportSummary {
+  totalMasterCount: number;
+  existingProductCount: number;
+  newlyAddedCount: number;
+  skippedExistingCount: number;
+  categoriesCreated: number;
 }
 
 const StoreContext = createContext<StoreContextValue | null>(null);
@@ -206,7 +233,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [dbMediaItems, setDbMediaItems] = useState<MediaItem[]>([]);
 
   const [loading, setLoading] = useState(isFirebaseConfigured);
+  const [productsLoading, setProductsLoading] = useState(isFirebaseConfigured);
   const [error, setError] = useState<string | null>(null);
+  const [productsError, setProductsError] = useState<string | null>(null);
 
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(!isFirebaseConfigured);
@@ -683,21 +712,27 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     }
 
     const activeDb = db;
-    let settledCount = 0;
-    const markSettled = () => {
-      settledCount += 1;
-      if (settledCount >= 6) setLoading(false);
+    const settledKeys = new Set<string>();
+    const markSettled = (key: string) => {
+      settledKeys.add(key);
+      if (settledKeys.size >= 6) setLoading(false);
     };
 
     const unsubCats = onSnapshot(
       query(collection(activeDb, 'categories'), orderBy('order', 'asc')),
       (snap) => {
-        setDbCategories(snap.docs.map((d) => d.data() as Category));
-        markSettled();
+        setDbCategories(
+          snap.docs.map((d) => ({
+            ...(d.data() as Category),
+            id: (d.data().id as string) || d.id,
+          }))
+        );
+        markSettled('categories');
       },
       (err) => {
+        console.error('Categories loading failed:', err);
         setError('ক্যাটালগ লোড করতে সমস্যা হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।');
-        markSettled();
+        markSettled('categories');
         try {
           handleFirestoreError(err, OperationType.LIST, 'categories');
         } catch {
@@ -709,28 +744,58 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     const unsubOccs = onSnapshot(
       query(collection(activeDb, 'occasions'), orderBy('order', 'asc')),
       (snap) => {
-        setDbOccasions(snap.docs.map((d) => d.data() as Occasion));
-        markSettled();
+        setDbOccasions(
+          snap.docs.map((d) => ({
+            ...(d.data() as Occasion),
+            id: (d.data().id as string) || d.id,
+          }))
+        );
+        markSettled('occasions');
       },
-      () => markSettled()
+      (err) => {
+        console.warn('Occasions loading warning:', err);
+        markSettled('occasions');
+      }
     );
 
     const unsubProds = onSnapshot(
       collection(activeDb, 'products'),
       (snap) => {
-        setDbProducts(snap.docs.map((d) => d.data() as Product));
-        markSettled();
+        setProductsError(null);
+        setDbProducts(
+          snap.docs.map((d) => {
+            const raw = d.data() as Product;
+            return {
+              ...raw,
+              id: raw.id || d.id,
+            };
+          })
+        );
+        setProductsLoading(false);
+        markSettled('products');
       },
-      () => markSettled()
+      (err) => {
+        console.error('Products loading failed:', err);
+        setProductsError(
+          'পণ্যগুলো এখন লোড করা যাচ্ছে না। অনুগ্রহ করে কিছুক্ষণ পরে আবার চেষ্টা করুন।'
+        );
+        setProductsLoading(false);
+        markSettled('products');
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'products');
+        } catch {
+          // Logged above
+        }
+      }
     );
 
     const unsubShowrooms = onSnapshot(
       collection(activeDb, 'showrooms'),
       (snap) => {
         setDbShowrooms(snap.docs.map((d) => d.data() as Showroom));
-        markSettled();
+        markSettled('showrooms');
       },
-      () => markSettled()
+      () => markSettled('showrooms')
     );
 
     const unsubGreetings = onSnapshot(
@@ -742,18 +807,18 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           .filter((d) => d.id !== 'daily')
           .map((d) => ({ id: d.id, ...(d.data() as Omit<GreetingItem, 'id'>) }));
         setDbGreetingItems(multiItems);
-        markSettled();
+        markSettled('greetings');
       },
-      () => markSettled()
+      () => markSettled('greetings')
     );
 
     const unsubSettings = onSnapshot(
       doc(activeDb, 'site_settings', 'main'),
       (snap) => {
         setDbSettings(snap.exists() ? (snap.data() as SiteSettings) : null);
-        markSettled();
+        markSettled('site_settings');
       },
-      () => markSettled()
+      () => markSettled('site_settings')
     );
 
     const unsubHeroBanners = onSnapshot(
@@ -839,12 +904,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   }, [dbCategories, dbProducts]);
 
   const [languageOverride, setLanguageOverride] = useState<DisplayLanguage | null>(null);
+  const [masterImportRunning, setMasterImportRunning] = useState(false);
+  const [lastMasterImportSummary, setLastMasterImportSummary] =
+    useState<MasterImportSummary | null>(null);
 
   const allCategories = useMemo(() => {
-    if (!dbCategories || dbCategories.length === 0) return SEED_CATEGORIES;
+    const seedList = [...SEED_CATEGORIES, MAHALLABIA_CATEGORY];
+    if (!dbCategories || dbCategories.length === 0) return seedList;
     return dbCategories
       .map((docItem) => {
-        const seed = SEED_CATEGORIES.find(
+        const seed = seedList.find(
           (s) => s.id === docItem.id || s.slug === docItem.slug
         );
         return {
@@ -901,20 +970,82 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   );
 
   const allProducts = useMemo(() => {
-    if (!dbProducts || dbProducts.length === 0) return SEED_PRODUCTS;
+    const safeStr = (val: unknown): string =>
+      typeof val === 'string' ? val.trim() : val != null ? String(val).trim() : '';
+
+    if (productsError && !dbProducts) return [];
+    if (!dbProducts || dbProducts.length === 0) {
+      return isFirebaseConfigured ? [] : SEED_PRODUCTS;
+    }
     return dbProducts
       .map((docItem) => {
+        const docCategory = safeStr(docItem.category || docItem.categorySlug);
         const seed = SEED_PRODUCTS.find(
-          (s) => s.id === docItem.id || s.slug === docItem.slug
+          (s) => s.id === docItem.id || (docItem.slug && s.slug === docItem.slug)
         );
-        const cat = allCategories.find((c) => c.slug === docItem.category);
+        const cat = allCategories.find(
+          (c) =>
+            c.slug === docCategory ||
+            c.name === safeStr(docItem.categoryName)
+        );
+        const docImageCandidates = [
+          ...(Array.isArray(docItem.images) ? docItem.images : []),
+          docItem.image,
+          docItem.imageUrl,
+          ...(Array.isArray(seed?.images) ? seed.images : []),
+        ].filter((u): u is string => typeof u === 'string' && u.trim().length > 0);
+        const normalizedImages = Array.from(new Set(docImageCandidates));
+
+        const resolvedNameBn =
+          safeStr(docItem.nameBn) ||
+          safeStr(docItem.name_bn) ||
+          safeStr(docItem.name) ||
+          seed?.name_bn ||
+          safeStr(docItem.nameEn) ||
+          safeStr(docItem.name_en) ||
+          'পণ্য';
+        const resolvedNameEn =
+          safeStr(docItem.nameEn) ||
+          safeStr(docItem.name_en) ||
+          safeStr(docItem.name) ||
+          seed?.nameEn ||
+          resolvedNameBn;
+        const resolvedSlug =
+          safeStr(docItem.slug) || toSlug(resolvedNameEn || resolvedNameBn) || docItem.id;
+        const resolvedUnit =
+          safeStr(docItem.unit) || safeStr(docItem.priceUnit) || seed?.priceUnit || 'Piece';
+        const parsedPrice = Number(docItem.price);
+        const resolvedPrice = Number.isFinite(parsedPrice)
+          ? parsedPrice
+          : seed?.price ?? 0;
+        const resolvedCategory = (
+          docCategory ||
+          cat?.slug ||
+          seed?.category ||
+          ''
+        ).trim();
+
         return {
           ...seed,
           ...docItem,
-          name_bn: docItem.name_bn || docItem.name || seed?.name_bn || '',
-          name_en: docItem.name_en || docItem.nameEn || seed?.name_en || '',
+          id: docItem.id,
+          name: docItem.name || resolvedNameBn,
+          nameBn: resolvedNameBn,
+          nameEn: resolvedNameEn,
+          name_bn: docItem.name_bn || resolvedNameBn,
+          name_en: docItem.name_en || resolvedNameEn,
+          slug: resolvedSlug,
+          category: resolvedCategory,
+          categoryName:
+            docItem.categoryName || cat?.name || seed?.categoryName || resolvedCategory,
           categoryNameEn:
             docItem.categoryNameEn || cat?.name_en || cat?.nameEn || seed?.categoryNameEn || '',
+          productType: docItem.productType || seed?.productType || 'Daily Item',
+          price: resolvedPrice,
+          unit: resolvedUnit,
+          priceUnit: docItem.priceUnit || resolvedUnit || 'Piece',
+          shortDescription:
+            docItem.shortDescription || docItem.short_description_bn || seed?.shortDescription || '',
           shortDescriptionEn:
             docItem.shortDescriptionEn ||
             docItem.short_description_en ||
@@ -930,23 +1061,49 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             docItem.shortDescriptionEn ||
             seed?.short_description_en ||
             '',
+          description:
+            docItem.description || docItem.description_bn || seed?.description || '',
           descriptionEn:
             docItem.descriptionEn || docItem.description_en || seed?.descriptionEn || '',
           description_bn:
             docItem.description_bn || docItem.description || seed?.description_bn || '',
           description_en:
             docItem.description_en || docItem.descriptionEn || seed?.description_en || '',
+          image: docItem.image || docItem.imageUrl || normalizedImages[0] || '',
+          images: normalizedImages,
+          ingredients: Array.isArray(docItem.ingredients)
+            ? docItem.ingredients
+            : seed?.ingredients ?? [],
+          sizes: Array.isArray(docItem.sizes) ? docItem.sizes : seed?.sizes ?? [],
+          weight: docItem.weight || seed?.weight || '',
+          occasions: Array.isArray(docItem.occasions)
+            ? docItem.occasions
+            : seed?.occasions ?? [],
+          showrooms: Array.isArray(docItem.showrooms)
+            ? docItem.showrooms
+            : seed?.showrooms ?? [],
+          availability: docItem.availability || seed?.availability || 'In Showroom',
+          importantNotes: docItem.importantNotes || seed?.importantNotes || '',
+          featured: Boolean(docItem.featured),
+          popular: Boolean(docItem.popular),
           visible: docItem.visible !== false,
+          active: docItem.active !== false,
+          isActive: docItem.isActive !== false,
           deleted: Boolean(docItem.deleted),
         } as Product;
       })
       .sort((a, b) => (a.display_order ?? 999) - (b.display_order ?? 999));
-  }, [dbProducts, allCategories]);
+  }, [dbProducts, productsError, allCategories]);
 
   const products = useMemo(
     () =>
       allProducts.filter(
-        (p) => p.visible !== false && !p.deleted && p.status !== 'archived'
+        (p) =>
+          p.visible !== false &&
+          !p.deleted &&
+          p.status !== 'archived' &&
+          p.active !== false &&
+          p.isActive !== false
       ),
     [allProducts]
   );
@@ -1609,6 +1766,303 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     return { createdCount };
   };
 
+  const masterImportStats = useMemo(() => {
+    const sourceProducts = isFirebaseConfigured ? dbProducts ?? [] : allProducts;
+    const syncedCount = PRODUCT_MASTER_LIST.filter((item) =>
+      sourceProducts.some(
+        (p) =>
+          p.id === item.id ||
+          p.masterKey === item.masterKey ||
+          buildProductMatchKey(
+            p.nameBn || p.name_bn || p.name || '',
+            p.nameEn || p.name_en || '',
+            p.category || '',
+            p.unit || p.priceUnit || ''
+          ) === item.masterKey
+      )
+    ).length;
+
+    const missingImageCount = allProducts.filter(
+      (p) =>
+        !p.deleted &&
+        !p.image &&
+        !p.imageUrl &&
+        (!p.images || p.images.length === 0)
+    ).length;
+
+    return {
+      totalMaster: PRODUCT_MASTER_LIST.length,
+      syncedCount,
+      missingCount: Math.max(0, PRODUCT_MASTER_LIST.length - syncedCount),
+      missingImageCount,
+    };
+  }, [dbProducts, allProducts]);
+
+  // Duplicate-safe & Idempotent Admin-only Product Master List Import
+  const importProductMasterList = useCallback(async (): Promise<MasterImportSummary> => {
+    if (!db) throw new Error('Firestore not configured');
+    if (!isAdmin || !hasPermission('products_add')) {
+      throw new Error('Admin permission required to import product master list.');
+    }
+
+    setMasterImportRunning(true);
+    try {
+      const firestore = db;
+      const now = serverTimestamp();
+
+      // 1. Inspect live categories without overwriting any existing category
+      const catSnap = await getDocs(collection(firestore, 'categories'));
+      const existingCategorySlugs = new Set<string>();
+      const existingCategoryByNormName = new Map<string, string>();
+      catSnap.docs.forEach((d) => {
+        const c = d.data() as Category;
+        if (c.slug) existingCategorySlugs.add(c.slug);
+        if (c.name) existingCategoryByNormName.set(normalizeMasterText(c.name), c.slug);
+        if (c.name_bn) existingCategoryByNormName.set(normalizeMasterText(c.name_bn), c.slug);
+        if (c.nameEn) existingCategoryByNormName.set(normalizeMasterText(c.nameEn), c.slug);
+        if (c.name_en) existingCategoryByNormName.set(normalizeMasterText(c.name_en), c.slug);
+      });
+
+      const requiredCategories: Category[] = [
+        ...SEED_CATEGORIES.filter((c) =>
+          ['fast-food', 'bread', 'pastry', 'frozen-items', 'special-sweets', 'dry-sweets', 'cookies'].includes(c.slug)
+        ),
+        MAHALLABIA_CATEGORY,
+      ];
+
+      let categoriesCreated = 0;
+      const categoryWrites: Array<{ id: string; data: Record<string, unknown> }> = [];
+      if (hasPermission('categories_manage')) {
+        for (const cat of requiredCategories) {
+          const alreadyExists =
+            existingCategorySlugs.has(cat.slug) ||
+            existingCategoryByNormName.has(normalizeMasterText(cat.name)) ||
+            existingCategoryByNormName.has(normalizeMasterText(cat.nameEn));
+          if (!alreadyExists) {
+            categoryWrites.push({
+              id: cat.id,
+              data: {
+                ...cat,
+                visible: true,
+                deleted: false,
+                createdAt: now,
+                updatedAt: now,
+              },
+            });
+            existingCategorySlugs.add(cat.slug);
+            categoriesCreated += 1;
+          }
+        }
+      }
+
+      // 2. Inspect ALL existing products in Firestore before writing
+      const prodSnap = await getDocs(collection(firestore, 'products'));
+      const existingProductCount = prodSnap.size;
+      const existingIds = new Set<string>();
+      const existingSlugs = new Set<string>();
+      const existingMasterKeys = new Set<string>();
+      const existingMatchKeys = new Set<string>();
+
+      prodSnap.docs.forEach((d) => {
+        const p = d.data() as Product;
+        existingIds.add(d.id);
+        if (p.id) existingIds.add(p.id);
+        if (p.slug) existingSlugs.add(p.slug);
+        if (p.masterKey) existingMasterKeys.add(p.masterKey);
+        const mk = buildProductMatchKey(
+          p.nameBn || p.name_bn || p.name || '',
+          p.nameEn || p.name_en || '',
+          p.category || '',
+          p.unit || p.priceUnit || ''
+        );
+        existingMatchKeys.add(mk);
+      });
+
+      let skippedExistingCount = 0;
+      const productWrites: Array<{ id: string; data: Record<string, unknown> }> = [];
+
+      for (const item of PRODUCT_MASTER_LIST) {
+        const matchedCatSlug =
+          existingCategoryByNormName.get(normalizeMasterText(item.categoryBn)) ||
+          existingCategoryByNormName.get(normalizeMasterText(item.categoryNameEn)) ||
+          item.categorySlug;
+
+        const liveMatchKey = buildProductMatchKey(
+          item.nameBn,
+          item.nameEn,
+          matchedCatSlug,
+          item.unit
+        );
+
+        if (
+          existingIds.has(item.id) ||
+          existingMasterKeys.has(item.masterKey) ||
+          existingMatchKeys.has(item.masterKey) ||
+          existingMatchKeys.has(liveMatchKey)
+        ) {
+          skippedExistingCount += 1;
+          continue;
+        }
+
+        let finalSlug = item.slug;
+        if (existingSlugs.has(finalSlug)) {
+          const withUnit = `${toSlug(item.nameEn)}-${toSlug(item.unit)}`;
+          finalSlug = withUnit;
+          let suffix = 2;
+          while (existingSlugs.has(finalSlug)) {
+            finalSlug = `${withUnit}-${suffix}`;
+            suffix += 1;
+          }
+        }
+        existingSlugs.add(finalSlug);
+        existingIds.add(item.id);
+        existingMasterKeys.add(item.masterKey);
+        existingMatchKeys.add(item.masterKey);
+        existingMatchKeys.add(liveMatchKey);
+
+        const shortDescBn = `${item.nameBn} — ${item.categoryBn} (${item.unit})`;
+        const shortDescEn = `${item.nameEn} — ${item.categoryNameEn} (${item.unit})`;
+        const fullDescBn = `${item.nameBn} (${item.nameEn}) — ${item.categoryBn} বিভাগের পণ্য। একক: ${item.unit}।`;
+        const fullDescEn = `${item.nameEn} (${item.nameBn}) — ${item.categoryNameEn} showcase item. Unit: ${item.unit}.`;
+
+        productWrites.push({
+          id: item.id,
+          data: {
+            id: item.id,
+            name: item.nameBn,
+            nameBn: item.nameBn,
+            nameEn: item.nameEn,
+            name_bn: item.nameBn,
+            name_en: item.nameEn,
+            slug: finalSlug,
+            category: matchedCatSlug,
+            categoryName: item.categoryBn,
+            categoryNameEn: item.categoryNameEn,
+            productType: item.categoryNameEn,
+            price: item.price,
+            priceUnit: item.unit,
+            unit: item.unit,
+            shortDescription: shortDescBn,
+            shortDescriptionEn: shortDescEn,
+            short_description_bn: shortDescBn,
+            short_description_en: shortDescEn,
+            description: fullDescBn,
+            descriptionEn: fullDescEn,
+            description_bn: fullDescBn,
+            description_en: fullDescEn,
+            image: '',
+            images: [],
+            masterKey: item.masterKey,
+            ingredients: [],
+            sizes: [item.unit],
+            weight: item.unit,
+            occasions: [],
+            showrooms: [],
+            availability: 'In Showroom',
+            importantNotes: '',
+            featured: false,
+            popular: false,
+            visible: true,
+            deleted: false,
+            status: 'published',
+            display_order: item.displayOrder,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+      }
+
+      // 3. Commit missing categories + missing products in safe chunked batches
+      const BATCH_CHUNK_SIZE = 100;
+      const allOps: Array<{ col: 'categories' | 'products'; id: string; data: Record<string, unknown> }> = [
+        ...categoryWrites.map((w) => ({ col: 'categories' as const, ...w })),
+        ...productWrites.map((w) => ({ col: 'products' as const, ...w })),
+      ];
+
+      for (let i = 0; i < allOps.length; i += BATCH_CHUNK_SIZE) {
+        const chunk = allOps.slice(i, i + BATCH_CHUNK_SIZE);
+        const batch = writeBatch(firestore);
+        for (const op of chunk) {
+          batch.set(doc(firestore, op.col, op.id), op.data);
+        }
+        await batch.commit();
+      }
+
+      const summary: MasterImportSummary = {
+        totalMasterCount: PRODUCT_MASTER_LIST.length,
+        existingProductCount,
+        newlyAddedCount: productWrites.length,
+        skippedExistingCount,
+        categoriesCreated,
+      };
+      setLastMasterImportSummary(summary);
+
+      if (productWrites.length > 0 || categoriesCreated > 0) {
+        await logAdminActivity(
+          'master_import',
+          'products',
+          'product_master_list',
+          'Product Master List Sync',
+          `Added ${productWrites.length} products and ${categoriesCreated} categories; skipped ${skippedExistingCount} existing.`
+        );
+      }
+
+      return summary;
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, 'products/master_import');
+      throw err;
+    } finally {
+      setMasterImportRunning(false);
+    }
+  }, [hasPermission, isAdmin, logAdminActivity]);
+
+  // Safe one-time Admin auto-import: runs ONLY once per Admin session when 0 master items exist in Firestore
+  const autoMasterImportAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (autoMasterImportAttemptedRef.current) return;
+    if (
+      !isFirebaseConfigured ||
+      !db ||
+      !authReady ||
+      adminCheckLoading ||
+      !isAdmin ||
+      !hasPermission('products_add') ||
+      dbCategories === null ||
+      dbProducts === null
+    ) {
+      return;
+    }
+
+    autoMasterImportAttemptedRef.current = true;
+    const syncedCount = PRODUCT_MASTER_LIST.filter((item) =>
+      dbProducts.some(
+        (p) =>
+          p.id === item.id ||
+          p.masterKey === item.masterKey ||
+          buildProductMatchKey(
+            p.nameBn || p.name_bn || p.name || '',
+            p.nameEn || p.name_en || '',
+            p.category || '',
+            p.unit || p.priceUnit || ''
+          ) === item.masterKey
+      )
+    ).length;
+
+    if (syncedCount === 0) {
+      void importProductMasterList().catch((err) => {
+        console.warn('Auto master product import skipped/failed:', err);
+      });
+    }
+  }, [
+    authReady,
+    adminCheckLoading,
+    isAdmin,
+    hasPermission,
+    dbCategories,
+    dbProducts,
+    importProductMasterList,
+  ]);
+
   return (
     <StoreContext.Provider
       value={{
@@ -1635,8 +2089,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         languageMode,
         setLanguageMode,
         loading,
+        productsLoading,
         firestoreEmpty,
         error,
+        productsError,
         user,
         authReady,
         userRole,
@@ -1660,6 +2116,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         signOutAdmin,
         logAdminActivity,
         seedDemoCatalog,
+        importProductMasterList,
+        masterImportStats,
+        masterImportRunning,
+        lastMasterImportSummary,
       }}
     >
       {children}

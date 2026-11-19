@@ -12,14 +12,15 @@ import {
   Store,
   UtensilsCrossed,
 } from 'lucide-react';
+import { OutletsShowcase } from '../components/OutletsShowcase';
 import { ProductCard } from '../components/ProductCard';
-import { ShowroomLocator } from '../components/ShowroomLocator';
 import { useStore } from '../context/StoreContext';
 import { resolveAssetUrl } from '../lib/assets';
 import {
   getCategoryText,
   getHeroSlideText,
   getOccasionText,
+  resolveProductCategorySlug,
 } from '../lib/bilingual';
 import type { HomepageSection } from '../types';
 
@@ -63,8 +64,8 @@ export function HomePage({ onOpenChat }: HomePageProps) {
     siteSettings,
     seoSettings,
     languageMode,
-    loading,
-    error,
+    productsLoading,
+    productsError,
   } = useStore();
 
   const slides = heroBanners.length > 0 ? heroBanners : siteSettings.heroSlides;
@@ -100,10 +101,15 @@ export function HomePage({ onOpenChat }: HomePageProps) {
     return map;
   }, [homepageSections]);
 
-  // Popular products from existing Firestore `popular` flag with safe fallback
+  // Popular products first, supplemented by other active products so new Firestore items never stay hidden
   const popularProducts = useMemo(() => {
     const taggedPopular = products.filter((p) => Boolean(p.popular));
-    if (taggedPopular.length > 0) return taggedPopular.slice(0, 10);
+    if (taggedPopular.length >= 10) return taggedPopular.slice(0, 10);
+    if (taggedPopular.length > 0) {
+      const seen = new Set(taggedPopular.map((p) => p.id));
+      const rest = products.filter((p) => !seen.has(p.id));
+      return [...taggedPopular, ...rest].slice(0, 10);
+    }
     const taggedFeatured = products.filter((p) => Boolean(p.featured));
     if (taggedFeatured.length > 0) return taggedFeatured.slice(0, 10);
     return products.slice(0, 10);
@@ -116,17 +122,21 @@ export function HomePage({ onOpenChat }: HomePageProps) {
 
   const occasionProducts = useMemo(() => {
     return products
-      .filter((p) => p.occasions.includes(selectedOccasion))
+      .filter(
+        (p) =>
+          Array.isArray(p.occasions) && p.occasions.includes(selectedOccasion)
+      )
       .slice(0, 5);
   }, [products, selectedOccasion]);
 
   const categoryCounts = useMemo(() => {
     const counts = new Map<string, number>();
     products.forEach((p) => {
-      counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
+      const resolvedSlug = resolveProductCategorySlug(p, categories);
+      counts.set(resolvedSlug, (counts.get(resolvedSlug) ?? 0) + 1);
     });
     return counts;
-  }, [products]);
+  }, [products, categories]);
 
   const activeOccasionObj = occasions.find((o) => o.slug === selectedOccasion);
   const activeOccText = activeOccasionObj ? getOccasionText(activeOccasionObj) : null;
@@ -168,7 +178,7 @@ export function HomePage({ onOpenChat }: HomePageProps) {
   const supportText = pickSectionText(supportSection);
 
   const renderProductStateFallback = (emptyText: string) => {
-    if (loading) {
+    if (productsLoading) {
       return (
         <div className="mt-5 space-y-3">
           <p className="text-xs font-medium text-[#78716C]">লোড হচ্ছে...</p>
@@ -184,11 +194,11 @@ export function HomePage({ onOpenChat }: HomePageProps) {
       );
     }
 
-    if (error && products.length === 0) {
+    if (productsError && products.length === 0) {
       return (
         <div className="mt-5 rounded-xl border border-red-200 bg-red-50/70 p-6 text-center">
           <p className="text-sm font-medium text-[#B91C1C]">
-            পণ্য লোড করা যাচ্ছে না। আবার চেষ্টা করুন।
+            পণ্যগুলো এখন লোড করা যাচ্ছে না। অনুগ্রহ করে কিছুক্ষণ পরে আবার চেষ্টা করুন।
           </p>
           <button
             type="button"
@@ -287,10 +297,10 @@ export function HomePage({ onOpenChat }: HomePageProps) {
                   <ArrowRight className="h-4 w-4" />
                 </Link>
                 <Link
-                  to="/showrooms"
+                  to="/outlets"
                   className="inline-flex min-h-[42px] shrink-0 items-center gap-2 whitespace-nowrap rounded-lg border border-white/35 bg-black/30 px-4 py-2.5 text-xs font-semibold text-white backdrop-blur-xs transition-colors hover:bg-white hover:text-[#1C1917] sm:text-sm"
                 >
-                  <span>শোরুম খুঁজুন</span>
+                  <span>আমাদের শো-রুম</span>
                 </Link>
               </div>
             </div>
@@ -336,11 +346,11 @@ export function HomePage({ onOpenChat }: HomePageProps) {
         </section>
       )}
 
-      {/* Non-blocking Firestore Warning if error occurred while fallback loaded */}
-      {error && products.length > 0 && (
+      {/* Non-blocking Firestore Warning only if product stream failed while cached items exist */}
+      {productsError && products.length > 0 && (
         <div className="mx-auto max-w-7xl px-3 pt-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-2 text-xs text-amber-900">
-            <span>পণ্য লোড করা যাচ্ছে না। আবার চেষ্টা করুন।</span>
+            <span>পণ্যগুলো এখন লোড করা যাচ্ছে না। অনুগ্রহ করে কিছুক্ষণ পরে আবার চেষ্টা করুন।</span>
             <button
               type="button"
               onClick={() => window.location.reload()}
@@ -620,25 +630,21 @@ export function HomePage({ onOpenChat }: HomePageProps) {
           className="scroll-mt-28 border-t border-[#E7E5E4] bg-white py-9 sm:scroll-mt-32 sm:py-12"
         >
           <div className="mx-auto max-w-7xl px-3 sm:px-6 lg:px-8">
-            <div className="mb-6 flex items-baseline justify-between gap-4">
-              <div>
-                <p className="text-xs font-semibold tracking-wider text-[#B91C1C]">
-                  সরাসরি ভিজিট ও ক্রয়
-                </p>
-                <h2 className="font-display mt-0.5 text-2xl font-bold text-[#1C1917] sm:text-3xl">
-                  {showroomsText.title || 'আমাদের শোরুমসমূহ'}
-                </h2>
-              </div>
+            <div className="mb-4 flex items-center justify-end">
               <Link
-                to={showroomsText.ctaLink || '/showrooms'}
+                to="/outlets"
                 className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-xs font-semibold text-[#B91C1C] hover:underline sm:text-sm"
               >
-                <span>{showroomsText.ctaText || 'সব শোরুম'}</span>
+                <span>
+                  {languageMode === 'en'
+                    ? 'Open Dedicated Outlets Page'
+                    : showroomsText.ctaText || 'আলাদা পেজে দেখুন'}
+                </span>
                 <ArrowRight className="h-3.5 w-3.5" />
               </Link>
             </div>
 
-            <ShowroomLocator />
+            <OutletsShowcase variant="section" showHeader />
           </div>
         </section>
       )}

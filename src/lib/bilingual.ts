@@ -33,9 +33,111 @@ export function getOccasionText(occ: Occasion) {
   return { nameBn, nameEn, descriptionBn, descriptionEn };
 }
 
+const CATEGORY_ALIAS_MAP: Record<string, string> = {
+  cake: 'custom-cake',
+  cakes: 'custom-cake',
+  'custom cake': 'custom-cake',
+  'custom-cake': 'custom-cake',
+  'customized cake': 'custom-cake',
+  'customized cakes': 'custom-cake',
+  'কাস্টম কেক': 'custom-cake',
+  'কাস্টমাইজ কেক': 'custom-cake',
+  কেক: 'custom-cake',
+  'fast food': 'fast-food',
+  'fast-food': 'fast-food',
+  'ফাস্ট ফুড': 'fast-food',
+  ফাস্টফুড: 'fast-food',
+  bread: 'bread',
+  ব্রেড: 'bread',
+  pastry: 'pastry',
+  পেস্ট্রি: 'pastry',
+  frozen: 'frozen-items',
+  'frozen item': 'frozen-items',
+  'frozen items': 'frozen-items',
+  'frozen-items': 'frozen-items',
+  'ফ্রিজ আইটেম': 'frozen-items',
+  'ফ্রোজেন আইটেম': 'frozen-items',
+  mahallabia: 'mahallabia',
+  মাহাল্লাবিয়া: 'mahallabia',
+  মাহাল্লাবিয়া: 'mahallabia',
+  'special sweet': 'special-sweets',
+  'special sweets': 'special-sweets',
+  'special-sweets': 'special-sweets',
+  'স্পেশাল মিষ্টি': 'special-sweets',
+  'স্পেশ্যাল মিষ্টি': 'special-sweets',
+  'dry sweet': 'dry-sweets',
+  'dry sweets': 'dry-sweets',
+  'dry-sweets': 'dry-sweets',
+  'ড্রাই মিষ্টি': 'dry-sweets',
+  cookie: 'cookies',
+  cookies: 'cookies',
+  কুকিজ: 'cookies',
+  akd: 'akd-box',
+  'akd box': 'akd-box',
+  'akd boxes': 'akd-box',
+  'akd-box': 'akd-box',
+  'আকদ বক্স': 'akd-box',
+};
+
+function normalizeCategoryToken(value: string | undefined | null): string {
+  return (value ?? '').normalize('NFC').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+export function resolveProductCategorySlug(
+  prod: Pick<Product, 'category' | 'categorySlug' | 'categoryName' | 'categoryNameEn'>,
+  categories: Category[] = []
+): string {
+  const candidates = [
+    prod.category,
+    prod.categorySlug,
+    prod.categoryName,
+    prod.categoryNameEn,
+  ]
+    .map((v) => (v ?? '').trim())
+    .filter(Boolean);
+
+  for (const raw of candidates) {
+    const norm = normalizeCategoryToken(raw);
+    const byCat = categories.find((c) => {
+      const tokens = [c.slug, c.name, c.name_bn, c.nameEn, c.name_en].map(
+        normalizeCategoryToken
+      );
+      return tokens.includes(norm);
+    });
+    if (byCat) return byCat.slug;
+
+    const aliasSlug = CATEGORY_ALIAS_MAP[norm];
+    if (aliasSlug) {
+      const catMatch = categories.find((c) => c.slug === aliasSlug);
+      return catMatch ? catMatch.slug : aliasSlug;
+    }
+  }
+
+  const primary = candidates[0] ?? '';
+  return normalizeCategoryToken(primary);
+}
+
+export function matchesProductCategory(
+  prod: Pick<Product, 'category' | 'categorySlug' | 'categoryName' | 'categoryNameEn'>,
+  selectedCategory: string,
+  categories: Category[] = []
+): boolean {
+  if (!selectedCategory || selectedCategory === 'all') return true;
+  const targetNorm = normalizeCategoryToken(selectedCategory);
+  const resolvedTarget = CATEGORY_ALIAS_MAP[targetNorm] || targetNorm;
+  const resolvedProduct = resolveProductCategorySlug(prod, categories);
+  return (
+    resolvedProduct === resolvedTarget ||
+    normalizeCategoryToken(prod.category) === targetNorm ||
+    normalizeCategoryToken(prod.categoryName) === targetNorm ||
+    normalizeCategoryToken(prod.categoryNameEn) === targetNorm
+  );
+}
+
 export function getProductText(prod: Product, categories?: Category[]) {
-  const nameBn = (prod.name_bn || prod.name || '').trim();
+  const nameBn = (prod.nameBn || prod.name_bn || prod.name || '').trim();
   const nameEn = (prod.name_en || prod.nameEn || '').trim();
+  const unit = (prod.unit || prod.priceUnit || '').trim();
   const shortDescriptionBn = (
     prod.short_description_bn ||
     prod.shortDescription ||
@@ -57,10 +159,20 @@ export function getProductText(prod: Product, categories?: Category[]) {
     shortDescriptionEn
   ).trim();
 
+  const resolvedSlug = resolveProductCategorySlug(prod, categories ?? []);
   const matchedCat = categories?.find(
-    (c) => c.slug === prod.category || c.name === prod.categoryName
+    (c) =>
+      c.slug === resolvedSlug ||
+      c.slug === prod.category ||
+      c.name === prod.categoryName
   );
-  const categoryNameBn = (prod.categoryName || matchedCat?.name || '').trim();
+  const categoryNameBn = (
+    prod.categoryName ||
+    matchedCat?.name_bn ||
+    matchedCat?.name ||
+    prod.category ||
+    ''
+  ).trim();
   const categoryNameEn = (
     prod.categoryNameEn ||
     matchedCat?.name_en ||
@@ -71,6 +183,7 @@ export function getProductText(prod: Product, categories?: Category[]) {
   return {
     nameBn,
     nameEn,
+    unit,
     shortDescriptionBn,
     shortDescriptionEn,
     descriptionBn,
@@ -199,11 +312,14 @@ export function buildProductSearchHaystack(
   const t = getProductText(product, categories);
   return [
     product.name,
+    product.nameBn,
     product.nameEn,
     product.name_bn,
     product.name_en,
     t.nameBn,
     t.nameEn,
+    product.unit,
+    product.priceUnit,
     product.shortDescription,
     product.shortDescriptionEn,
     product.short_description_bn,

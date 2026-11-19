@@ -1,11 +1,15 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Archive,
+  Camera,
   Check,
+  Database,
   Edit3,
   Eye,
   EyeOff,
+  ImageOff,
   Plus,
+  RefreshCw,
   RotateCcw,
   Star,
   Trash2,
@@ -48,20 +52,67 @@ export function AdminProductsPanel() {
     allShowrooms,
     hasPermission,
     logAdminActivity,
+    importProductMasterList,
+    masterImportStats,
+    masterImportRunning,
+    lastMasterImportSummary,
   } = useStore();
   const canAdd = hasPermission('products_add');
   const canEdit = hasPermission('products_edit');
   const canDelete = hasPermission('products_delete');
   const [editing, setEditing] = useState<Product | null>(null);
+  const [originalSnapshot, setOriginalSnapshot] = useState<string>('');
   const [isNew, setIsNew] = useState(false);
   const [search, setSearch] = useState('');
   const [filterMode, setFilterMode] = useState<'active' | 'hidden' | 'archived' | 'all'>('active');
+  const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string>('all');
+  const [missingImageOnly, setMissingImageOnly] = useState(false);
+  const [page, setPage] = useState(1);
+  const [uploadingRowId, setUploadingRowId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
+
+  const serializeNonImageState = (
+    p: Product,
+    ingText: string,
+    szText: string
+  ): string =>
+    JSON.stringify({
+      name: p.name.trim(),
+      nameBn: (p.nameBn ?? p.name).trim(),
+      nameEn: p.nameEn.trim(),
+      slug: p.slug.trim(),
+      category: p.category,
+      categoryName: p.categoryName,
+      productType: p.productType.trim(),
+      price: Number(p.price) || 0,
+      old_price: p.old_price ?? null,
+      discount: (p.discount ?? '').trim(),
+      price_label: (p.price_label ?? '').trim(),
+      priceUnit: p.priceUnit.trim(),
+      unit: (p.unit ?? p.priceUnit).trim(),
+      shortDescription: p.shortDescription.trim(),
+      shortDescriptionEn: (p.shortDescriptionEn ?? '').trim(),
+      description: p.description.trim(),
+      descriptionEn: (p.descriptionEn ?? '').trim(),
+      ingredients: ingText.trim(),
+      sizes: szText.trim(),
+      weight: p.weight.trim(),
+      occasions: p.occasions,
+      showrooms: p.showrooms,
+      availability: p.availability,
+      importantNotes: p.importantNotes.trim(),
+      featured: Boolean(p.featured),
+      popular: Boolean(p.popular),
+      visible: p.visible !== false,
+      deleted: Boolean(p.deleted),
+      display_order: Number(p.display_order) || 1,
+    });
 
   const emptyProduct = (): Product => ({
     id: `prod-${Date.now()}`,
     name: '',
+    nameBn: '',
     nameEn: '',
     name_bn: '',
     name_en: '',
@@ -74,7 +125,8 @@ export function AdminProductsPanel() {
     old_price: undefined,
     discount: '',
     price_label: '',
-    priceUnit: 'প্রতি পিস',
+    priceUnit: 'Piece',
+    unit: 'Piece',
     shortDescription: '',
     shortDescriptionEn: '',
     short_description_bn: '',
@@ -83,6 +135,7 @@ export function AdminProductsPanel() {
     descriptionEn: '',
     description_bn: '',
     description_en: '',
+    image: '',
     images: [],
     ingredients: [],
     sizes: ['Regular'],
@@ -105,13 +158,25 @@ export function AdminProductsPanel() {
   const openEditor = (prod: Product | null) => {
     if (prod) {
       const t = getProductText(prod, allCategories);
-      setIsNew(false);
-      setEditing({
+      const ing = prod.ingredients.join(', ');
+      const sz = prod.sizes.join(', ');
+      const normalizedImages =
+        Array.isArray(prod.images) && prod.images.length > 0
+          ? prod.images.filter(Boolean)
+          : prod.image
+          ? [prod.image]
+          : [];
+      const prepared: Product = {
         ...prod,
         name: t.nameBn,
+        nameBn: t.nameBn,
         nameEn: t.nameEn,
         name_bn: t.nameBn,
         name_en: t.nameEn,
+        unit: t.unit || prod.priceUnit,
+        priceUnit: prod.priceUnit || t.unit || 'Piece',
+        image: prod.image || normalizedImages[0] || '',
+        images: normalizedImages,
         shortDescription: t.shortDescriptionBn,
         shortDescriptionEn: t.shortDescriptionEn,
         short_description_bn: t.shortDescriptionBn,
@@ -120,17 +185,21 @@ export function AdminProductsPanel() {
         descriptionEn: t.descriptionEn,
         description_bn: t.descriptionBn,
         description_en: t.descriptionEn,
-        categoryName: t.categoryNameBn,
-        categoryNameEn: t.categoryNameEn,
-      });
-      setIngredientsText(prod.ingredients.join(', '));
-      setSizesText(prod.sizes.join(', '));
+        categoryName: prod.categoryName || t.categoryNameBn,
+        categoryNameEn: prod.categoryNameEn || t.categoryNameEn,
+      };
+      setIsNew(false);
+      setEditing(prepared);
+      setIngredientsText(ing);
+      setSizesText(sz);
+      setOriginalSnapshot(serializeNonImageState(prepared, ing, sz));
     } else {
       const fresh = emptyProduct();
       setIsNew(true);
       setEditing(fresh);
       setIngredientsText('');
       setSizesText('Regular');
+      setOriginalSnapshot('');
     }
     setFeedback(null);
   };
@@ -140,9 +209,61 @@ export function AdminProductsPanel() {
     if (!file || !editing) return;
     try {
       const url = await compressImageToDataUrl(file, 900, 0.78);
-      setEditing({ ...editing, images: [...editing.images.slice(0, 5), url] });
+      const nextImages = [url, ...editing.images.filter(Boolean)].slice(0, 6);
+      setEditing({ ...editing, image: url, images: nextImages });
     } catch {
       setFeedback('ছবি আপলোড ব্যর্থ হয়েছে।');
+    }
+  };
+
+  const handleQuickRowImageUpload = async (
+    prod: Product,
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !canEdit) return;
+    setUploadingRowId(prod.id);
+    setFeedback(null);
+    try {
+      const url = await compressImageToDataUrl(file, 900, 0.78);
+      const firestore = requireDb();
+      const existingList = Array.isArray(prod.images) ? prod.images.filter(Boolean) : [];
+      const nextImages = [url, ...existingList].slice(0, 6);
+      await updateDoc(doc(firestore, 'products', prod.id), {
+        image: url,
+        images: nextImages,
+        updatedAt: serverTimestamp(),
+      });
+      await logAdminActivity(
+        'image_upload',
+        'products',
+        prod.id,
+        prod.nameEn || prod.name,
+        `Uploaded photo for ${prod.nameBn || prod.name}`
+      );
+      setFeedback(`"${prod.nameBn || prod.name}" এর ছবি সফলভাবে আপডেট করা হয়েছে।`);
+    } catch (err) {
+      setFeedback('ছবি আপলোড ব্যর্থ হয়েছে।');
+      try {
+        handleFirestoreError(err, OperationType.WRITE, `products/${prod.id}`);
+      } catch {
+        // Logged
+      }
+    } finally {
+      setUploadingRowId(null);
+    }
+  };
+
+  const handleMasterImportClick = async () => {
+    setFeedback(null);
+    try {
+      const summary = await importProductMasterList();
+      setFeedback(
+        `মাস্টার তালিকা সিঙ্ক সম্পন্ন: মোট ${summary.totalMasterCount}টি, নতুন যোগ ${summary.newlyAddedCount}টি, স্কিপ (বিদ্যমান) ${summary.skippedExistingCount}টি।`
+      );
+    } catch {
+      setFeedback('মাস্টার প্রোডাক্ট তালিকা ইমপোর্ট করতে সমস্যা হয়েছে।');
     }
   };
 
@@ -164,78 +285,109 @@ export function AdminProductsPanel() {
     setSaving(true);
     setFeedback(null);
 
-    const catObj = allCategories.find((c) => c.slug === editing.category);
-    const catText = catObj ? getCategoryText(catObj) : null;
-    const slug = editing.slug.trim() || toSlug(nameEn || nameBn);
-    const ingredients = ingredientsText
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .slice(0, 25);
-    const sizes = sizesText
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .slice(0, 10);
-
-    const shortDescEn = (editing.shortDescriptionEn ?? '').trim();
-    const shortDescBn = editing.shortDescription.trim() || shortDescEn || nameBn;
-    const fullDescEn = (editing.descriptionEn ?? '').trim() || shortDescEn;
-    const fullDescBn = editing.description.trim() || shortDescBn || fullDescEn || nameBn;
-
-    const payload: Record<string, unknown> = {
-      id: editing.id,
-      name: nameBn,
-      nameEn,
-      name_bn: nameBn,
-      name_en: nameEn,
-      slug,
-      category: editing.category,
-      categoryName: catText?.nameBn || editing.categoryName,
-      categoryNameEn: catText?.nameEn || editing.categoryNameEn || '',
-      productType: editing.productType.trim() || 'Bakery & Sweets',
-      price: Number(editing.price) || 0,
-      priceUnit: editing.priceUnit.trim() || 'প্রতি পিস',
-      shortDescription: shortDescBn,
-      shortDescriptionEn: shortDescEn,
-      short_description_bn: shortDescBn,
-      short_description_en: shortDescEn,
-      description: fullDescBn,
-      descriptionEn: fullDescEn,
-      description_bn: fullDescBn,
-      description_en: fullDescEn,
-      images:
-        editing.images.length > 0
-          ? editing.images.slice(0, 6)
-          : [catObj?.image ?? '/src/assets/images/hero_bakery_clean_1794746110066.jpg'],
-      ingredients,
-      sizes,
-      weight: editing.weight.trim(),
-      occasions: editing.occasions.slice(0, 15),
-      showrooms: editing.showrooms.slice(0, 20),
-      availability: editing.availability,
-      importantNotes: editing.importantNotes.trim(),
-      featured: Boolean(editing.featured),
-      popular: Boolean(editing.popular),
-      visible: editing.visible !== false,
-      deleted: Boolean(editing.deleted),
-      display_order: Number(editing.display_order) || 1,
-      status: editing.deleted ? 'archived' : editing.visible === false ? 'draft' : 'published',
-      updatedAt: serverTimestamp(),
-    };
-
-    if (typeof editing.old_price === 'number' && editing.old_price > 0) {
-      payload.old_price = editing.old_price;
-    }
-    if (editing.discount?.trim()) {
-      payload.discount = editing.discount.trim();
-    }
-    if (editing.price_label?.trim()) {
-      payload.price_label = editing.price_label.trim();
-    }
+    const nextImages = editing.images.filter(Boolean).slice(0, 6);
+    const primaryImage = nextImages[0] ?? '';
 
     try {
       const firestore = requireDb();
+
+      // Safe image-only update guard: if admin only uploaded/changed photo, touch ONLY image fields
+      if (
+        !isNew &&
+        originalSnapshot &&
+        serializeNonImageState(editing, ingredientsText, sizesText) === originalSnapshot
+      ) {
+        await updateDoc(doc(firestore, 'products', editing.id), {
+          image: primaryImage,
+          images: nextImages,
+          updatedAt: serverTimestamp(),
+        });
+        await logAdminActivity(
+          'image_update',
+          'products',
+          editing.id,
+          nameEn,
+          `Updated product photo only for ${nameBn}`
+        );
+        setEditing(null);
+        setFeedback('পণ্যের ছবি নিরাপদে সংরক্ষণ করা হয়েছে।');
+        return;
+      }
+
+      const catObj = allCategories.find((c) => c.slug === editing.category);
+      const catText = catObj ? getCategoryText(catObj) : null;
+      const slug = editing.slug.trim() || toSlug(nameEn || nameBn);
+      const ingredients = ingredientsText
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .slice(0, 25);
+      const sizes = sizesText
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .slice(0, 10);
+
+      const resolvedUnit = (editing.unit ?? editing.priceUnit).trim() || 'Piece';
+      const shortDescEn = (editing.shortDescriptionEn ?? '').trim();
+      const shortDescBn = editing.shortDescription.trim() || shortDescEn || nameBn;
+      const fullDescEn = (editing.descriptionEn ?? '').trim() || shortDescEn;
+      const fullDescBn = editing.description.trim() || shortDescBn || fullDescEn || nameBn;
+
+      const payload: Record<string, unknown> = {
+        id: editing.id,
+        name: nameBn,
+        nameBn,
+        nameEn,
+        name_bn: nameBn,
+        name_en: nameEn,
+        slug,
+        category: editing.category,
+        categoryName: editing.categoryName || catText?.nameBn || editing.category,
+        categoryNameEn: editing.categoryNameEn || catText?.nameEn || '',
+        productType: editing.productType.trim() || 'Bakery & Sweets',
+        price: Number(editing.price) || 0,
+        priceUnit: resolvedUnit,
+        unit: resolvedUnit,
+        shortDescription: shortDescBn,
+        shortDescriptionEn: shortDescEn,
+        short_description_bn: shortDescBn,
+        short_description_en: shortDescEn,
+        description: fullDescBn,
+        descriptionEn: fullDescEn,
+        description_bn: fullDescBn,
+        description_en: fullDescEn,
+        image: primaryImage,
+        images: nextImages,
+        ingredients,
+        sizes,
+        weight: editing.weight.trim(),
+        occasions: editing.occasions.slice(0, 15),
+        showrooms: editing.showrooms.slice(0, 20),
+        availability: editing.availability,
+        importantNotes: editing.importantNotes.trim(),
+        featured: Boolean(editing.featured),
+        popular: Boolean(editing.popular),
+        visible: editing.visible !== false,
+        deleted: Boolean(editing.deleted),
+        display_order: Number(editing.display_order) || 1,
+        status: editing.deleted ? 'archived' : editing.visible === false ? 'draft' : 'published',
+        updatedAt: serverTimestamp(),
+      };
+
+      if (editing.masterKey) {
+        payload.masterKey = editing.masterKey;
+      }
+      if (typeof editing.old_price === 'number' && editing.old_price > 0) {
+        payload.old_price = editing.old_price;
+      }
+      if (editing.discount?.trim()) {
+        payload.discount = editing.discount.trim();
+      }
+      if (editing.price_label?.trim()) {
+        payload.price_label = editing.price_label.trim();
+      }
+
       if (isNew) {
         await setDoc(doc(firestore, 'products', editing.id), {
           ...payload,
@@ -329,20 +481,35 @@ export function AdminProductsPanel() {
     }
   };
 
-  const filtered = allProducts.filter((p) => {
-    if (filterMode === 'active' && (p.deleted || p.visible === false)) return false;
-    if (filterMode === 'hidden' && (p.deleted || p.visible !== false)) return false;
-    if (filterMode === 'archived' && !p.deleted) return false;
-
+  const filtered = useMemo(() => {
     const q = search.toLowerCase();
-    const t = getProductText(p, allCategories);
-    return (
-      t.nameBn.toLowerCase().includes(q) ||
-      t.nameEn.toLowerCase().includes(q) ||
-      t.categoryNameBn.toLowerCase().includes(q) ||
-      t.categoryNameEn.toLowerCase().includes(q)
-    );
-  });
+    return allProducts.filter((p) => {
+      if (filterMode === 'active' && (p.deleted || p.visible === false)) return false;
+      if (filterMode === 'hidden' && (p.deleted || p.visible !== false)) return false;
+      if (filterMode === 'archived' && !p.deleted) return false;
+      if (selectedCategoryFilter !== 'all' && p.category !== selectedCategoryFilter) return false;
+      const hasImage = Boolean(p.image || (Array.isArray(p.images) && p.images.length > 0));
+      if (missingImageOnly && hasImage) return false;
+
+      if (!q) return true;
+      const t = getProductText(p, allCategories);
+      return (
+        t.nameBn.toLowerCase().includes(q) ||
+        t.nameEn.toLowerCase().includes(q) ||
+        t.categoryNameBn.toLowerCase().includes(q) ||
+        t.categoryNameEn.toLowerCase().includes(q) ||
+        t.unit.toLowerCase().includes(q)
+      );
+    });
+  }, [allProducts, allCategories, filterMode, selectedCategoryFilter, missingImageOnly, search]);
+
+  const PAGE_SIZE = 40;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const paginated = useMemo(
+    () => filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
+    [filtered, safePage]
+  );
 
   return (
     <div className="space-y-5">
@@ -352,7 +519,7 @@ export function AdminProductsPanel() {
             Product Management
           </h2>
           <p className="text-xs text-[#57534E]">
-            নতুন পণ্য যোগ করুন, বাংলা ও English নাম-বিবরণ, পূর্বের মূল্য, ছাড়, ছবি এবং Show/Hide/Archive নিয়ন্ত্রণ করুন।
+            মোট {allProducts.length}টি পণ্য · সরাসরি ছবি আপলোড, বাংলা ও English নাম, একক এবং মূল্য ব্যবস্থাপনা করুন।
           </p>
         </div>
         {canAdd && (
@@ -367,8 +534,61 @@ export function AdminProductsPanel() {
         )}
       </div>
 
+      {/* Authoritative Product Master List Sync Banner */}
+      {canAdd && (
+        <div className="rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-4">
+          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 text-xs font-bold text-[#1C1917]">
+                <Database className="h-4 w-4 text-[#DC1F26]" />
+                <span>Product Master List Status (১৩৬টি পণ্য)</span>
+              </div>
+              <p className="text-xs text-[#57534E]">
+                সিঙ্কড:{' '}
+                <strong className="font-mono text-[#1C1917]">
+                  {masterImportStats.syncedCount}/{masterImportStats.totalMaster}
+                </strong>{' '}
+                · অনুপস্থিত:{' '}
+                <strong className="font-mono text-[#DC1F26]">
+                  {masterImportStats.missingCount}
+                </strong>{' '}
+                · ছবি ছাড়া পণ্য:{' '}
+                <strong className="font-mono text-amber-700">
+                  {masterImportStats.missingImageCount}
+                </strong>
+              </p>
+              {lastMasterImportSummary && (
+                <p className="text-[11px] font-medium text-emerald-700">
+                  সর্বশেষ সিঙ্ক: মোট {lastMasterImportSummary.totalMasterCount} · পূর্বে ছিল{' '}
+                  {lastMasterImportSummary.existingProductCount} · নতুন যোগ{' '}
+                  {lastMasterImportSummary.newlyAddedCount} · স্কিপ{' '}
+                  {lastMasterImportSummary.skippedExistingCount}
+                </p>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={handleMasterImportClick}
+              disabled={masterImportRunning}
+              className="inline-flex shrink-0 cursor-pointer items-center gap-2 rounded-lg border border-[#1C1917] bg-white px-3.5 py-2 text-xs font-semibold text-[#1C1917] transition-colors hover:bg-[#1C1917] hover:text-white disabled:opacity-50"
+            >
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${masterImportRunning ? 'animate-spin' : ''}`}
+              />
+              <span>
+                {masterImportRunning
+                  ? 'ইমপোর্ট হচ্ছে...'
+                  : masterImportStats.missingCount > 0
+                  ? `মাস্টার তালিকা ইমপোর্ট করুন (${masterImportStats.missingCount}টি বাকি)`
+                  : 'মাস্টার তালিকা পুনরায় যাচাই করুন'}
+              </span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {feedback && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-xs font-medium text-[#B91C1C]">
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-xs font-medium text-emerald-800">
           {feedback}
         </div>
       )}
@@ -392,6 +612,52 @@ export function AdminProductsPanel() {
             </button>
           </div>
 
+          {!isNew && (
+            <div className="mb-5 rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-4">
+              <p className="mb-2 text-[11px] font-bold uppercase tracking-wider text-[#78716C]">
+                Product Information
+              </p>
+              <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-3 lg:grid-cols-6">
+                <div>
+                  <span className="block text-[10px] text-[#78716C]">বাংলা নাম</span>
+                  <span className="font-semibold text-[#1C1917]">{editing.name}</span>
+                </div>
+                <div>
+                  <span className="block text-[10px] text-[#78716C]">English Name</span>
+                  <span className="font-semibold text-[#1C1917]">{editing.nameEn}</span>
+                </div>
+                <div>
+                  <span className="block text-[10px] text-[#78716C]">Category</span>
+                  <span className="font-semibold text-[#1C1917]">{editing.categoryName}</span>
+                </div>
+                <div>
+                  <span className="block text-[10px] text-[#78716C]">Unit</span>
+                  <span className="font-semibold text-[#1C1917]">
+                    {editing.unit || editing.priceUnit}
+                  </span>
+                </div>
+                <div>
+                  <span className="block text-[10px] text-[#78716C]">Price</span>
+                  <span className="font-mono font-bold text-[#1C1917]">
+                    ৳{Number(editing.price) || 0}
+                  </span>
+                </div>
+                <div>
+                  <span className="block text-[10px] text-[#78716C]">Image Status</span>
+                  <span
+                    className={`font-semibold ${
+                      editing.images.length > 0 ? 'text-emerald-700' : 'text-amber-700'
+                    }`}
+                  >
+                    {editing.images.length > 0
+                      ? `${editing.images.length}টি ছবি যুক্ত`
+                      : 'ছবি আপলোড বাকি'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <div>
               <label className="mb-1 block text-xs font-semibold text-[#1C1917]">
@@ -404,6 +670,7 @@ export function AdminProductsPanel() {
                   setEditing({
                     ...editing,
                     name: e.target.value,
+                    nameBn: e.target.value,
                     name_bn: e.target.value,
                   })
                 }
@@ -437,7 +704,16 @@ export function AdminProductsPanel() {
               </label>
               <select
                 value={editing.category}
-                onChange={(e) => setEditing({ ...editing, category: e.target.value })}
+                onChange={(e) => {
+                  const nextCat = allCategories.find((c) => c.slug === e.target.value);
+                  const ct = nextCat ? getCategoryText(nextCat) : null;
+                  setEditing({
+                    ...editing,
+                    category: e.target.value,
+                    categoryName: ct?.nameBn || editing.categoryName,
+                    categoryNameEn: ct?.nameEn || editing.categoryNameEn,
+                  });
+                }}
                 className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
               >
                 {allCategories.map((c) => (
@@ -496,12 +772,18 @@ export function AdminProductsPanel() {
 
             <div>
               <label className="mb-1 block text-xs font-semibold text-[#1C1917]">
-                মূল্যের একক (যেমন: প্রতি কেজি)
+                একক / Unit (যেমন: Piece, Kg, Box)
               </label>
               <input
                 type="text"
-                value={editing.priceUnit}
-                onChange={(e) => setEditing({ ...editing, priceUnit: e.target.value })}
+                value={editing.unit ?? editing.priceUnit}
+                onChange={(e) =>
+                  setEditing({
+                    ...editing,
+                    unit: e.target.value,
+                    priceUnit: e.target.value,
+                  })
+                }
                 className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
               />
             </div>
@@ -758,12 +1040,14 @@ export function AdminProductsPanel() {
                     />
                     <button
                       type="button"
-                      onClick={() =>
+                      onClick={() => {
+                        const updated = editing.images.filter((_, idx) => idx !== i);
                         setEditing({
                           ...editing,
-                          images: editing.images.filter((_, idx) => idx !== i),
-                        })
-                      }
+                          image: updated[0] ?? '',
+                          images: updated,
+                        });
+                      }}
                       className="absolute right-1 top-1 rounded-full bg-black/70 p-0.5 text-white"
                     >
                       <X className="h-3 w-3" />
@@ -834,19 +1118,57 @@ export function AdminProductsPanel() {
       {/* Search & Filter */}
       <div className="rounded-xl border border-[#E7E5E4] bg-white">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E7E5E4] p-4">
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="পণ্য খুঁজুন..."
-            className="w-full max-w-sm rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3 py-2 text-xs focus:border-[#DC1F26] focus:outline-none"
-          />
+          <div className="flex flex-1 flex-wrap items-center gap-2">
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setPage(1);
+              }}
+              placeholder="পণ্য খুঁজুন (বাংলা বা English)..."
+              className="w-full max-w-xs rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3 py-2 text-xs focus:border-[#DC1F26] focus:outline-none"
+            />
+            <select
+              value={selectedCategoryFilter}
+              onChange={(e) => {
+                setSelectedCategoryFilter(e.target.value);
+                setPage(1);
+              }}
+              className="rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3 py-2 text-xs text-[#1C1917] focus:border-[#DC1F26] focus:outline-none"
+            >
+              <option value="all">সকল ক্যাটাগরি</option>
+              {allCategories.map((c) => (
+                <option key={c.id} value={c.slug}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => {
+                setMissingImageOnly((v) => !v);
+                setPage(1);
+              }}
+              className={`inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-semibold transition-colors ${
+                missingImageOnly
+                  ? 'border-amber-600 bg-amber-50 text-amber-800'
+                  : 'border-[#D6D3D1] bg-[#FAFAF8] text-[#57534E] hover:text-[#1C1917]'
+              }`}
+            >
+              <ImageOff className="h-3.5 w-3.5" />
+              <span>ছবি নেই ({masterImportStats.missingImageCount})</span>
+            </button>
+          </div>
           <div className="flex gap-1.5 text-xs">
             {(['active', 'hidden', 'archived', 'all'] as const).map((mode) => (
               <button
                 key={mode}
                 type="button"
-                onClick={() => setFilterMode(mode)}
+                onClick={() => {
+                  setFilterMode(mode);
+                  setPage(1);
+                }}
                 className={`cursor-pointer rounded-md px-3 py-1.5 font-semibold capitalize ${
                   filterMode === mode
                     ? 'bg-[#1C1917] text-white'
@@ -862,8 +1184,9 @@ export function AdminProductsPanel() {
           <table className="w-full text-left text-xs">
             <thead className="border-b border-[#E7E5E4] bg-[#FAFAF8] text-[#57534E]">
               <tr>
-                <th className="px-4 py-3 font-semibold">পণ্য</th>
+                <th className="px-4 py-3 font-semibold">পণ্য ও ছবি</th>
                 <th className="px-4 py-3 font-semibold">ক্যাটাগরি</th>
+                <th className="px-4 py-3 font-semibold">একক</th>
                 <th className="px-4 py-3 font-semibold">মূল্য</th>
                 <th className="px-4 py-3 font-semibold">দৃশ্যমানতা</th>
                 <th className="px-4 py-3 font-semibold">Featured</th>
@@ -871,102 +1194,182 @@ export function AdminProductsPanel() {
               </tr>
             </thead>
             <tbody className="divide-y divide-[#F5F4F0]">
-              {filtered.map((p) => (
-                <tr key={p.id} className="hover:bg-[#FAFAF8]">
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-3">
-                      <img
-                        src={resolveAssetUrl(p.images[0])}
-                        alt={p.name}
-                        className="h-10 w-12 rounded-md object-cover"
-                      />
-                      <div>
-                        <p className="font-semibold text-[#1C1917]">{p.name}</p>
-                        <p className="text-[11px] text-[#78716C]">{p.nameEn}</p>
-                      </div>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 text-[#44403C]">{p.categoryName}</td>
-                  <td className="px-4 py-3 font-mono tabular-nums font-semibold text-[#1C1917]">
-                    {formatBdtPrice(p.price)}
-                  </td>
-                  <td className="px-4 py-3">
-                    <button
-                      type="button"
-                      disabled={!canEdit}
-                      onClick={() => canEdit && toggleVisibility(p)}
-                      className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-semibold ${
-                        canEdit ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'
-                      } ${
-                        p.visible !== false
-                          ? 'bg-emerald-50 text-emerald-700'
-                          : 'bg-[#F5F4F0] text-[#78716C]'
-                      }`}
-                    >
-                      {p.visible !== false ? <Eye className="h-3 w-3" /> : <EyeOff className="h-3 w-3" />}
-                      <span>{p.visible !== false ? 'Visible' : 'Hidden'}</span>
-                    </button>
-                  </td>
-                  <td className="px-4 py-3">
-                    <button
-                      type="button"
-                      disabled={!canEdit}
-                      onClick={() => canEdit && toggleFeatured(p)}
-                      className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold ${
-                        canEdit ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'
-                      } ${
-                        p.featured
-                          ? 'bg-[#FEF9C3] text-[#854D0E]'
-                          : 'bg-[#F5F4F0] text-[#78716C]'
-                      }`}
-                    >
-                      <Star className="h-3 w-3" />
-                      <span>{p.featured ? 'Featured' : 'Standard'}</span>
-                    </button>
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <div className="inline-flex items-center gap-1.5">
-                      {canEdit && (
-                        <>
-                          <button
-                            type="button"
-                            title="Edit"
-                            onClick={() => openEditor(p)}
-                            className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-[#1C1917] hover:border-[#DC1F26]"
-                          >
-                            <Edit3 className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            title={p.deleted ? 'Restore' : 'Safe Archive'}
-                            onClick={() => toggleArchive(p)}
-                            className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-[#57534E] hover:border-[#1C1917]"
-                          >
-                            {p.deleted ? (
-                              <RotateCcw className="h-3.5 w-3.5 text-emerald-700" />
-                            ) : (
-                              <Archive className="h-3.5 w-3.5" />
-                            )}
-                          </button>
-                        </>
-                      )}
-                      {p.deleted && canDelete && (
-                        <button
-                          type="button"
-                          title="Delete Permanently"
-                          onClick={() => handlePermanentDelete(p)}
-                          className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-red-700 hover:bg-red-50"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      )}
-                    </div>
+              {paginated.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-4 py-8 text-center text-[#78716C]">
+                    কোনো পণ্য পাওয়া যায়নি।
                   </td>
                 </tr>
-              ))}
+              ) : (
+                paginated.map((p) => {
+                  const thumbSrc = p.images?.[0] || p.image || '';
+                  const pt = getProductText(p, allCategories);
+                  return (
+                    <tr key={p.id} className="hover:bg-[#FAFAF8]">
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-3">
+                          {thumbSrc ? (
+                            <img
+                              src={resolveAssetUrl(thumbSrc)}
+                              alt={pt.nameBn}
+                              className="h-10 w-12 shrink-0 rounded-md border border-[#E7E5E4] object-cover"
+                            />
+                          ) : (
+                            <div className="flex h-10 w-12 shrink-0 items-center justify-center rounded-md border border-dashed border-amber-400 bg-amber-50 text-amber-700">
+                              <ImageOff className="h-4 w-4" />
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <p className="font-semibold text-[#1C1917]">{pt.nameBn}</p>
+                            <p className="text-[11px] text-[#78716C]">{pt.nameEn}</p>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-[#44403C]">
+                        {p.categoryName || pt.categoryNameBn}
+                      </td>
+                      <td className="px-4 py-3 font-medium text-[#57534E]">
+                        {pt.unit || '—'}
+                      </td>
+                      <td className="px-4 py-3 font-mono tabular-nums font-semibold text-[#1C1917]">
+                        {formatBdtPrice(p.price)}
+                      </td>
+                      <td className="px-4 py-3">
+                        <button
+                          type="button"
+                          disabled={!canEdit}
+                          onClick={() => canEdit && toggleVisibility(p)}
+                          className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-semibold ${
+                            canEdit ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'
+                          } ${
+                            p.visible !== false
+                              ? 'bg-emerald-50 text-emerald-700'
+                              : 'bg-[#F5F4F0] text-[#78716C]'
+                          }`}
+                        >
+                          {p.visible !== false ? (
+                            <Eye className="h-3 w-3" />
+                          ) : (
+                            <EyeOff className="h-3 w-3" />
+                          )}
+                          <span>{p.visible !== false ? 'Visible' : 'Hidden'}</span>
+                        </button>
+                      </td>
+                      <td className="px-4 py-3">
+                        <button
+                          type="button"
+                          disabled={!canEdit}
+                          onClick={() => canEdit && toggleFeatured(p)}
+                          className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold ${
+                            canEdit ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'
+                          } ${
+                            p.featured
+                              ? 'bg-[#FEF9C3] text-[#854D0E]'
+                              : 'bg-[#F5F4F0] text-[#78716C]'
+                          }`}
+                        >
+                          <Star className="h-3 w-3" />
+                          <span>{p.featured ? 'Featured' : 'Standard'}</span>
+                        </button>
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <div className="inline-flex items-center gap-1.5">
+                          {canEdit && (
+                            <>
+                              <label
+                                title="শুধু ছবি আপলোড করুন"
+                                className={`inline-flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1.5 text-[11px] font-semibold transition-colors ${
+                                  thumbSrc
+                                    ? 'border-[#E7E5E4] text-[#57534E] hover:border-[#1C1917] hover:text-[#1C1917]'
+                                    : 'border-amber-300 bg-amber-50 text-amber-800 hover:border-amber-500'
+                                }`}
+                              >
+                                <Camera className="h-3.5 w-3.5" />
+                                <span className="hidden sm:inline">
+                                  {uploadingRowId === p.id
+                                    ? 'আপলোড...'
+                                    : thumbSrc
+                                    ? 'ছবি বদলান'
+                                    : 'ছবি যোগ'}
+                                </span>
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  disabled={uploadingRowId === p.id}
+                                  onChange={(ev) => handleQuickRowImageUpload(p, ev)}
+                                  className="hidden"
+                                />
+                              </label>
+                              <button
+                                type="button"
+                                title="Edit"
+                                onClick={() => openEditor(p)}
+                                className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-[#1C1917] hover:border-[#DC1F26]"
+                              >
+                                <Edit3 className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                title={p.deleted ? 'Restore' : 'Safe Archive'}
+                                onClick={() => toggleArchive(p)}
+                                className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-[#57534E] hover:border-[#1C1917]"
+                              >
+                                {p.deleted ? (
+                                  <RotateCcw className="h-3.5 w-3.5 text-emerald-700" />
+                                ) : (
+                                  <Archive className="h-3.5 w-3.5" />
+                                )}
+                              </button>
+                            </>
+                          )}
+                          {p.deleted && canDelete && (
+                            <button
+                              type="button"
+                              title="Delete Permanently"
+                              onClick={() => handlePermanentDelete(p)}
+                              className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-red-700 hover:bg-red-50"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
             </tbody>
           </table>
         </div>
+        {totalPages > 1 && (
+          <div className="flex items-center justify-between border-t border-[#E7E5E4] px-4 py-3 text-xs text-[#57534E]">
+            <span>
+              দেখানো হচ্ছে {(safePage - 1) * PAGE_SIZE + 1}–
+              {Math.min(safePage * PAGE_SIZE, filtered.length)} / {filtered.length}টি পণ্য
+            </span>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                disabled={safePage <= 1}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                className="cursor-pointer rounded border border-[#D6D3D1] px-2.5 py-1 font-semibold disabled:opacity-40"
+              >
+                পূর্ববর্তী
+              </button>
+              <span className="px-2 font-mono font-semibold">
+                {safePage}/{totalPages}
+              </span>
+              <button
+                type="button"
+                disabled={safePage >= totalPages}
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                className="cursor-pointer rounded border border-[#D6D3D1] px-2.5 py-1 font-semibold disabled:opacity-40"
+              >
+                পরবর্তী
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

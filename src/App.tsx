@@ -28,6 +28,9 @@ const ProductDetailPage = lazy(() =>
 const ShowroomsPage = lazy(() =>
   import('./pages/ShowroomsPage').then((m) => ({ default: m.ShowroomsPage }))
 );
+const OutletsPage = lazy(() =>
+  import('./pages/OutletsPage').then((m) => ({ default: m.OutletsPage }))
+);
 const ComplaintPage = lazy(() =>
   import('./pages/ComplaintPage').then((m) => ({ default: m.ComplaintPage }))
 );
@@ -342,6 +345,8 @@ function RoutedLayout() {
             <Route path="/category/:categorySlug" element={<ProductsPage />} />
             <Route path="/occasion/:occasionSlug" element={<ProductsPage />} />
             <Route path="/showrooms" element={<ShowroomsPage />} />
+            <Route path="/outlets" element={<OutletsPage />} />
+            <Route path="/our-outlets" element={<OutletsPage />} />
             <Route path="/jobs" element={<JobsPage />} />
             <Route path="/career" element={<JobsPage />} />
             <Route path="/jobs/:slug" element={<JobDetailPage />} />

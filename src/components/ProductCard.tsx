@@ -14,8 +14,11 @@ interface ProductCardProps {
 export function ProductCard({ product }: ProductCardProps) {
   const { categories, languageMode } = useStore();
   const [imgError, setImgError] = useState(false);
-  const mainImage = resolveAssetUrl(product.images?.[0]);
+  const rawImage = product.images?.[0] || product.image || product.imageUrl || '';
+  const hasRealImage = Boolean(rawImage);
+  const mainImage = hasRealImage ? resolveAssetUrl(rawImage) : '';
   const text = getProductText(product, categories);
+  const safePrice = Number.isFinite(Number(product.price)) ? Number(product.price) : 0;
 
   const showBn = languageMode !== 'en';
   const showEn = languageMode !== 'bn';
@@ -23,12 +26,12 @@ export function ProductCard({ product }: ProductCardProps) {
 
   return (
     <Link
-      to={`/product/${product.slug}`}
+      to={`/product/${product.slug || product.id}`}
       className="group flex flex-col overflow-hidden rounded-xl border border-[#E7E5E4] bg-white transition-all duration-200 hover:-translate-y-0.5 hover:border-[#D6D3D1] hover:shadow-md"
     >
       {/* Consistent 4:3 Image Frame */}
       <div className="relative aspect-[4/3] w-full overflow-hidden bg-[#F5F4F0]">
-        {!imgError ? (
+        {hasRealImage && !imgError ? (
           <img
             src={mainImage}
             alt={`${text.nameBn} - ${text.nameEn}`}
@@ -41,9 +44,10 @@ export function ProductCard({ product }: ProductCardProps) {
         ) : (
           <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 bg-gradient-to-br from-[#F5F4F0] to-[#E7E5E4] p-3 text-center">
             <UtensilsCrossed className="h-6 w-6 text-[#B91C1C]/60" />
-            <span className="line-clamp-1 text-[11px] font-medium text-[#57534E]">
-              {text.nameBn}
+            <span className="line-clamp-1 text-[11px] font-semibold text-[#57534E]">
+              {text.nameBn || text.nameEn}
             </span>
+            <span className="text-[10px] text-[#78716C]">ছবি শীঘ্রই আসছে</span>
           </div>
         )}
         {highlightTag && (
@@ -77,7 +81,7 @@ export function ProductCard({ product }: ProductCardProps) {
 
         {showBn && (
           <h3 className="font-display mt-1 line-clamp-1 text-base font-bold leading-snug text-[#1C1917] sm:text-lg">
-            {text.nameBn}
+            {text.nameBn || text.nameEn}
           </h3>
         )}
         {showEn && (
@@ -88,7 +92,7 @@ export function ProductCard({ product }: ProductCardProps) {
                 : 'font-display mt-1 text-base font-bold text-[#1C1917] sm:text-lg'
             }`}
           >
-            {text.nameEn}
+            {text.nameEn || text.nameBn}
           </p>
         )}
 
@@ -101,9 +105,14 @@ export function ProductCard({ product }: ProductCardProps) {
         <div className="mt-auto flex items-baseline justify-between gap-1.5 border-t border-[#F5F4F0] pt-2.5">
           <div className="flex min-w-0 flex-wrap items-baseline gap-1">
             <span className="font-mono tabular-nums text-xs font-bold text-[#1C1917] sm:text-sm">
-              {product.price_label || formatBdtPrice(product.price)}
+              {product.price_label || formatBdtPrice(safePrice)}
             </span>
-            {typeof product.old_price === 'number' && product.old_price > product.price && (
+            {text.unit && (
+              <span className="text-[10px] font-medium text-[#78716C]">
+                / {text.unit}
+              </span>
+            )}
+            {typeof product.old_price === 'number' && product.old_price > safePrice && (
               <span className="font-mono tabular-nums text-[10px] text-[#78716C] line-through sm:text-xs">
                 {formatBdtPrice(product.old_price)}
               </span>

@@ -273,11 +273,13 @@ export interface Occasion {
 export interface Product {
   id: string;
   name: string;
+  nameBn?: string;
   nameEn: string;
   name_bn?: string;
   name_en?: string;
   slug: string;
   category: string;
+  categorySlug?: string;
   categoryName: string;
   categoryNameEn?: string;
   productType: string;
@@ -286,6 +288,7 @@ export interface Product {
   discount?: string;
   price_label?: string;
   priceUnit: string;
+  unit?: string;
   shortDescription: string;
   shortDescriptionEn?: string;
   short_description_bn?: string;
@@ -294,7 +297,13 @@ export interface Product {
   descriptionEn?: string;
   description_bn?: string;
   description_en?: string;
+  image?: string;
+  imageUrl?: string;
   images: string[];
+  masterKey?: string;
+  rating?: number;
+  stock?: number;
+  sku?: string;
   ingredients: string[];
   ingredients_bn?: string;
   ingredients_en?: string;
@@ -307,6 +316,8 @@ export interface Product {
   featured: boolean;
   popular: boolean;
   visible?: boolean;
+  active?: boolean;
+  isActive?: boolean;
   deleted?: boolean;
   status?: PublishStatus;
   display_order?: number;

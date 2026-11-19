@@ -14,7 +14,7 @@ const NAV_LINKS = [
   { label: 'Products', to: '/products' },
   { label: 'Categories', to: '/#categories' },
   { label: 'Occasions', to: '/#occasions' },
-  { label: 'Showrooms', to: '/showrooms' },
+  { label: 'Our Outlets', to: '/outlets' },
   { label: 'JobApplications', to: '/jobs' },
   { label: 'Complaint', to: '/complaint' },
 ];
@@ -151,11 +151,11 @@ export function Header({ onOpenChat }: HeaderProps) {
             </Link>
 
             <Link
-              to="/showrooms"
+              to="/outlets"
               className="inline-flex h-8 shrink-0 items-center gap-1 whitespace-nowrap rounded-lg bg-[#DC1F26] px-2.5 text-[11px] font-semibold text-white transition-colors hover:bg-[#B91C1C] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#FACC15] sm:h-9 sm:gap-1.5 sm:px-3.5 sm:text-xs"
             >
               <MapPin className="h-3.5 w-3.5" />
-              <span>শোরুম</span>
+              <span>আমাদের শো-রুম</span>
             </Link>
 
             <button

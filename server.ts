@@ -1512,12 +1512,26 @@ app.all('/api/*', (req, res) => {
 
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
+    const vitePromise = (async () => {
+      const { createServer: createViteServer } = await import('vite');
+      return createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+    })();
+
+    vitePromise.catch((err) => {
+      console.error('Vite dev server initialization failed:', err);
     });
-    app.use(vite.middlewares);
+
+    app.use(async (req, res, next) => {
+      try {
+        const vite = await vitePromise;
+        vite.middlewares(req, res, next);
+      } catch (err) {
+        next(err);
+      }
+    });
   } else {
     const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));

@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom';
 import { Facebook, Instagram, Mail, MapPin, MessageCircle, Phone, Youtube } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
-import { getShowroomText } from '../lib/bilingual';
+import { CHATTOGRAM_OUTLETS, formatPhoneHref } from '../data/outletsData';
 import { BrandLogo } from './BrandLogo';
 
 interface FooterProps {
@@ -9,7 +9,10 @@ interface FooterProps {
 }
 
 export function Footer({ onOpenChat }: FooterProps) {
-  const { showrooms, siteSettings, languageMode } = useStore();
+  const { siteSettings, languageMode } = useStore();
+  const featuredFooterOutlets = CHATTOGRAM_OUTLETS.filter((o) =>
+    ['shah-garibullah-hs', 'kusumbagh-khulshi', 'gec-more', 'kotwali', 'agrabad'].includes(o.id)
+  );
 
   const footerDesc =
     languageMode === 'en'
@@ -95,8 +98,8 @@ export function Footer({ onOpenChat }: FooterProps) {
                 </Link>
               </li>
               <li>
-                <Link to="/showrooms" className="transition-colors hover:text-[#FACC15]">
-                  Showrooms
+                <Link to="/outlets" className="transition-colors hover:text-[#FACC15]">
+                  Our Outlets · আমাদের শো-রুম
                 </Link>
               </li>
               <li>
@@ -190,37 +193,45 @@ export function Footer({ onOpenChat }: FooterProps) {
             </ul>
           </div>
 
-          {/* Showrooms */}
+          {/* Outlets */}
           <div>
             <h4 className="text-sm font-semibold text-white">
-              আমাদের শোরুমসমূহ <span className="font-normal text-[#A8A29E]">· Showrooms</span>
+              আমাদের শো-রুম <span className="font-normal text-[#A8A29E]">· Our Outlets</span>
             </h4>
             <ul className="mt-4 space-y-3 text-xs text-[#A8A29E]">
-              {showrooms.map((sr) => {
-                const st = getShowroomText(sr);
-                return (
-                  <li key={sr.id} className="leading-relaxed">
-                    <Link
-                      to="/showrooms"
-                      className="inline-flex items-start gap-1.5 font-medium text-[#E7E5E4] transition-colors hover:text-[#FACC15]"
-                    >
-                      <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#DC1F26]" />
-                      <span>
-                        {st.nameBn}
-                        {st.nameEn && st.nameEn !== st.nameBn ? (
-                          <span className="block text-[11px] font-normal text-[#A8A29E]">
-                            {st.nameEn}
-                          </span>
-                        ) : null}
+              {featuredFooterOutlets.map((outlet) => (
+                <li key={outlet.id} className="leading-relaxed">
+                  <Link
+                    to="/outlets"
+                    className="inline-flex items-start gap-1.5 font-medium text-[#E7E5E4] transition-colors hover:text-[#FACC15]"
+                  >
+                    <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#DC1F26]" />
+                    <span>
+                      {outlet.nameBn}
+                      <span className="block text-[11px] font-normal text-[#A8A29E]">
+                        {outlet.nameEn}
+                        {outlet.type ? ` · ${outlet.type}` : ''}
                       </span>
-                    </Link>
-                    <p className="pl-5 text-[#A8A29E]">
-                      {st.areaBn}
-                      {st.areaEn && st.areaEn !== st.areaBn ? ` (${st.areaEn})` : ''} · {sr.phone}
-                    </p>
-                  </li>
-                );
-              })}
+                    </span>
+                  </Link>
+                  <p className="pl-5 text-[#A8A29E]">
+                    <a
+                      href={formatPhoneHref(outlet.phone)}
+                      className="font-mono tabular-nums hover:text-white"
+                    >
+                      {outlet.phone}
+                    </a>
+                  </p>
+                </li>
+              ))}
+              <li className="pt-1">
+                <Link
+                  to="/outlets"
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-[#FACC15] hover:underline"
+                >
+                  <span>সব শো-রুম দেখুন · View all outlets →</span>
+                </Link>
+              </li>
             </ul>
           </div>
         </div>

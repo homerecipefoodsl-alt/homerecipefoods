@@ -676,10 +676,19 @@ export function AdminActivityLogsPanel() {
 // SYSTEM SETTINGS & CLOUDFLARE/FIREBASE STATUS PANEL
 // ========================
 export function AdminSystemSettingsPanel() {
-  const { isSuperAdmin, hasPermission, seedDemoCatalog } = useStore();
+  const {
+    isSuperAdmin,
+    hasPermission,
+    seedDemoCatalog,
+    importProductMasterList,
+    masterImportStats,
+    masterImportRunning,
+  } = useStore();
   const canViewSystem = isSuperAdmin || hasPermission('settings_view');
+  const canAddProducts = hasPermission('products_add');
   const [seeding, setSeeding] = useState(false);
   const [seedResult, setSeedResult] = useState<string | null>(null);
+  const [masterResult, setMasterResult] = useState<string | null>(null);
 
   if (!canViewSystem) return null;
 
@@ -697,6 +706,18 @@ export function AdminSystemSettingsPanel() {
       setSeedResult('ডাটাবেস সিডিং ব্যর্থ হয়েছে।');
     } finally {
       setSeeding(false);
+    }
+  };
+
+  const handleMasterSync = async () => {
+    setMasterResult(null);
+    try {
+      const summary = await importProductMasterList();
+      setMasterResult(
+        `মাস্টার তালিকা সিঙ্ক সম্পন্ন: মোট ${summary.totalMasterCount}টি, পূর্বে ছিল ${summary.existingProductCount}টি, নতুন যোগ ${summary.newlyAddedCount}টি, স্কিপ ${summary.skippedExistingCount}টি।`
+      );
+    } catch {
+      setMasterResult('মাস্টার প্রোডাক্ট তালিকা ইমপোর্ট ব্যর্থ হয়েছে।');
     }
   };
 
@@ -748,6 +769,37 @@ export function AdminSystemSettingsPanel() {
           </ul>
         </div>
       </div>
+
+      {canAddProducts && (
+        <div className="rounded-xl border border-[#E7E5E4] bg-white p-5">
+          <h3 className="font-display text-lg font-bold text-[#1C1917]">
+            Authoritative Product Master List (১৩৬টি পণ্য)
+          </h3>
+          <p className="mt-1 text-xs text-[#57534E]">
+            সিঙ্কড: {masterImportStats.syncedCount}/{masterImportStats.totalMaster}টি · অনুপস্থিত:{' '}
+            {masterImportStats.missingCount}টি · ছবি ছাড়া: {masterImportStats.missingImageCount}টি।
+            বিদ্যমান কোনো পণ্য বা ছবি ওভাররাইট না করে শুধুমাত্র অনুপস্থিত পণ্যগুলো যোগ করে।
+          </p>
+          {masterResult && (
+            <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800">
+              {masterResult}
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={handleMasterSync}
+            disabled={masterImportRunning}
+            className="mt-4 inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#DC1F26] disabled:opacity-50"
+          >
+            <Database className="h-4 w-4" />
+            <span>
+              {masterImportRunning
+                ? 'সিঙ্ক হচ্ছে...'
+                : 'মাস্টার প্রোডাক্ট তালিকা নিরাপদে সিঙ্ক করুন'}
+            </span>
+          </button>
+        </div>
+      )}
 
       <div className="rounded-xl border border-[#E7E5E4] bg-white p-5">
         <h3 className="font-display text-lg font-bold text-[#1C1917]">

@@ -238,12 +238,12 @@ export function LiveChatWidget({
         priceUnit: p.priceUnit,
         shortDescriptionBn: p.short_description_bn || p.shortDescription,
         shortDescriptionEn: p.short_description_en || p.shortDescriptionEn || '',
-        ingredients: p.ingredients,
-        sizes: p.sizes,
+        ingredients: Array.isArray(p.ingredients) ? p.ingredients : [],
+        sizes: Array.isArray(p.sizes) ? p.sizes : [],
         weight: p.weight,
-        occasions: p.occasions,
+        occasions: Array.isArray(p.occasions) ? p.occasions : [],
         availability: p.availability,
-        availableShowrooms: p.showrooms.map((sid) => {
+        availableShowrooms: (Array.isArray(p.showrooms) ? p.showrooms : []).map((sid) => {
           const sr = showrooms.find((s) => s.id === sid);
           return sr ? `${sr.name} (${sr.nameEn || sr.name})` : sid;
         }),

@@ -64,13 +64,17 @@ export function MobileBottomNav({ onOpenChat }: MobileBottomNavProps) {
 
         <button
           type="button"
-          onClick={() => navigate('/showrooms')}
+          onClick={() => navigate('/outlets')}
           className={`flex h-full cursor-pointer flex-col items-center justify-center gap-0.5 text-[10px] font-medium ${
-            location.pathname === '/showrooms' ? 'text-[#DC1F26]' : 'text-[#57534E]'
+            location.pathname === '/outlets' ||
+            location.pathname === '/our-outlets' ||
+            location.pathname === '/showrooms'
+              ? 'text-[#DC1F26]'
+              : 'text-[#57534E]'
           }`}
         >
           <MapPin className="h-4 w-4" />
-          <span>Showrooms</span>
+          <span>Outlets</span>
         </button>
 
         <button

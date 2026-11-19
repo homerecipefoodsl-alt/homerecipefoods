@@ -7,12 +7,13 @@ import {
   buildProductSearchHaystack,
   getCategoryText,
   getOccasionText,
+  matchesProductCategory,
 } from '../lib/bilingual';
 
 type PriceBucket = 'all' | 'under-300' | '300-800' | '800-2000' | 'above-2000';
 
 export function ProductsPage() {
-  const { categories, occasions, products, loading } = useStore();
+  const { categories, occasions, products, productsLoading, productsError } = useStore();
   const { categorySlug, occasionSlug } = useParams();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -74,8 +75,18 @@ export function ProductsPage() {
   const filteredProducts = useMemo(() => {
     const q = queryText.trim().toLowerCase();
     return products.filter((p) => {
-      if (selectedCategory !== 'all' && p.category !== selectedCategory) return false;
-      if (selectedOccasion !== 'all' && !p.occasions.includes(selectedOccasion)) return false;
+      if (
+        selectedCategory !== 'all' &&
+        !matchesProductCategory(p, selectedCategory, categories)
+      ) {
+        return false;
+      }
+      if (
+        selectedOccasion !== 'all' &&
+        (!Array.isArray(p.occasions) || !p.occasions.includes(selectedOccasion))
+      ) {
+        return false;
+      }
       if (selectedType !== 'all' && p.productType !== selectedType) return false;
 
       if (priceBucket === 'under-300' && p.price >= 300) return false;
@@ -276,7 +287,7 @@ export function ProductsPage() {
       )}
 
       {/* Results Grid */}
-      {loading ? (
+      {productsLoading ? (
         <div className="mt-8 grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-4 lg:gap-6">
           {Array.from({ length: 8 }).map((_, i) => (
             <div
@@ -284,6 +295,21 @@ export function ProductsPage() {
               className="h-80 animate-pulse rounded-xl border border-[#E7E5E4] bg-[#F5F4F0]"
             />
           ))}
+        </div>
+      ) : productsError && products.length === 0 ? (
+        <div className="mt-10 rounded-2xl border border-red-200 bg-red-50/70 p-10 text-center">
+          <UtensilsCrossed className="mx-auto h-10 w-10 text-[#B91C1C]" />
+          <h3 className="font-display mt-3 text-xl font-bold text-[#1C1917] sm:text-2xl">
+            পণ্যগুলো এখন লোড করা যাচ্ছে না। অনুগ্রহ করে কিছুক্ষণ পরে আবার চেষ্টা করুন।
+          </h3>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="mt-5 inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#DC1F26]"
+          >
+            <RotateCcw className="h-4 w-4" />
+            <span>পুনরায় চেষ্টা করুন</span>
+          </button>
         </div>
       ) : filteredProducts.length === 0 ? (
         <div className="mt-10 rounded-2xl border border-[#E7E5E4] bg-white p-12 text-center">

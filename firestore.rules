@@ -275,18 +275,20 @@ service cloud.firestore {
           'featured', 'popular', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug',
+          'id', 'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
           'category', 'categoryName', 'categoryNameEn', 'productType',
-          'price', 'old_price', 'discount', 'price_label', 'priceUnit',
+          'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
           'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
           'description', 'descriptionEn', 'description_bn', 'description_en',
-          'images', 'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
+          'image', 'images', 'masterKey', 'rating', 'stock', 'sku',
+          'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
           'availability', 'importantNotes', 'featured', 'popular',
           'visible', 'deleted', 'status', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription', 'seoImage',
           'createdAt', 'updatedAt'
         ])
         && isValidId(data.id)
         && data.name is string && data.name.size() >= 1 && data.name.size() <= 160
+        && (!('nameBn' in data) || (data.nameBn is string && data.nameBn.size() <= 160))
         && data.nameEn is string && data.nameEn.size() >= 1 && data.nameEn.size() <= 160
         && (!('name_bn' in data) || (data.name_bn is string && data.name_bn.size() <= 160))
         && (!('name_en' in data) || (data.name_en is string && data.name_en.size() <= 160))
@@ -300,6 +302,7 @@ service cloud.firestore {
         && (!('discount' in data) || (data.discount is string && data.discount.size() <= 60))
         && (!('price_label' in data) || (data.price_label is string && data.price_label.size() <= 80))
         && data.priceUnit is string && data.priceUnit.size() >= 1 && data.priceUnit.size() <= 60
+        && (!('unit' in data) || (data.unit is string && data.unit.size() <= 60))
         && data.shortDescription is string && data.shortDescription.size() >= 1 && data.shortDescription.size() <= 300
         && (!('shortDescriptionEn' in data) || (data.shortDescriptionEn is string && data.shortDescriptionEn.size() <= 300))
         && (!('short_description_bn' in data) || (data.short_description_bn is string && data.short_description_bn.size() <= 300))
@@ -308,7 +311,12 @@ service cloud.firestore {
         && (!('descriptionEn' in data) || (data.descriptionEn is string && data.descriptionEn.size() <= 4000))
         && (!('description_bn' in data) || (data.description_bn is string && data.description_bn.size() <= 4000))
         && (!('description_en' in data) || (data.description_en is string && data.description_en.size() <= 4000))
+        && (!('image' in data) || (data.image is string && data.image.size() <= 400000))
         && isBoundedStringList(data.images, 6, 400000)
+        && (!('masterKey' in data) || (data.masterKey is string && data.masterKey.size() <= 240))
+        && (!('rating' in data) || (data.rating is number && data.rating >= 0 && data.rating <= 5))
+        && (!('stock' in data) || (data.stock is int && data.stock >= 0 && data.stock <= 1000000))
+        && (!('sku' in data) || (data.sku is string && data.sku.size() <= 80))
         && isBoundedStringList(data.ingredients, 25, 120)
         && (!('ingredients_bn' in data) || (data.ingredients_bn is string && data.ingredients_bn.size() <= 600))
         && (!('ingredients_en' in data) || (data.ingredients_en is string && data.ingredients_en.size() <= 600))
@@ -1173,12 +1181,13 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly([
-          'name', 'nameEn', 'name_bn', 'name_en', 'slug',
+          'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
           'category', 'categoryName', 'categoryNameEn', 'productType',
-          'price', 'old_price', 'discount', 'price_label', 'priceUnit',
+          'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
           'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
           'description', 'descriptionEn', 'description_bn', 'description_en',
-          'images', 'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
+          'image', 'images', 'masterKey', 'rating', 'stock', 'sku',
+          'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
           'availability', 'importantNotes', 'featured', 'popular',
           'visible', 'deleted', 'status', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription', 'seoImage',
           'updatedAt'
