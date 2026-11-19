@@ -20,6 +20,23 @@ export const EXPECTED_FIREBASE_PROJECT_ID = 'ai-studio-applet-webapp-e4b0f';
 
 const env = import.meta.env;
 
+const rawDatabaseUrl = (env.VITE_FIREBASE_DATABASE_URL || '').trim();
+const isValidRealtimeDbUrl = (() => {
+  if (!rawDatabaseUrl) return false;
+  try {
+    const parsed = new URL(rawDatabaseUrl);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+})();
+
+if (rawDatabaseUrl && !isValidRealtimeDbUrl) {
+  console.warn(
+    'Ignoring invalid VITE_FIREBASE_DATABASE_URL (expected https://... URL; for Firestore Database ID use VITE_FIREBASE_FIRESTORE_DATABASE_ID).'
+  );
+}
+
 const rawConfig = {
   apiKey: (env.VITE_FIREBASE_API_KEY || firebaseAppletConfig.apiKey || '').trim(),
   authDomain: (
@@ -43,7 +60,7 @@ const rawConfig = {
     ''
   ).trim(),
   appId: (env.VITE_FIREBASE_APP_ID || firebaseAppletConfig.appId || '').trim(),
-  databaseURL: (env.VITE_FIREBASE_DATABASE_URL || '').trim(),
+  databaseURL: isValidRealtimeDbUrl ? rawDatabaseUrl : '',
   firestoreDatabaseId: (
     env.VITE_FIREBASE_FIRESTORE_DATABASE_ID ||
     firebaseAppletConfig.firestoreDatabaseId ||
@@ -112,7 +129,12 @@ if (isFirebaseConfigured) {
   authInstance = getAuth(appInstance);
   storageInstance = getStorage(appInstance);
   if (rawConfig.databaseURL) {
-    rtdbInstance = getDatabase(appInstance);
+    try {
+      rtdbInstance = getDatabase(appInstance);
+    } catch (err) {
+      console.warn('Realtime Database initialization skipped:', err);
+      rtdbInstance = null;
+    }
   }
 }
 
