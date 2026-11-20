@@ -85,6 +85,7 @@ export function AdminProductsPanel() {
   const [editorUploadLabel, setEditorUploadLabel] = useState<string>('');
   const [editorUploadPreviewUrl, setEditorUploadPreviewUrl] = useState<string | null>(null);
   const [editorUploadError, setEditorUploadError] = useState<string | null>(null);
+  const [editorUploadNotice, setEditorUploadNotice] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deletingProduct, setDeletingProduct] = useState(false);
@@ -233,6 +234,7 @@ export function AdminProductsPanel() {
       return null;
     });
     setEditorUploadError(null);
+    setEditorUploadNotice(null);
     setFeedback(null);
   };
 
@@ -256,9 +258,13 @@ export function AdminProductsPanel() {
     }
 
     setEditorUploadError(null);
+    setEditorUploadNotice(null);
 
     let accumulatedImages = [...currentImages];
     let activePreviewUrl: string | null = null;
+    let lastFallbackReason: string | null = null;
+    let uploadedViaStorageCount = 0;
+    let uploadedViaFallbackCount = 0;
 
     try {
       for (let i = 0; i < queue.length; i += 1) {
@@ -272,7 +278,7 @@ export function AdminProductsPanel() {
         setEditorUploadLabel(
           queue.length > 1 ? `${file.name} (${i + 1}/${queue.length})` : file.name
         );
-        setEditorUploadProgress(1);
+        setEditorUploadProgress(0);
 
         const result = await uploadCatalogImageToStorage({
           folder: 'products',
@@ -281,10 +287,30 @@ export function AdminProductsPanel() {
           onProgress: (pct) => setEditorUploadProgress(pct),
         });
 
-        accumulatedImages = [
+        const nextCandidateImages = [
           result.downloadUrl,
           ...accumulatedImages.filter((u) => u !== result.downloadUrl),
         ].slice(0, 6);
+
+        const totalInlineBytes = nextCandidateImages
+          .filter((u) => u.startsWith('data:'))
+          .reduce((sum, u) => sum + u.length, 0);
+
+        if (totalInlineBytes > 780000) {
+          setEditorUploadError(
+            'এই পণ্যে সংযুক্ত কমপ্রেসড ছবির মোট আকার ডাটাবেস সীমা (780 KB) অতিক্রম করছে। নতুন ছবি যোগ করতে আগে একটি পুরোনো ছবি সরান অথবা Firebase Console থেকে Firebase Storage চালু করুন।'
+          );
+          break;
+        }
+
+        accumulatedImages = nextCandidateImages;
+
+        if (result.mode === 'firebase-storage') {
+          uploadedViaStorageCount += 1;
+        } else {
+          uploadedViaFallbackCount += 1;
+          lastFallbackReason = result.fallbackReason || lastFallbackReason;
+        }
 
         setEditing((prev) =>
           prev
@@ -297,10 +323,21 @@ export function AdminProductsPanel() {
         );
       }
 
-      setFeedback({
-        type: 'success',
-        message: 'ছবি Firebase Storage-এ সফলভাবে আপলোড হয়েছে। পরিবর্তন স্থায়ী করতে "সংরক্ষণ করুন" চাপুন।',
-      });
+      if (uploadedViaFallbackCount > 0) {
+        setEditorUploadNotice(
+          `${lastFallbackReason || 'Firebase Storage চালু না থাকায়'} ছবিটি অপ্টিমাইজ/কমপ্রেস করে সরাসরি ডাটাবেসে সেভের জন্য যুক্ত করা হয়েছে। পণ্যে স্থায়ী করতে নিচের "সংরক্ষণ করুন" বাটনে চাপুন। (Firebase Storage চালু করতে: Firebase Console → Build → Storage → Get Started)`
+        );
+      }
+
+      if (uploadedViaStorageCount > 0 || uploadedViaFallbackCount > 0) {
+        setFeedback({
+          type: 'success',
+          message:
+            uploadedViaStorageCount > 0 && uploadedViaFallbackCount === 0
+              ? 'ছবি Firebase Storage-এ সফলভাবে আপলোড হয়েছে। পরিবর্তন স্থায়ী করতে "সংরক্ষণ করুন" চাপুন।'
+              : 'ছবি সফলভাবে প্রস্তুত ও যুক্ত হয়েছে। পরিবর্তন স্থায়ী করতে "সংরক্ষণ করুন" চাপুন।',
+        });
+      }
     } catch (err) {
       const msg =
         err instanceof Error && err.message
@@ -331,7 +368,7 @@ export function AdminProductsPanel() {
     e.target.value = '';
     if (!file || !canEdit) return;
     setUploadingRowId(prod.id);
-    setRowUploadProgress(5);
+    setRowUploadProgress(0);
     setFeedback(null);
     try {
       const uploaded = await uploadCatalogImageToStorage({
@@ -342,10 +379,17 @@ export function AdminProductsPanel() {
       });
       const firestore = requireDb();
       const existingList = Array.isArray(prod.images) ? prod.images.filter(Boolean) : [];
-      const nextImages = [
+      let nextImages = [
         uploaded.downloadUrl,
         ...existingList.filter((u) => u !== uploaded.downloadUrl),
       ].slice(0, 6);
+      // Trim older inline data-URLs from tail if cumulative inline bytes exceed Firestore 1 MiB safety budget
+      while (
+        nextImages.length > 1 &&
+        nextImages.filter((u) => u.startsWith('data:')).reduce((s, u) => s + u.length, 0) > 780000
+      ) {
+        nextImages = nextImages.slice(0, -1);
+      }
       await updateDoc(doc(firestore, 'products', prod.id), {
         image: uploaded.downloadUrl,
         images: nextImages,
@@ -356,11 +400,16 @@ export function AdminProductsPanel() {
         'products',
         prod.id,
         prod.nameEn || prod.name,
-        `Uploaded photo to Firebase Storage for ${prod.nameBn || prod.name}`
+        uploaded.mode === 'firebase-storage'
+          ? `Uploaded photo to Firebase Storage for ${prod.nameBn || prod.name}`
+          : `Saved optimized photo to Firestore for ${prod.nameBn || prod.name} (Storage fallback)`
       );
       setFeedback({
         type: 'success',
-        message: `"${prod.nameBn || prod.name}" এর ছবি Firebase Storage-এ সফলভাবে আপডেট হয়েছে।`,
+        message:
+          uploaded.mode === 'firebase-storage'
+            ? `"${prod.nameBn || prod.name}" এর ছবি Firebase Storage-এ সফলভাবে আপডেট হয়েছে।`
+            : `"${prod.nameBn || prod.name}" এর ছবি অপ্টিমাইজ করে ডাটাবেসে সেভ হয়েছে। (${uploaded.fallbackReason || 'Firebase Storage চালু থাকলে মূল ফাইল সেভ হবে'})`,
       });
     } catch (err) {
       const msg =
@@ -1237,6 +1286,13 @@ export function AdminProductsPanel() {
                 </div>
               )}
 
+              {editorUploadNotice && (
+                <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900">
+                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-700" />
+                  <span>{editorUploadNotice}</span>
+                </div>
+              )}
+
               {editorUploadProgress !== null && (
                 <div className="mt-3 flex items-center gap-3 rounded-lg border border-[#E7E5E4] bg-white p-3">
                   {editorUploadPreviewUrl && (
@@ -1250,7 +1306,11 @@ export function AdminProductsPanel() {
                     <div className="flex items-center justify-between text-[11px] font-semibold text-[#1C1917]">
                       <span className="inline-flex items-center gap-1.5 truncate">
                         <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[#DC1F26]" />
-                        <span className="truncate">আপলোড হচ্ছে: {editorUploadLabel}</span>
+                        <span className="truncate">
+                          {editorUploadProgress === 0
+                            ? `সংযোগ যাচাই ও প্রস্তুত হচ্ছে: ${editorUploadLabel}`
+                            : `আপলোড হচ্ছে: ${editorUploadLabel}`}
+                        </span>
                       </span>
                       <span className="font-mono tabular-nums text-[#DC1F26]">
                         {editorUploadProgress}%
@@ -1276,7 +1336,9 @@ export function AdminProductsPanel() {
                         className="h-full w-full object-cover opacity-75"
                       />
                       <span className="absolute inset-x-1.5 bottom-1.5 rounded bg-black/75 px-1.5 py-0.5 text-center font-mono text-[10px] font-bold text-white">
-                        {editorUploadProgress}% আপলোড...
+                        {editorUploadProgress === 0
+                          ? 'প্রস্তুত হচ্ছে...'
+                          : `${editorUploadProgress}% আপলোড...`}
                       </span>
                     </div>
                   </div>
@@ -1787,7 +1849,7 @@ export function AdminCategoriesPanel() {
     const localUrl = URL.createObjectURL(file);
     setCatPreviewUrl(localUrl);
     setCatUploading(true);
-    setCatUploadPct(1);
+    setCatUploadPct(0);
     setMsg(null);
     try {
       const result = await uploadCatalogImageToStorage({
@@ -1797,6 +1859,11 @@ export function AdminCategoriesPanel() {
         onProgress: (pct) => setCatUploadPct(pct),
       });
       setEditing((prev) => (prev ? { ...prev, image: result.downloadUrl } : null));
+      if (result.mode === 'firestore-compressed' && result.fallbackReason) {
+        setMsg(
+          `${result.fallbackReason} — ছবিটি অপ্টিমাইজ করে প্রস্তুত করা হয়েছে, স্থায়ী করতে সেভ করুন।`
+        );
+      }
     } catch (err) {
       setMsg(
         err instanceof Error && err.message

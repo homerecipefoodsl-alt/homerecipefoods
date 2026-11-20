@@ -62,7 +62,8 @@ export function generateComplaintReference(): string {
 export async function compressImageToDataUrl(
   file: File,
   maxDimension = 960,
-  quality = 0.78
+  quality = 0.78,
+  maxBytes = 380000
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -71,31 +72,51 @@ export async function compressImageToDataUrl(
       const img = new Image();
       img.onerror = () => reject(new Error('Invalid image format.'));
       img.onload = () => {
-        let { width, height } = img;
-        if (width > maxDimension || height > maxDimension) {
-          if (width >= height) {
-            height = Math.round((height * maxDimension) / width);
-            width = maxDimension;
-          } else {
-            width = Math.round((width * maxDimension) / height);
-            height = maxDimension;
+        let targetMax = maxDimension;
+        const attemptQualities = [quality, 0.72, 0.62, 0.52, 0.42];
+        let bestDataUrl = '';
+
+        for (let pass = 0; pass < 3; pass += 1) {
+          let width = img.width;
+          let height = img.height;
+          if (width > targetMax || height > targetMax) {
+            if (width >= height) {
+              height = Math.max(1, Math.round((height * targetMax) / width));
+              width = targetMax;
+            } else {
+              width = Math.max(1, Math.round((width * targetMax) / height));
+              height = targetMax;
+            }
           }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            reject(new Error('Canvas context unavailable.'));
+            return;
+          }
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, width, height);
+          ctx.drawImage(img, 0, 0, width, height);
+
+          for (const q of attemptQualities) {
+            const candidate = canvas.toDataURL('image/jpeg', q);
+            bestDataUrl = candidate;
+            if (candidate.length <= maxBytes) {
+              resolve(candidate);
+              return;
+            }
+          }
+          targetMax = Math.round(targetMax * 0.72);
         }
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          reject(new Error('Canvas context unavailable.'));
+
+        if (bestDataUrl.length <= 395000) {
+          resolve(bestDataUrl);
           return;
         }
-        ctx.drawImage(img, 0, 0, width, height);
-        const dataUrl = canvas.toDataURL('image/jpeg', quality);
-        if (dataUrl.length > 380000) {
-          resolve(canvas.toDataURL('image/jpeg', 0.55));
-        } else {
-          resolve(dataUrl);
-        }
+        reject(new Error('ছবিটি কমপ্রেস করার পরও ডাটাবেস সীমার চেয়ে বড় রয়ে গেছে। অনুগ্রহ করে অপেক্ষাকৃত ছোট ছবি দিন।'));
       };
       img.src = String(reader.result);
     };

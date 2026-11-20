@@ -128,6 +128,8 @@ if (isFirebaseConfigured) {
 
   authInstance = getAuth(appInstance);
   storageInstance = getStorage(appInstance);
+  storageInstance.maxUploadRetryTime = 15000;
+  storageInstance.maxOperationRetryTime = 15000;
   if (rawConfig.databaseURL) {
     try {
       rtdbInstance = getDatabase(appInstance);
