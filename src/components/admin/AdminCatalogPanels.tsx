@@ -42,7 +42,7 @@ import {
   getShowroomText,
 } from '../../lib/bilingual';
 import { OperationType, handleFirestoreError, requireDb } from '../../lib/firebase';
-import { uploadCatalogImageToStorage } from '../../lib/productStorage';
+import { uploadCatalogImageToStorage, validateCatalogImageFile } from '../../lib/productStorage';
 import { formatBdtPrice, toSlug } from '../../lib/utils';
 import type {
   Category,
@@ -83,6 +83,7 @@ export function AdminProductsPanel() {
   const [rowUploadProgress, setRowUploadProgress] = useState<number | null>(null);
   const [editorUploadProgress, setEditorUploadProgress] = useState<number | null>(null);
   const [editorUploadLabel, setEditorUploadLabel] = useState<string>('');
+  const [editorUploadPreviewUrl, setEditorUploadPreviewUrl] = useState<string | null>(null);
   const [editorUploadError, setEditorUploadError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -182,8 +183,8 @@ export function AdminProductsPanel() {
   const openEditor = (prod: Product | null) => {
     if (prod) {
       const t = getProductText(prod, allCategories);
-      const ing = prod.ingredients.join(', ');
-      const sz = prod.sizes.join(', ');
+      const ing = (Array.isArray(prod.ingredients) ? prod.ingredients : []).join(', ');
+      const sz = (Array.isArray(prod.sizes) ? prod.sizes : []).join(', ');
       const normalizedImages =
         Array.isArray(prod.images) && prod.images.length > 0
           ? prod.images.filter(Boolean)
@@ -227,6 +228,10 @@ export function AdminProductsPanel() {
     }
     setEditorUploadProgress(null);
     setEditorUploadLabel('');
+    setEditorUploadPreviewUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
     setEditorUploadError(null);
     setFeedback(null);
   };
@@ -242,17 +247,32 @@ export function AdminProductsPanel() {
     }
 
     const queue = files.slice(0, remainingSlots);
+    for (const candidate of queue) {
+      const errMsg = validateCatalogImageFile(candidate);
+      if (errMsg) {
+        setEditorUploadError(errMsg);
+        return;
+      }
+    }
+
     setEditorUploadError(null);
 
     let accumulatedImages = [...currentImages];
+    let activePreviewUrl: string | null = null;
 
     try {
       for (let i = 0; i < queue.length; i += 1) {
         const file = queue[i];
+        if (activePreviewUrl) {
+          URL.revokeObjectURL(activePreviewUrl);
+          activePreviewUrl = null;
+        }
+        activePreviewUrl = URL.createObjectURL(file);
+        setEditorUploadPreviewUrl(activePreviewUrl);
         setEditorUploadLabel(
           queue.length > 1 ? `${file.name} (${i + 1}/${queue.length})` : file.name
         );
-        setEditorUploadProgress(5);
+        setEditorUploadProgress(1);
 
         const result = await uploadCatalogImageToStorage({
           folder: 'products',
@@ -288,6 +308,10 @@ export function AdminProductsPanel() {
           : 'ছবি আপলোড ব্যর্থ হয়েছে। ফাইল ফরম্যাট ও Firebase Storage যাচাই করুন।';
       setEditorUploadError(msg);
     } finally {
+      if (activePreviewUrl) {
+        URL.revokeObjectURL(activePreviewUrl);
+      }
+      setEditorUploadPreviewUrl(null);
       setEditorUploadProgress(null);
       setEditorUploadLabel('');
     }
@@ -425,7 +449,10 @@ export function AdminProductsPanel() {
         return;
       }
 
-      const catObj = allCategories.find((c) => c.slug === editing.category);
+      const resolvedCategorySlug = toSlug(
+        editing.category.trim() || allCategories[0]?.slug || 'custom-cake'
+      );
+      const catObj = allCategories.find((c) => c.slug === resolvedCategorySlug);
       const catText = catObj ? getCategoryText(catObj) : null;
       const slug = toSlug(editing.slug.trim() || nameEn || nameBn);
       const ingredients = ingredientsText
@@ -444,9 +471,14 @@ export function AdminProductsPanel() {
       const shortDescBn = editing.shortDescription.trim() || shortDescEn || nameBn;
       const fullDescEn = (editing.descriptionEn ?? '').trim() || shortDescEn;
       const fullDescBn = editing.description.trim() || shortDescBn || fullDescEn || nameBn;
-      const numericPrice = Number.isFinite(Number(editing.price))
-        ? Math.max(0, Number(editing.price))
+      const rawPrice = Number(editing.price);
+      const numericPrice = Number.isFinite(rawPrice)
+        ? Math.min(1000000, Math.max(0, rawPrice))
         : 0;
+      const rawDisplayOrder = Number(editing.display_order);
+      const safeDisplayOrder = Number.isFinite(rawDisplayOrder)
+        ? Math.min(10000, Math.max(0, Math.round(rawDisplayOrder)))
+        : 1;
 
       const payload: Record<string, unknown> = {
         id: editing.id,
@@ -456,8 +488,8 @@ export function AdminProductsPanel() {
         name_bn: nameBn.slice(0, 160),
         name_en: nameEn.slice(0, 160),
         slug,
-        category: editing.category,
-        categoryName: (editing.categoryName || catText?.nameBn || editing.category).slice(0, 120),
+        category: resolvedCategorySlug,
+        categoryName: (editing.categoryName || catText?.nameBn || resolvedCategorySlug).slice(0, 120),
         categoryNameEn: (editing.categoryNameEn || catText?.nameEn || '').slice(0, 120),
         productType: (editing.productType.trim() || 'Bakery & Sweets').slice(0, 120),
         price: numericPrice,
@@ -486,7 +518,7 @@ export function AdminProductsPanel() {
         popular: Boolean(editing.popular),
         visible: editing.visible !== false,
         deleted: Boolean(editing.deleted),
-        display_order: Math.max(0, Number(editing.display_order) || 1),
+        display_order: safeDisplayOrder,
         status: editing.deleted ? 'archived' : editing.visible === false ? 'draft' : 'published',
         updatedAt: serverTimestamp(),
       };
@@ -1206,26 +1238,49 @@ export function AdminProductsPanel() {
               )}
 
               {editorUploadProgress !== null && (
-                <div className="mt-3 rounded-lg border border-[#E7E5E4] bg-white p-3">
-                  <div className="flex items-center justify-between text-[11px] font-semibold text-[#1C1917]">
-                    <span className="inline-flex items-center gap-1.5 truncate">
-                      <Loader2 className="h-3.5 w-3.5 animate-spin text-[#DC1F26]" />
-                      <span className="truncate">আপলোড হচ্ছে: {editorUploadLabel}</span>
-                    </span>
-                    <span className="font-mono tabular-nums text-[#DC1F26]">
-                      {editorUploadProgress}%
-                    </span>
-                  </div>
-                  <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[#F5F4F0]">
-                    <div
-                      className="h-full bg-[#DC1F26] transition-all duration-150"
-                      style={{ width: `${editorUploadProgress}%` }}
+                <div className="mt-3 flex items-center gap-3 rounded-lg border border-[#E7E5E4] bg-white p-3">
+                  {editorUploadPreviewUrl && (
+                    <img
+                      src={editorUploadPreviewUrl}
+                      alt="Selected preview"
+                      className="h-12 w-16 shrink-0 rounded-md border border-[#E7E5E4] object-cover"
                     />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between text-[11px] font-semibold text-[#1C1917]">
+                      <span className="inline-flex items-center gap-1.5 truncate">
+                        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[#DC1F26]" />
+                        <span className="truncate">আপলোড হচ্ছে: {editorUploadLabel}</span>
+                      </span>
+                      <span className="font-mono tabular-nums text-[#DC1F26]">
+                        {editorUploadProgress}%
+                      </span>
+                    </div>
+                    <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[#F5F4F0]">
+                      <div
+                        className="h-full bg-[#DC1F26] transition-all duration-150"
+                        style={{ width: `${editorUploadProgress}%` }}
+                      />
+                    </div>
                   </div>
                 </div>
               )}
 
               <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+                {editorUploadPreviewUrl && editorUploadProgress !== null && (
+                  <div className="relative flex flex-col overflow-hidden rounded-lg border border-dashed border-[#DC1F26] bg-white">
+                    <div className="relative aspect-[4/3] w-full bg-[#F5F4F0]">
+                      <img
+                        src={editorUploadPreviewUrl}
+                        alt="Uploading preview"
+                        className="h-full w-full object-cover opacity-75"
+                      />
+                      <span className="absolute inset-x-1.5 bottom-1.5 rounded bg-black/75 px-1.5 py-0.5 text-center font-mono text-[10px] font-bold text-white">
+                        {editorUploadProgress}% আপলোড...
+                      </span>
+                    </div>
+                  </div>
+                )}
                 {editing.images.map((img, i) => (
                   <div
                     key={`${img.slice(0, 32)}-${i}`}
@@ -1696,6 +1751,7 @@ export function AdminCategoriesPanel() {
   const [isNew, setIsNew] = useState(false);
   const [catUploading, setCatUploading] = useState(false);
   const [catUploadPct, setCatUploadPct] = useState<number | null>(null);
+  const [catPreviewUrl, setCatPreviewUrl] = useState<string | null>(null);
   const [pendingDeleteCat, setPendingDeleteCat] = useState<Category | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -1723,8 +1779,15 @@ export function AdminCategoriesPanel() {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file || !editing) return;
+    const validationError = validateCatalogImageFile(file);
+    if (validationError) {
+      setMsg(validationError);
+      return;
+    }
+    const localUrl = URL.createObjectURL(file);
+    setCatPreviewUrl(localUrl);
     setCatUploading(true);
-    setCatUploadPct(5);
+    setCatUploadPct(1);
     setMsg(null);
     try {
       const result = await uploadCatalogImageToStorage({
@@ -1741,6 +1804,8 @@ export function AdminCategoriesPanel() {
           : 'ক্যাটাগরির ছবি আপলোড ব্যর্থ হয়েছে।'
       );
     } finally {
+      URL.revokeObjectURL(localUrl);
+      setCatPreviewUrl(null);
       setCatUploading(false);
       setCatUploadPct(null);
     }
@@ -1913,9 +1978,9 @@ export function AdminCategoriesPanel() {
                   className="hidden"
                 />
               </label>
-              {editing.image && (
+              {(catPreviewUrl || editing.image) && (
                 <img
-                  src={resolveAssetUrl(editing.image)}
+                  src={catPreviewUrl || resolveAssetUrl(editing.image)}
                   alt="Category preview"
                   className="h-10 w-14 rounded-md border border-[#E7E5E4] object-cover"
                 />

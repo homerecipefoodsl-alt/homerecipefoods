@@ -370,6 +370,8 @@ async function verifyCallerStaffAuthorityWorker(
   isPrimarySuperAdmin: boolean;
   isSuperAdmin: boolean;
   canManageManagers: boolean;
+  role: string;
+  status: string;
 }> {
   if (callerEmail === PRIMARY_SUPER_ADMIN_EMAIL) {
     return {
@@ -377,6 +379,8 @@ async function verifyCallerStaffAuthorityWorker(
       isPrimarySuperAdmin: true,
       isSuperAdmin: true,
       canManageManagers: true,
+      role: 'super_admin',
+      status: 'active',
     };
   }
 
@@ -395,6 +399,8 @@ async function verifyCallerStaffAuthorityWorker(
         isPrimarySuperAdmin: false,
         isSuperAdmin: false,
         canManageManagers: false,
+        role: 'customer',
+        status: 'disabled',
       };
     }
     const docData = (await resp.json()) as {
@@ -418,6 +424,8 @@ async function verifyCallerStaffAuthorityWorker(
       isPrimarySuperAdmin: false,
       isSuperAdmin: isSuper,
       canManageManagers,
+      role: role || 'customer',
+      status: status || 'disabled',
     };
   } catch {
     return {
@@ -425,7 +433,47 @@ async function verifyCallerStaffAuthorityWorker(
       isPrimarySuperAdmin: false,
       isSuperAdmin: false,
       canManageManagers: false,
+      role: 'customer',
+      status: 'disabled',
     };
+  }
+}
+
+async function syncFirebaseStaffCustomClaimsWorker(params: {
+  adminToken: string;
+  projectId: string;
+  uid: string;
+  role: string;
+  status: string;
+}): Promise<boolean> {
+  if (!params.uid) return false;
+  const isCatalogStaff =
+    params.status === 'active' &&
+    ['super_admin', 'admin', 'manager'].includes(params.role);
+  try {
+    const resp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(
+        params.projectId
+      )}/accounts:update`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${params.adminToken}`,
+        },
+        body: JSON.stringify({
+          localId: params.uid,
+          customAttributes: JSON.stringify({
+            hrf_staff: isCatalogStaff,
+            role: params.role,
+            staff_status: params.status,
+          }),
+        }),
+      }
+    );
+    return resp.ok;
+  } catch {
+    return false;
   }
 }
 
@@ -803,6 +851,27 @@ async function handleSessionInit(request: Request, env: Env): Promise<Response> 
       ? 'Admin SDK Status: Ready'
       : 'Firebase Admin private key could not be initialized by Cloudflare Worker WebCrypto.';
 
+    let claimsSynced = false;
+    if (
+      saCheck.ok &&
+      cryptoInitialized &&
+      authority.status === 'active' &&
+      ['super_admin', 'admin', 'manager', 'support_agent'].includes(authority.role)
+    ) {
+      try {
+        const adminToken = await getGoogleAdminAccessTokenWorker(saCheck.config);
+        claimsSynced = await syncFirebaseStaffCustomClaimsWorker({
+          adminToken,
+          projectId: saCheck.config.project_id,
+          uid: decoded.uid,
+          role: authority.role,
+          status: authority.status,
+        });
+      } catch {
+        claimsSynced = false;
+      }
+    }
+
     return jsonResponse({
       success: true,
       ok: true,
@@ -812,10 +881,13 @@ async function handleSessionInit(request: Request, env: Env): Promise<Response> 
       isPrimarySuperAdmin: authority.isPrimarySuperAdmin,
       authorizedSuperAdmin: authority.isSuperAdmin,
       hasAdminCredentials: saCheck.ok && cryptoInitialized,
+      claimsSynced,
       serviceAccountStatus,
       serviceAccountMessage,
       role: authority.isSuperAdmin
         ? 'super_admin'
+        : ['admin', 'manager', 'support_agent'].includes(authority.role) && authority.status === 'active'
+        ? authority.role
         : authority.canManageManagers
         ? 'manager'
         : 'customer',
@@ -1105,6 +1177,14 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
       );
     }
 
+    await syncFirebaseStaffCustomClaimsWorker({
+      adminToken,
+      projectId: targetProject,
+      uid: createdUid,
+      role: targetRole,
+      status: cleanStatus,
+    });
+
     const successMessage =
       targetRole === 'admin'
         ? 'Admin successfully created'
@@ -1288,6 +1368,17 @@ async function handleAdminUpdateUserStatus(request: Request, env: Env): Promise<
         body: JSON.stringify({
           localId: cleanUid,
           disableUser: Boolean(body.disabled),
+          ...(typeof body.role === 'string' && body.role
+            ? {
+                customAttributes: JSON.stringify({
+                  hrf_staff:
+                    !Boolean(body.disabled) &&
+                    ['super_admin', 'admin', 'manager'].includes(body.role),
+                  role: body.role,
+                  staff_status: Boolean(body.disabled) ? 'disabled' : 'active',
+                }),
+              }
+            : {}),
         }),
       }
     );

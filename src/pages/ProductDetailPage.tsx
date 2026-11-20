@@ -20,12 +20,18 @@ export function ProductDetailPage() {
 
   const product = products.find((p) => p.slug === slug || p.id === slug);
   const [activeImageIdx, setActiveImageIdx] = useState(0);
+  const [imgError, setImgError] = useState(false);
   const [showContactSheet, setShowContactSheet] = useState(false);
 
   useEffect(() => {
     setActiveImageIdx(0);
+    setImgError(false);
     setShowContactSheet(false);
   }, [slug]);
+
+  useEffect(() => {
+    setImgError(false);
+  }, [activeImageIdx]);
 
   const text = product ? getProductText(product, categories) : null;
 
@@ -146,11 +152,12 @@ export function ProductDetailPage() {
         <div className="lg:col-span-6">
           <div className="overflow-hidden rounded-2xl border border-[#E7E5E4] bg-white">
             <div className="aspect-[4/3] w-full bg-[#F5F4F0]">
-              {hasRealImage ? (
+              {hasRealImage && !imgError ? (
                 <img
                   src={currentImg}
                   alt={`${text.nameBn} - ${text.nameEn}`}
                   referrerPolicy="no-referrer"
+                  onError={() => setImgError(true)}
                   className="h-full w-full object-cover"
                 />
               ) : (

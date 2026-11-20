@@ -38,18 +38,32 @@ function sanitizeEntityId(id: string): string {
   return cleaned.slice(0, 96) || `item-${Date.now()}`;
 }
 
+function inferContentTypeFromFile(file: File): string {
+  const mime = file.type.trim().toLowerCase();
+  if (mime === 'image/jpg' || mime === 'image/jpeg') return 'image/jpeg';
+  if (mime === 'image/png') return 'image/png';
+  if (mime === 'image/webp') return 'image/webp';
+
+  const lower = file.name.trim().toLowerCase();
+  if (/\.png$/.test(lower)) return 'image/png';
+  if (/\.webp$/.test(lower)) return 'image/webp';
+  return 'image/jpeg';
+}
+
 export function validateCatalogImageFile(file: File): string | null {
   if (!file) {
     return 'অনুগ্রহ করে একটি ছবি নির্বাচন করুন। (No file selected)';
   }
 
-  const lowerName = file.name.toLowerCase();
+  const lowerName = file.name.trim().toLowerCase();
+  const rawMime = file.type.trim().toLowerCase();
   const validExtension = /\.(jpe?g|png|webp)$/.test(lowerName);
   const validMime = ALLOWED_PRODUCT_IMAGE_TYPES.includes(
-    file.type.toLowerCase() as (typeof ALLOWED_PRODUCT_IMAGE_TYPES)[number]
+    rawMime as (typeof ALLOWED_PRODUCT_IMAGE_TYPES)[number]
   );
 
-  if (!validMime && !validExtension) {
+  // Reject non-image MIME types strictly even if a user renamed e.g. file.pdf -> file.jpg
+  if (rawMime ? !validMime : !validExtension) {
     return 'অসমর্থিত ফাইল ফরম্যাট! শুধু JPG, JPEG, PNG অথবা WEBP ছবি আপলোড করুন।';
   }
 
@@ -67,7 +81,11 @@ export function validateCatalogImageFile(file: File): string | null {
 
 function mapStorageUploadError(err: unknown): string {
   if (err instanceof StorageError) {
+    const details = `${err.message || ''} ${err.serverResponse || ''}`.toLowerCase();
     switch (err.code) {
+      case 'storage/bucket-not-found':
+      case 'storage/project-not-found':
+        return 'Firebase Storage bucket পাওয়া যায়নি (404)। Firebase Console → Build → Storage → Get Started চালু করে storage.rules পাবলিশ করুন।';
       case 'storage/unauthorized':
         return 'Firebase Storage-এ ছবি আপলোডের অনুমতি পাওয়া যায়নি। লগইন সেশন রিফ্রেশ করুন অথবা Firebase Console-এ storage.rules পাবলিশ করুন।';
       case 'storage/canceled':
@@ -78,6 +96,15 @@ function mapStorageUploadError(err: unknown): string {
         return 'নেটওয়ার্ক সমস্যার কারণে আপলোড সম্পন্ন হয়নি। ইন্টারনেট সংযোগ যাচাই করে আবার চেষ্টা করুন।';
       case 'storage/unauthenticated':
         return 'অ্যাডমিন লগইন সেশন পাওয়া যায়নি। পুনরায় লগইন করুন।';
+      case 'storage/unknown':
+        if (
+          details.includes('404') ||
+          details.includes('not found') ||
+          details.includes('bucket')
+        ) {
+          return 'Firebase Storage চালু বা কনফিগার করা পাওয়া যায়নি (404)। Firebase Console → Build → Storage → Get Started চালু করুন এবং storage.rules ডিপ্লয় করুন।';
+        }
+        return `Storage আপলোড ব্যর্থ (${err.code})। Firebase Storage সেটআপ ও নেটওয়ার্ক যাচাই করুন।`;
       default:
         return `Storage আপলোড ব্যর্থ (${err.code})। আবার চেষ্টা করুন।`;
     }
@@ -96,8 +123,9 @@ function uploadResumableToPath(
 ): Promise<CatalogImageUploadResult> {
   return new Promise((resolve, reject) => {
     const storageRef = ref(activeStorage, storagePath);
+    const contentType = inferContentTypeFromFile(file);
     const task = uploadBytesResumable(storageRef, file, {
-      contentType: file.type || 'image/jpeg',
+      contentType,
       cacheControl: 'public, max-age=31536000',
     });
 
@@ -116,6 +144,10 @@ function uploadResumableToPath(
       async () => {
         try {
           const downloadUrl = await getDownloadURL(task.snapshot.ref);
+          if (!downloadUrl || !downloadUrl.startsWith('https://')) {
+            reject(new Error('Firebase Storage থেকে বৈধ ডাউনলোড URL পাওয়া যায়নি।'));
+            return;
+          }
           onProgress?.(100);
           resolve({
             downloadUrl,
@@ -150,6 +182,18 @@ export async function uploadCatalogImageToStorage(params: {
 
   if (!auth?.currentUser) {
     throw new Error('ছবি আপলোড করতে অ্যাডমিন একাউন্টে লগইন থাকতে হবে।');
+  }
+
+  if (!auth.currentUser.emailVerified) {
+    throw new Error(
+      'অ্যাডমিন ইমেইল ভেরিফাইড না হলে ছবি আপলোড করা যাবে না। ইমেইল ভেরিফাই করে পুনরায় চেষ্টা করুন।'
+    );
+  }
+
+  try {
+    await auth.currentUser.getIdToken();
+  } catch {
+    throw new Error('অ্যাডমিন লগইন টোকেন রিফ্রেশ করা যায়নি। পুনরায় লগইন করুন।');
   }
 
   const safeId = sanitizeEntityId(params.entityId);

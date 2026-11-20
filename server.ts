@@ -345,6 +345,8 @@ interface CallerRbacCheck {
   isSuperAdmin: boolean;
   canManageManagers: boolean;
   callerEmail: string;
+  role: string;
+  status: string;
 }
 
 async function verifyCallerStaffAuthority(
@@ -358,6 +360,8 @@ async function verifyCallerStaffAuthority(
       isSuperAdmin: true,
       canManageManagers: true,
       callerEmail,
+      role: 'super_admin',
+      status: 'active',
     };
   }
 
@@ -377,6 +381,8 @@ async function verifyCallerStaffAuthority(
         isSuperAdmin: false,
         canManageManagers: false,
         callerEmail,
+        role: 'customer',
+        status: 'disabled',
       };
     }
     const docData = (await resp.json()) as {
@@ -401,6 +407,8 @@ async function verifyCallerStaffAuthority(
       isSuperAdmin: isSuper,
       canManageManagers,
       callerEmail,
+      role: role || 'customer',
+      status: status || 'disabled',
     };
   } catch {
     return {
@@ -409,7 +417,47 @@ async function verifyCallerStaffAuthority(
       isSuperAdmin: false,
       canManageManagers: false,
       callerEmail,
+      role: 'customer',
+      status: 'disabled',
     };
+  }
+}
+
+async function syncFirebaseStaffCustomClaims(params: {
+  adminToken: string;
+  projectId: string;
+  uid: string;
+  role: string;
+  status: string;
+}): Promise<boolean> {
+  if (!params.uid) return false;
+  const isCatalogStaff =
+    params.status === 'active' &&
+    ['super_admin', 'admin', 'manager'].includes(params.role);
+  try {
+    const resp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(
+        params.projectId
+      )}/accounts:update`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${params.adminToken}`,
+        },
+        body: JSON.stringify({
+          localId: params.uid,
+          customAttributes: JSON.stringify({
+            hrf_staff: isCatalogStaff,
+            role: params.role,
+            staff_status: params.status,
+          }),
+        }),
+      }
+    );
+    return resp.ok;
+  } catch {
+    return false;
   }
 }
 
@@ -725,6 +773,27 @@ app.post('/api/auth/session-init', async (req, res) => {
       ? 'Admin SDK Status: Ready'
       : 'Firebase Admin private key could not be initialized.';
 
+    let claimsSynced = false;
+    if (
+      saCheck.ok &&
+      cryptoInitialized &&
+      authority.status === 'active' &&
+      ['super_admin', 'admin', 'manager', 'support_agent'].includes(authority.role)
+    ) {
+      try {
+        const adminToken = await getGoogleAdminAccessToken(saCheck.config);
+        claimsSynced = await syncFirebaseStaffCustomClaims({
+          adminToken,
+          projectId: saCheck.config.project_id,
+          uid: decoded.uid,
+          role: authority.role,
+          status: authority.status,
+        });
+      } catch {
+        claimsSynced = false;
+      }
+    }
+
     res.json({
       success: true,
       ok: true,
@@ -734,10 +803,13 @@ app.post('/api/auth/session-init', async (req, res) => {
       isPrimarySuperAdmin: authority.isPrimarySuperAdmin,
       authorizedSuperAdmin: authority.isSuperAdmin,
       hasAdminCredentials: saCheck.ok && cryptoInitialized,
+      claimsSynced,
       serviceAccountStatus,
       serviceAccountMessage,
       role: authority.isSuperAdmin
         ? 'super_admin'
+        : ['admin', 'manager', 'support_agent'].includes(authority.role) && authority.status === 'active'
+        ? authority.role
         : authority.canManageManagers
         ? 'manager'
         : 'customer',
@@ -1026,6 +1098,14 @@ async function handleCreateAdminUser(req: Request, res: Response) {
       return;
     }
 
+    await syncFirebaseStaffCustomClaims({
+      adminToken,
+      projectId: targetProject,
+      uid: createdUid,
+      role: targetRole,
+      status: cleanStatus,
+    });
+
     const successMessage =
       targetRole === 'admin'
         ? 'Admin successfully created'
@@ -1208,6 +1288,17 @@ app.post('/api/admin/update-user-status', async (req, res) => {
         body: JSON.stringify({
           localId: cleanUid,
           disableUser: Boolean(disabled),
+          ...(typeof role === 'string' && role
+            ? {
+                customAttributes: JSON.stringify({
+                  hrf_staff:
+                    !Boolean(disabled) &&
+                    ['super_admin', 'admin', 'manager'].includes(role),
+                  role,
+                  staff_status: Boolean(disabled) ? 'disabled' : 'active',
+                }),
+              }
+            : {}),
         }),
       }
     );

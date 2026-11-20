@@ -625,6 +625,30 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setAdminProfile(resolvedAdminRecord);
         setAccountStatus(resolvedStatus);
 
+        if (
+          currentUser.emailVerified &&
+          resolvedStatus === 'active' &&
+          resolvedRole !== 'customer'
+        ) {
+          void (async () => {
+            try {
+              const idToken = await currentUser.getIdToken();
+              const resp = await fetch('/api/auth/session-init', {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${idToken}` },
+              });
+              if (resp.ok) {
+                const payload = (await resp.json()) as { claimsSynced?: boolean };
+                if (payload.claimsSynced) {
+                  await currentUser.getIdToken(true);
+                }
+              }
+            } catch {
+              // Non-blocking claims sync
+            }
+          })();
+        }
+
         let latestRbacStatus: AccountStatus = resolvedStatus;
 
         // Live subscriptions so role/status/permission changes apply immediately
