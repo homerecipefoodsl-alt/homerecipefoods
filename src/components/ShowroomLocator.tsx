@@ -24,7 +24,14 @@ export function ShowroomLocator() {
   }
 
   const activeText = getShowroomText(activeShowroom);
-  const embedUrl = `https://maps.google.com/maps?q=${activeShowroom.lat},${activeShowroom.lng}&z=15&output=embed`;
+  const hasRealCoords =
+    Number.isFinite(activeShowroom.lat) &&
+    Number.isFinite(activeShowroom.lng) &&
+    (activeShowroom.lat !== 0 || activeShowroom.lng !== 0);
+  const mapQuery = hasRealCoords
+    ? `${activeShowroom.lat},${activeShowroom.lng}`
+    : activeText.addressEn || activeText.addressBn || activeText.nameEn || activeText.nameBn;
+  const embedUrl = `https://maps.google.com/maps?q=${encodeURIComponent(mapQuery)}&z=15&output=embed`;
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-12 lg:items-stretch">
@@ -49,7 +56,7 @@ export function ShowroomLocator() {
                   <p className="text-xs font-medium text-[#DC1F26]">
                     {st.areaBn}
                     {st.areaEn && st.areaEn !== st.areaBn ? ` · ${st.areaEn}` : ''}{' '}
-                    {sr.isMain ? '· Flagship' : ''}
+                    {sr.id === 'shah-garibullah-hs' ? '· Office & Outlet' : ''}
                   </p>
                   {languageMode !== 'en' && (
                     <h3 className="font-display mt-0.5 text-lg font-bold text-[#1C1917]">

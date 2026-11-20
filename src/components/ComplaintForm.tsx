@@ -1,7 +1,9 @@
-import { useState } from 'react';
-import { CheckCircle2, Lock, Upload, X } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { AlertCircle, CheckCircle2, Loader2, Lock, Upload, X } from 'lucide-react';
 import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { useStore } from '../context/StoreContext';
+import { CHATTOGRAM_OUTLETS, isDemoOrDummyShowroom } from '../data/outletsData';
+import { getShowroomText } from '../lib/bilingual';
 import { OperationType, db, handleFirestoreError } from '../lib/firebase';
 import { compressImageToDataUrl, generateComplaintReference } from '../lib/utils';
 import type { ComplaintCategory } from '../types';
@@ -15,23 +17,111 @@ const DEFAULT_COMPLAINT_CATEGORIES: ComplaintCategory[] = [
   'অন্যান্য',
 ];
 
+interface ShowroomOption {
+  id: string;
+  label: string;
+  saveName: string;
+}
+
+function normalizeLookupName(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9\u0980-\u09ff]+/g, '');
+}
+
 export function ComplaintForm() {
-  const { showrooms, siteSettings, user } = useStore();
+  const { showrooms, showroomsLoading, showroomsError, siteSettings, user } = useStore();
   const categoriesList =
     siteSettings.complaintCategories && siteSettings.complaintCategories.length > 0
       ? siteSettings.complaintCategories
       : DEFAULT_COMPLAINT_CATEGORIES;
 
+  const showroomOptions = useMemo<ShowroomOption[]>(() => {
+    const list: ShowroomOption[] = [];
+    const seenIds = new Set<string>();
+    const seenNames = new Set<string>();
+
+    // Official Home Recipe Foods outlets ("আমার শো-রুম")
+    CHATTOGRAM_OUTLETS.forEach((outlet) => {
+      if (outlet.status !== 'active') return;
+      const safeId = outlet.id.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 128);
+      if (!safeId || seenIds.has(safeId)) return;
+      seenIds.add(safeId);
+      seenNames.add(normalizeLookupName(outlet.nameEn));
+      seenNames.add(normalizeLookupName(outlet.nameBn));
+
+      const baseLabel = `${outlet.nameBn} — ${outlet.nameEn}`;
+      const displayLabel = outlet.type ? `${baseLabel} (${outlet.type})` : baseLabel;
+
+      list.push({
+        id: safeId,
+        label: displayLabel,
+        saveName: baseLabel.slice(0, 140),
+      });
+    });
+
+    // Merge any additional active non-demo Firestore showrooms cleanly without duplicating outlets
+    showrooms.forEach((sr) => {
+      if (!sr.id || sr.deleted || sr.visible === false || isDemoOrDummyShowroom(sr)) return;
+      const safeId = sr.id.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 128);
+      const st = getShowroomText(sr);
+      const normBn = normalizeLookupName(st.nameBn || sr.name || '');
+      const normEn = normalizeLookupName(st.nameEn || sr.nameEn || '');
+      if (
+        !safeId ||
+        seenIds.has(safeId) ||
+        (normBn && seenNames.has(normBn)) ||
+        (normEn && seenNames.has(normEn))
+      ) {
+        return;
+      }
+      seenIds.add(safeId);
+      if (normBn) seenNames.add(normBn);
+      if (normEn) seenNames.add(normEn);
+
+      const primaryName = st.nameBn || sr.name || st.nameEn || safeId;
+      const areaLabel = st.areaBn || sr.area || '';
+      const fullLabel = areaLabel ? `${primaryName} (${areaLabel})` : primaryName;
+
+      list.push({
+        id: safeId,
+        label: fullLabel,
+        saveName: fullLabel.slice(0, 140),
+      });
+    });
+
+    return list;
+  }, [showrooms]);
+
   const [customerName, setCustomerName] = useState('');
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
   const [category, setCategory] = useState<string>(categoriesList[0] ?? 'পণ্যের মান');
-  const [showroomId, setShowroomId] = useState(showrooms[0]?.id ?? 'general');
+  const [showroomId, setShowroomId] = useState<string>(
+    () => showroomOptions[0]?.id ?? 'general'
+  );
   const [message, setMessage] = useState('');
   const [attachmentImage, setAttachmentImage] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submittedRef, setSubmittedRef] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (categoriesList.length > 0 && !categoriesList.includes(category)) {
+      setCategory(categoriesList[0]);
+    }
+  }, [categoriesList, category]);
+
+  useEffect(() => {
+    if (showroomOptions.length === 0) {
+      if (showroomId !== 'general') setShowroomId('general');
+      return;
+    }
+    if (
+      showroomId !== 'general' &&
+      !showroomOptions.some((opt) => opt.id === showroomId)
+    ) {
+      setShowroomId(showroomOptions[0].id);
+    }
+  }, [showroomOptions, showroomId]);
 
   const handleImageChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -62,6 +152,10 @@ export function ComplaintForm() {
       setError('অনুগ্রহ করে সঠিক ফোন নম্বর দিন।');
       return;
     }
+    if (!showroomId) {
+      setError('অনুগ্রহ করে সংশ্লিষ্ট শোরুম নির্বাচন করুন।');
+      return;
+    }
     if (message.trim().length < 5) {
       setError('অনুগ্রহ করে আপনার অভিযোগ বিস্তারিত লিখুন (কমপক্ষে ৫ অক্ষর)।');
       return;
@@ -70,9 +164,11 @@ export function ComplaintForm() {
     setSubmitting(true);
     const id = `cmp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const rawRef = generateComplaintReference();
-    const prefix = (siteSettings.complaintRefPrefix || 'HRF').replace(/[^A-Z0-9]/gi, '').toUpperCase() || 'HRF';
+    const prefix =
+      (siteSettings.complaintRefPrefix || 'HRF').replace(/[^A-Z0-9]/gi, '').toUpperCase() ||
+      'HRF';
     const referenceCode = rawRef.replace(/^HRF-/, `${prefix}-`);
-    const selectedShowroom = showrooms.find((s) => s.id === showroomId);
+    const selectedOption = showroomOptions.find((s) => s.id === showroomId);
 
     try {
       await setDoc(doc(db, 'complaints', id), {
@@ -83,8 +179,8 @@ export function ComplaintForm() {
         phone: phone.trim().slice(0, 32),
         email: email.trim().slice(0, 254),
         category,
-        showroomId: selectedShowroom?.id ?? 'general',
-        showroomName: selectedShowroom?.name ?? 'সাধারণ / সব শোরুম',
+        showroomId: selectedOption?.id ?? 'general',
+        showroomName: selectedOption?.saveName ?? 'সাধারণ / একাধিক শোরুম',
         message: message.trim().slice(0, 3000),
         attachmentImage,
         status: 'New',
@@ -146,7 +242,7 @@ export function ComplaintForm() {
   return (
     <form
       onSubmit={handleSubmit}
-      className="rounded-2xl border border-[#E7E5E4] bg-white p-6 sm:p-8"
+      className="rounded-2xl border border-[#E7E5E4] bg-white p-5 sm:p-8"
     >
       <div className="mb-6 flex items-start gap-3 border-b border-[#F5F4F0] pb-4">
         <Lock className="mt-0.5 h-5 w-5 shrink-0 text-[#DC1F26]" />
@@ -161,64 +257,81 @@ export function ComplaintForm() {
       </div>
 
       {error && (
-        <div className="mb-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-xs font-medium text-red-800 sm:text-sm">
-          {error}
+        <div className="mb-5 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-xs font-medium text-red-800 sm:text-sm">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{error}</span>
         </div>
       )}
 
       <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
         <div>
-          <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
+          <label
+            htmlFor="complaint-name"
+            className="mb-1.5 block text-xs font-semibold text-[#1C1917]"
+          >
             আপনার নাম <span className="text-red-600">*</span>
           </label>
           <input
+            id="complaint-name"
             type="text"
             required
             maxLength={120}
             value={customerName}
             onChange={(e) => setCustomerName(e.target.value)}
             placeholder="আপনার পূর্ণ নাম"
-            className="w-full rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
+            className="min-h-[44px] w-full rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
           />
         </div>
 
         <div>
-          <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
+          <label
+            htmlFor="complaint-phone"
+            className="mb-1.5 block text-xs font-semibold text-[#1C1917]"
+          >
             ফোন নম্বর <span className="text-red-600">*</span>
           </label>
           <input
+            id="complaint-phone"
             type="tel"
             required
             maxLength={32}
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
             placeholder="01XXXXXXXXX"
-            className="w-full rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
+            className="min-h-[44px] w-full rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
           />
         </div>
 
         <div>
-          <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
+          <label
+            htmlFor="complaint-email"
+            className="mb-1.5 block text-xs font-semibold text-[#1C1917]"
+          >
             ইমেইল (ঐচ্ছিক)
           </label>
           <input
+            id="complaint-email"
             type="email"
             maxLength={254}
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder="example@email.com"
-            className="w-full rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
+            className="min-h-[44px] w-full rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
           />
         </div>
 
         <div>
-          <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
+          <label
+            htmlFor="complaint-category"
+            className="mb-1.5 block text-xs font-semibold text-[#1C1917]"
+          >
             অভিযোগের ধরন <span className="text-red-600">*</span>
           </label>
           <select
+            id="complaint-category"
             value={category}
             onChange={(e) => setCategory(e.target.value)}
-            className="w-full rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
+            className="min-h-[44px] w-full rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
           >
             {categoriesList.map((cat) => (
               <option key={cat} value={cat}>
@@ -229,28 +342,54 @@ export function ComplaintForm() {
         </div>
 
         <div className="sm:col-span-2">
-          <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-            সংশ্লিষ্ট শোরুম <span className="text-red-600">*</span>
-          </label>
+          <div className="mb-1.5 flex items-center justify-between gap-2">
+            <label
+              htmlFor="complaint-showroom"
+              className="block text-xs font-semibold text-[#1C1917]"
+            >
+              আমার শো-রুম / সংশ্লিষ্ট শোরুম <span className="text-red-600">*</span>
+            </label>
+            {showroomsLoading && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-[#78716C]">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                <span>শোরুম লোড হচ্ছে...</span>
+              </span>
+            )}
+          </div>
           <select
+            id="complaint-showroom"
+            required
             value={showroomId}
             onChange={(e) => setShowroomId(e.target.value)}
-            className="w-full rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
+            className="min-h-[44px] w-full rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
           >
-            {showrooms.map((sr) => (
-              <option key={sr.id} value={sr.id}>
-                {sr.name} ({sr.area})
-              </option>
-            ))}
-            <option value="general">সাধারণ / একাধিক শোরুম</option>
+            {showroomOptions.length === 0 ? (
+              <option value="general">সাধারণ / একাধিক শোরুম (General)</option>
+            ) : (
+              <>
+                {showroomOptions.map((sr) => (
+                  <option key={sr.id} value={sr.id}>
+                    {sr.label}
+                  </option>
+                ))}
+                <option value="general">সাধারণ / একাধিক শোরুম (General)</option>
+              </>
+            )}
           </select>
+          {showroomsError && (
+            <p className="mt-1.5 text-[11px] text-amber-800">{showroomsError}</p>
+          )}
         </div>
 
         <div className="sm:col-span-2">
-          <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
+          <label
+            htmlFor="complaint-message"
+            className="mb-1.5 block text-xs font-semibold text-[#1C1917]"
+          >
             বিস্তারিত অভিযোগ <span className="text-red-600">*</span>
           </label>
           <textarea
+            id="complaint-message"
             required
             rows={4}
             maxLength={3000}
@@ -303,7 +442,7 @@ export function ComplaintForm() {
         <button
           type="submit"
           disabled={submitting}
-          className="w-full cursor-pointer rounded-lg bg-[#1C1917] px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-[#DC1F26] disabled:opacity-50 sm:w-auto"
+          className="min-h-[44px] w-full cursor-pointer rounded-lg bg-[#1C1917] px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-[#DC1F26] disabled:opacity-50 sm:w-auto"
         >
           {submitting ? 'জমা দেওয়া হচ্ছে...' : 'অভিযোগ জমা দিন'}
         </button>

@@ -1,18 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import {
-  ArrowLeft,
-  Check,
-  Info,
-  MapPin,
-  Phone,
-  Scale,
-  Sparkles,
-  Store,
-  UtensilsCrossed,
-} from 'lucide-react';
+import { ExternalLink, ArrowLeft, Check, Info, MapPin, Navigation, Phone, Scale, Sparkles, Store, UtensilsCrossed } from 'lucide-react';
 import { ProductCard } from '../components/ProductCard';
 import { useStore } from '../context/StoreContext';
+import { isDemoOrDummyShowroom } from '../data/outletsData';
 import { resolveAssetUrl } from '../lib/assets';
 import {
   getOccasionText,
@@ -92,7 +83,8 @@ export function ProductDetailPage() {
   const productSizes = Array.isArray(product.sizes) ? product.sizes : [];
   const productIngredients = Array.isArray(product.ingredients) ? product.ingredients : [];
 
-  const productShowrooms = showrooms.filter((s) =>
+  const approvedShowrooms = showrooms.filter((s) => !isDemoOrDummyShowroom(s));
+  const productShowrooms = approvedShowrooms.filter((s) =>
     productShowroomIds.includes(s.id)
   );
   const productOccasions = occasions.filter((o) =>
@@ -383,7 +375,7 @@ export function ProductDetailPage() {
               <span>শোরুমে যোগাযোগ করুন</span>
             </button>
             <Link
-              to="/showrooms"
+              to="/outlets"
               className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg border border-[#D6D3D1] bg-white px-6 py-3.5 text-sm font-semibold text-[#1C1917] transition-colors hover:border-[#1C1917]"
             >
               <Store className="h-4 w-4" />
@@ -395,41 +387,69 @@ export function ProductDetailPage() {
           {(showContactSheet || productShowrooms.length > 0) && (
             <div className="mt-6 rounded-xl border border-[#E7E5E4] bg-white p-5">
               <p className="text-xs font-semibold text-[#DC1F26]">
-                যে সকল শোরুমে পাওয়া যাচ্ছে · Available Showrooms
+                যে সকল শোরুমে পাওয়া যাচ্ছে · Available Outlets
               </p>
               <div className="mt-3 space-y-3">
-                {(productShowrooms.length > 0 ? productShowrooms : showrooms).map(
-                  (sr) => {
-                    const st = getShowroomText(sr);
-                    return (
-                      <div
-                        key={sr.id}
-                        className="flex flex-col justify-between gap-2 border-b border-[#F5F4F0] pb-3 last:border-b-0 last:pb-0 sm:flex-row sm:items-center"
-                      >
-                        <div>
-                          <p className="text-sm font-semibold text-[#1C1917]">
-                            {st.nameBn}
-                            {st.nameEn && st.nameEn !== st.nameBn && (
-                              <span className="ml-1.5 text-xs font-normal text-[#78716C]">
-                                · {st.nameEn}
-                              </span>
-                            )}
-                          </p>
-                          <p className="flex items-center gap-1 text-xs text-[#57534E]">
-                            <MapPin className="h-3 w-3 text-[#DC1F26]" />
-                            <span>{st.areaBn} · {st.openingHoursBn}</span>
-                          </p>
-                        </div>
-                        <a
-                          href={`tel:${sr.phone.replace(/\s+/g, '')}`}
-                          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-[#F5F4F0] px-3 py-1.5 font-mono tabular-nums text-xs font-semibold text-[#1C1917] transition-colors hover:bg-[#DC1F26] hover:text-white"
+                {(productShowrooms.length > 0 ? productShowrooms : approvedShowrooms).length ===
+                0 ? (
+                  <p className="text-xs text-[#57534E]">
+                    এই মুহূর্তে কোনো শো-রুম তথ্য পাওয়া যায়নি।
+                  </p>
+                ) : (
+                  (productShowrooms.length > 0 ? productShowrooms : approvedShowrooms).map(
+                    (sr) => {
+                      const st = getShowroomText(sr);
+                      return (
+                        <div
+                          key={sr.id}
+                          className="flex flex-col justify-between gap-2 border-b border-[#F5F4F0] pb-3 last:border-b-0 last:pb-0 sm:flex-row sm:items-center"
                         >
-                          <Phone className="h-3 w-3" />
-                          <span>{sr.phone}</span>
-                        </a>
-                      </div>
-                    );
-                  }
+                          <div>
+                            <p className="text-sm font-semibold text-[#1C1917]">
+                              {st.nameBn}
+                              {st.nameEn && st.nameEn !== st.nameBn && (
+                                <span className="ml-1.5 text-xs font-normal text-[#78716C]">
+                                  · {st.nameEn}
+                                </span>
+                              )}
+                              {sr.id === 'shah-garibullah-hs' && (
+                                <span className="ml-2 text-[11px] font-bold text-[#B91C1C]">
+                                  Office &amp; Outlet
+                                </span>
+                              )}
+                            </p>
+                            <p className="flex items-center gap-1 text-xs text-[#57534E]">
+                              <MapPin className="h-3 w-3 shrink-0 text-[#DC1F26]" />
+                              <span>
+                                {st.addressBn || st.areaBn} · {st.openingHoursBn}
+                              </span>
+                            </p>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            <a
+                              href={`tel:${sr.phone.replace(/\s+/g, '')}`}
+                              className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-[#F5F4F0] px-3 py-1.5 font-mono tabular-nums text-xs font-semibold text-[#1C1917] transition-colors hover:bg-[#DC1F26] hover:text-white"
+                            >
+                              <Phone className="h-3 w-3" />
+                              <span>{sr.phone}</span>
+                            </a>
+                            {sr.mapUrl && (
+                              <a
+                                href={sr.mapUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                aria-label={`Get directions to ${st.nameEn || st.nameBn}`}
+                                className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-lg border border-[#D6D3D1] px-2.5 py-1.5 text-xs font-semibold text-[#1C1917] transition-colors hover:border-[#1C1917]"
+                              >
+                                <Navigation className="h-3 w-3 text-[#DC1F26]" />
+                                <ExternalLink className="h-2.5 w-2.5 text-[#78716C]" />
+                              </a>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    }
+                  )
                 )}
               </div>
             </div>

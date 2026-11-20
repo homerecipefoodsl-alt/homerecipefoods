@@ -27,7 +27,7 @@ export function ProductCard({ product }: ProductCardProps) {
   return (
     <Link
       to={`/product/${product.slug || product.id}`}
-      className="group flex flex-col overflow-hidden rounded-xl border border-[#E7E5E4] bg-white transition-all duration-200 hover:-translate-y-0.5 hover:border-[#D6D3D1] hover:shadow-md"
+      className="group flex flex-col overflow-hidden rounded-xl border border-[#E7E5E4] bg-white transition-all duration-200 hover:-translate-y-0.5 hover:border-[#1C1917]/25 hover:shadow-sm"
     >
       {/* Consistent 4:3 Image Frame */}
       <div className="relative aspect-[4/3] w-full overflow-hidden bg-[#F5F4F0]">
@@ -42,8 +42,8 @@ export function ProductCard({ product }: ProductCardProps) {
             className="h-full w-full object-cover transition-transform duration-300 ease-out group-hover:scale-105"
           />
         ) : (
-          <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 bg-gradient-to-br from-[#F5F4F0] to-[#E7E5E4] p-3 text-center">
-            <UtensilsCrossed className="h-6 w-6 text-[#B91C1C]/60" />
+          <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 bg-[#F5F4F0] p-3 text-center">
+            <UtensilsCrossed className="h-5 w-5 text-[#A8A29E]" />
             <span className="line-clamp-1 text-[11px] font-semibold text-[#57534E]">
               {text.nameBn || text.nameEn}
             </span>
@@ -51,7 +51,7 @@ export function ProductCard({ product }: ProductCardProps) {
           </div>
         )}
         {highlightTag && (
-          <span className="absolute left-2 top-2 rounded-md bg-[#1C1917]/80 px-2 py-0.5 text-[10px] font-semibold text-[#FACC15] backdrop-blur-xs">
+          <span className="absolute left-2 top-2 rounded bg-[#1C1917]/85 px-2 py-0.5 text-[10px] font-semibold text-[#FACC15]">
             {highlightTag}
           </span>
         )}

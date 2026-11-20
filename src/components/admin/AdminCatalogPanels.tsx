@@ -1,13 +1,17 @@
 import { useMemo, useState } from 'react';
 import {
+  AlertCircle,
   Archive,
   Camera,
   Check,
+  CheckCircle2,
   Database,
   Edit3,
   Eye,
   EyeOff,
   ImageOff,
+  ImagePlus,
+  Loader2,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -18,12 +22,18 @@ import {
 } from 'lucide-react';
 import {
   deleteDoc,
+  deleteField,
   doc,
   serverTimestamp,
   setDoc,
   updateDoc,
 } from 'firebase/firestore';
 import { useStore } from '../../context/StoreContext';
+import {
+  CHATTOGRAM_OUTLETS,
+  CONFIRMED_DEMO_SHOWROOM_IDS,
+  isDemoOrDummyShowroom,
+} from '../../data/outletsData';
 import { resolveAssetUrl } from '../../lib/assets';
 import {
   getCategoryText,
@@ -32,7 +42,8 @@ import {
   getShowroomText,
 } from '../../lib/bilingual';
 import { OperationType, handleFirestoreError, requireDb } from '../../lib/firebase';
-import { compressImageToDataUrl, formatBdtPrice, toSlug } from '../../lib/utils';
+import { uploadCatalogImageToStorage } from '../../lib/productStorage';
+import { formatBdtPrice, toSlug } from '../../lib/utils';
 import type {
   Category,
   Occasion,
@@ -69,8 +80,18 @@ export function AdminProductsPanel() {
   const [missingImageOnly, setMissingImageOnly] = useState(false);
   const [page, setPage] = useState(1);
   const [uploadingRowId, setUploadingRowId] = useState<string | null>(null);
+  const [rowUploadProgress, setRowUploadProgress] = useState<number | null>(null);
+  const [editorUploadProgress, setEditorUploadProgress] = useState<number | null>(null);
+  const [editorUploadLabel, setEditorUploadLabel] = useState<string>('');
+  const [editorUploadError, setEditorUploadError] = useState<string | null>(null);
+  const [dragActive, setDragActive] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [feedback, setFeedback] = useState<string | null>(null);
+  const [deletingProduct, setDeletingProduct] = useState(false);
+  const [pendingDeleteProduct, setPendingDeleteProduct] = useState<Product | null>(null);
+  const [feedback, setFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
 
   const serializeNonImageState = (
     p: Product,
@@ -141,7 +162,10 @@ export function AdminProductsPanel() {
     sizes: ['Regular'],
     weight: '',
     occasions: [],
-    showrooms: allShowrooms.map((s) => s.id),
+    showrooms: allShowrooms
+      .filter((s) => s.visible !== false && !s.deleted && !isDemoOrDummyShowroom(s))
+      .slice(0, 20)
+      .map((s) => s.id),
     availability: 'In Showroom',
     importantNotes: '',
     featured: false,
@@ -201,19 +225,78 @@ export function AdminProductsPanel() {
       setSizesText('Regular');
       setOriginalSnapshot('');
     }
+    setEditorUploadProgress(null);
+    setEditorUploadLabel('');
+    setEditorUploadError(null);
     setFeedback(null);
   };
 
-  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !editing) return;
-    try {
-      const url = await compressImageToDataUrl(file, 900, 0.78);
-      const nextImages = [url, ...editing.images.filter(Boolean)].slice(0, 6);
-      setEditing({ ...editing, image: url, images: nextImages });
-    } catch {
-      setFeedback('ছবি আপলোড ব্যর্থ হয়েছে।');
+  const uploadProductFilesToStorage = async (files: File[]) => {
+    if (!editing || files.length === 0) return;
+
+    const currentImages = editing.images.filter(Boolean);
+    const remainingSlots = Math.max(0, 6 - currentImages.length);
+    if (remainingSlots <= 0) {
+      setEditorUploadError('একটি পণ্যে সর্বোচ্চ ৬টি ছবি রাখা যাবে। নতুন ছবি যোগ করতে একটি ছবি সরান।');
+      return;
     }
+
+    const queue = files.slice(0, remainingSlots);
+    setEditorUploadError(null);
+
+    let accumulatedImages = [...currentImages];
+
+    try {
+      for (let i = 0; i < queue.length; i += 1) {
+        const file = queue[i];
+        setEditorUploadLabel(
+          queue.length > 1 ? `${file.name} (${i + 1}/${queue.length})` : file.name
+        );
+        setEditorUploadProgress(5);
+
+        const result = await uploadCatalogImageToStorage({
+          folder: 'products',
+          entityId: editing.id,
+          file,
+          onProgress: (pct) => setEditorUploadProgress(pct),
+        });
+
+        accumulatedImages = [
+          result.downloadUrl,
+          ...accumulatedImages.filter((u) => u !== result.downloadUrl),
+        ].slice(0, 6);
+
+        setEditing((prev) =>
+          prev
+            ? {
+                ...prev,
+                image: accumulatedImages[0] ?? '',
+                images: accumulatedImages,
+              }
+            : null
+        );
+      }
+
+      setFeedback({
+        type: 'success',
+        message: 'ছবি Firebase Storage-এ সফলভাবে আপলোড হয়েছে। পরিবর্তন স্থায়ী করতে "সংরক্ষণ করুন" চাপুন।',
+      });
+    } catch (err) {
+      const msg =
+        err instanceof Error && err.message
+          ? err.message
+          : 'ছবি আপলোড ব্যর্থ হয়েছে। ফাইল ফরম্যাট ও Firebase Storage যাচাই করুন।';
+      setEditorUploadError(msg);
+    } finally {
+      setEditorUploadProgress(null);
+      setEditorUploadLabel('');
+    }
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = '';
+    await uploadProductFilesToStorage(fileList);
   };
 
   const handleQuickRowImageUpload = async (
@@ -224,14 +307,23 @@ export function AdminProductsPanel() {
     e.target.value = '';
     if (!file || !canEdit) return;
     setUploadingRowId(prod.id);
+    setRowUploadProgress(5);
     setFeedback(null);
     try {
-      const url = await compressImageToDataUrl(file, 900, 0.78);
+      const uploaded = await uploadCatalogImageToStorage({
+        folder: 'products',
+        entityId: prod.id,
+        file,
+        onProgress: (pct) => setRowUploadProgress(pct),
+      });
       const firestore = requireDb();
       const existingList = Array.isArray(prod.images) ? prod.images.filter(Boolean) : [];
-      const nextImages = [url, ...existingList].slice(0, 6);
+      const nextImages = [
+        uploaded.downloadUrl,
+        ...existingList.filter((u) => u !== uploaded.downloadUrl),
+      ].slice(0, 6);
       await updateDoc(doc(firestore, 'products', prod.id), {
-        image: url,
+        image: uploaded.downloadUrl,
         images: nextImages,
         updatedAt: serverTimestamp(),
       });
@@ -240,11 +332,18 @@ export function AdminProductsPanel() {
         'products',
         prod.id,
         prod.nameEn || prod.name,
-        `Uploaded photo for ${prod.nameBn || prod.name}`
+        `Uploaded photo to Firebase Storage for ${prod.nameBn || prod.name}`
       );
-      setFeedback(`"${prod.nameBn || prod.name}" এর ছবি সফলভাবে আপডেট করা হয়েছে।`);
+      setFeedback({
+        type: 'success',
+        message: `"${prod.nameBn || prod.name}" এর ছবি Firebase Storage-এ সফলভাবে আপডেট হয়েছে।`,
+      });
     } catch (err) {
-      setFeedback('ছবি আপলোড ব্যর্থ হয়েছে।');
+      const msg =
+        err instanceof Error && err.message
+          ? err.message
+          : 'ছবি আপলোড ব্যর্থ হয়েছে।';
+      setFeedback({ type: 'error', message: msg });
       try {
         handleFirestoreError(err, OperationType.WRITE, `products/${prod.id}`);
       } catch {
@@ -252,6 +351,7 @@ export function AdminProductsPanel() {
       }
     } finally {
       setUploadingRowId(null);
+      setRowUploadProgress(null);
     }
   };
 
@@ -259,11 +359,15 @@ export function AdminProductsPanel() {
     setFeedback(null);
     try {
       const summary = await importProductMasterList();
-      setFeedback(
-        `মাস্টার তালিকা সিঙ্ক সম্পন্ন: মোট ${summary.totalMasterCount}টি, নতুন যোগ ${summary.newlyAddedCount}টি, স্কিপ (বিদ্যমান) ${summary.skippedExistingCount}টি।`
-      );
+      setFeedback({
+        type: 'success',
+        message: `মাস্টার তালিকা সিঙ্ক সম্পন্ন: মোট ${summary.totalMasterCount}টি, নতুন যোগ ${summary.newlyAddedCount}টি, স্কিপ (বিদ্যমান) ${summary.skippedExistingCount}টি।`,
+      });
     } catch {
-      setFeedback('মাস্টার প্রোডাক্ট তালিকা ইমপোর্ট করতে সমস্যা হয়েছে।');
+      setFeedback({
+        type: 'error',
+        message: 'মাস্টার প্রোডাক্ট তালিকা ইমপোর্ট করতে সমস্যা হয়েছে।',
+      });
     }
   };
 
@@ -274,11 +378,18 @@ export function AdminProductsPanel() {
     const nameBn = editing.name.trim();
     const nameEn = editing.nameEn.trim();
     if (!nameBn) {
-      setFeedback('অনুগ্রহ করে বাংলা নাম দিন।');
+      setFeedback({ type: 'error', message: 'অনুগ্রহ করে বাংলা নাম দিন।' });
       return;
     }
     if (!nameEn) {
-      setFeedback('অনুগ্রহ করে English Name দিন।');
+      setFeedback({ type: 'error', message: 'অনুগ্রহ করে English Name দিন।' });
+      return;
+    }
+    if (editorUploadProgress !== null) {
+      setFeedback({
+        type: 'error',
+        message: 'ছবি আপলোড সম্পন্ন হওয়া পর্যন্ত অনুগ্রহ করে অপেক্ষা করুন।',
+      });
       return;
     }
 
@@ -310,13 +421,13 @@ export function AdminProductsPanel() {
           `Updated product photo only for ${nameBn}`
         );
         setEditing(null);
-        setFeedback('পণ্যের ছবি নিরাপদে সংরক্ষণ করা হয়েছে।');
+        setFeedback({ type: 'success', message: 'পণ্যের ছবি নিরাপদে সংরক্ষণ করা হয়েছে।' });
         return;
       }
 
       const catObj = allCategories.find((c) => c.slug === editing.category);
       const catText = catObj ? getCategoryText(catObj) : null;
-      const slug = editing.slug.trim() || toSlug(nameEn || nameBn);
+      const slug = toSlug(editing.slug.trim() || nameEn || nameBn);
       const ingredients = ingredientsText
         .split(',')
         .map((s) => s.trim())
@@ -333,44 +444,49 @@ export function AdminProductsPanel() {
       const shortDescBn = editing.shortDescription.trim() || shortDescEn || nameBn;
       const fullDescEn = (editing.descriptionEn ?? '').trim() || shortDescEn;
       const fullDescBn = editing.description.trim() || shortDescBn || fullDescEn || nameBn;
+      const numericPrice = Number.isFinite(Number(editing.price))
+        ? Math.max(0, Number(editing.price))
+        : 0;
 
       const payload: Record<string, unknown> = {
         id: editing.id,
-        name: nameBn,
-        nameBn,
-        nameEn,
-        name_bn: nameBn,
-        name_en: nameEn,
+        name: nameBn.slice(0, 160),
+        nameBn: nameBn.slice(0, 160),
+        nameEn: nameEn.slice(0, 160),
+        name_bn: nameBn.slice(0, 160),
+        name_en: nameEn.slice(0, 160),
         slug,
         category: editing.category,
-        categoryName: editing.categoryName || catText?.nameBn || editing.category,
-        categoryNameEn: editing.categoryNameEn || catText?.nameEn || '',
-        productType: editing.productType.trim() || 'Bakery & Sweets',
-        price: Number(editing.price) || 0,
-        priceUnit: resolvedUnit,
-        unit: resolvedUnit,
-        shortDescription: shortDescBn,
-        shortDescriptionEn: shortDescEn,
-        short_description_bn: shortDescBn,
-        short_description_en: shortDescEn,
-        description: fullDescBn,
-        descriptionEn: fullDescEn,
-        description_bn: fullDescBn,
-        description_en: fullDescEn,
+        categoryName: (editing.categoryName || catText?.nameBn || editing.category).slice(0, 120),
+        categoryNameEn: (editing.categoryNameEn || catText?.nameEn || '').slice(0, 120),
+        productType: (editing.productType.trim() || 'Bakery & Sweets').slice(0, 120),
+        price: numericPrice,
+        priceUnit: resolvedUnit.slice(0, 60),
+        unit: resolvedUnit.slice(0, 60),
+        shortDescription: shortDescBn.slice(0, 300),
+        shortDescriptionEn: shortDescEn.slice(0, 300),
+        short_description_bn: shortDescBn.slice(0, 300),
+        short_description_en: shortDescEn.slice(0, 300),
+        description: fullDescBn.slice(0, 4000),
+        descriptionEn: fullDescEn.slice(0, 4000),
+        description_bn: fullDescBn.slice(0, 4000),
+        description_en: fullDescEn.slice(0, 4000),
         image: primaryImage,
         images: nextImages,
         ingredients,
         sizes,
-        weight: editing.weight.trim(),
+        weight: editing.weight.trim().slice(0, 80),
         occasions: editing.occasions.slice(0, 15),
-        showrooms: editing.showrooms.slice(0, 20),
+        showrooms: editing.showrooms
+          .filter((sid) => !CONFIRMED_DEMO_SHOWROOM_IDS.has(sid))
+          .slice(0, 20),
         availability: editing.availability,
-        importantNotes: editing.importantNotes.trim(),
+        importantNotes: editing.importantNotes.trim().slice(0, 800),
         featured: Boolean(editing.featured),
         popular: Boolean(editing.popular),
         visible: editing.visible !== false,
         deleted: Boolean(editing.deleted),
-        display_order: Number(editing.display_order) || 1,
+        display_order: Math.max(0, Number(editing.display_order) || 1),
         status: editing.deleted ? 'archived' : editing.visible === false ? 'draft' : 'published',
         updatedAt: serverTimestamp(),
       };
@@ -378,14 +494,29 @@ export function AdminProductsPanel() {
       if (editing.masterKey) {
         payload.masterKey = editing.masterKey;
       }
-      if (typeof editing.old_price === 'number' && editing.old_price > 0) {
+
+      const hasValidOldPrice =
+        typeof editing.old_price === 'number' &&
+        Number.isFinite(editing.old_price) &&
+        editing.old_price > 0;
+      if (hasValidOldPrice) {
         payload.old_price = editing.old_price;
+      } else if (!isNew) {
+        payload.old_price = deleteField();
       }
-      if (editing.discount?.trim()) {
-        payload.discount = editing.discount.trim();
+
+      const trimmedDiscount = editing.discount?.trim() ?? '';
+      if (trimmedDiscount) {
+        payload.discount = trimmedDiscount.slice(0, 60);
+      } else if (!isNew) {
+        payload.discount = '';
       }
-      if (editing.price_label?.trim()) {
-        payload.price_label = editing.price_label.trim();
+
+      const trimmedPriceLabel = editing.price_label?.trim() ?? '';
+      if (trimmedPriceLabel) {
+        payload.price_label = trimmedPriceLabel.slice(0, 80);
+      } else if (!isNew) {
+        payload.price_label = '';
       }
 
       if (isNew) {
@@ -399,9 +530,12 @@ export function AdminProductsPanel() {
         await logAdminActivity('update', 'products', editing.id, nameEn, `Updated product ${nameBn}`);
       }
       setEditing(null);
-      setFeedback('পণ্য সফলভাবে সংরক্ষণ করা হয়েছে।');
+      setFeedback({ type: 'success', message: 'পণ্য সফলভাবে সংরক্ষণ করা হয়েছে।' });
     } catch (err) {
-      setFeedback('সংরক্ষণে সমস্যা হয়েছে। প্রথমে Firebase সংযোগ ও ডেমো ক্যাটালগ যাচাই করুন।');
+      setFeedback({
+        type: 'error',
+        message: 'সংরক্ষণে সমস্যা হয়েছে। ফিল্ডগুলোর তথ্য ও Firebase অনুমতি যাচাই করুন।',
+      });
       try {
         handleFirestoreError(err, OperationType.WRITE, `products/${editing.id}`);
       } catch {
@@ -428,7 +562,10 @@ export function AdminProductsPanel() {
         prod.nameEn || prod.name
       );
     } catch {
-      setFeedback('আপডেট করার আগে Firebase সংযোগ ও ক্যাটালগ যাচাই করুন।');
+      setFeedback({
+        type: 'error',
+        message: 'আপডেট করার আগে Firebase সংযোগ ও অনুমতি যাচাই করুন।',
+      });
     }
   };
 
@@ -447,25 +584,37 @@ export function AdminProductsPanel() {
         prod.id,
         prod.nameEn || prod.name
       );
-      setFeedback(nextDeleted ? 'পণ্যটি আর্কাইভ করা হয়েছে।' : 'পণ্যটি পুনরুদ্ধার করা হয়েছে।');
+      setFeedback({
+        type: 'success',
+        message: nextDeleted ? 'পণ্যটি আর্কাইভ করা হয়েছে।' : 'পণ্যটি পুনরুদ্ধার করা হয়েছে।',
+      });
     } catch {
-      setFeedback('আর্কাইভ পরিবর্তন ব্যর্থ হয়েছে।');
+      setFeedback({ type: 'error', message: 'আর্কাইভ পরিবর্তন ব্যর্থ হয়েছে।' });
     }
   };
 
-  const handlePermanentDelete = async (prod: Product) => {
+  const confirmPermanentDelete = async () => {
+    if (!pendingDeleteProduct) return;
+    const target = pendingDeleteProduct;
+    setDeletingProduct(true);
     try {
       const firestore = requireDb();
-      await deleteDoc(doc(firestore, 'products', prod.id));
-      await logAdminActivity('delete', 'products', prod.id, prod.nameEn || prod.name);
-      setFeedback('পণ্যটি স্থায়ীভাবে ডিলিট করা হয়েছে।');
+      await deleteDoc(doc(firestore, 'products', target.id));
+      await logAdminActivity('delete', 'products', target.id, target.nameEn || target.name);
+      if (editing?.id === target.id) {
+        setEditing(null);
+      }
+      setPendingDeleteProduct(null);
+      setFeedback({ type: 'success', message: 'পণ্যটি স্থায়ীভাবে ডিলিট করা হয়েছে।' });
     } catch (err) {
-      setFeedback('ডিলিট করতে সমস্যা হয়েছে।');
+      setFeedback({ type: 'error', message: 'ডিলিট করতে সমস্যা হয়েছে।' });
       try {
-        handleFirestoreError(err, OperationType.DELETE, `products/${prod.id}`);
+        handleFirestoreError(err, OperationType.DELETE, `products/${target.id}`);
       } catch {
         // Logged
       }
+    } finally {
+      setDeletingProduct(false);
     }
   };
 
@@ -477,7 +626,7 @@ export function AdminProductsPanel() {
         updatedAt: serverTimestamp(),
       });
     } catch {
-      setFeedback('আপডেট করার আগে ডেমো ক্যাটালগ Firestore-এ সেভ করুন।');
+      setFeedback({ type: 'error', message: 'Featured পরিবর্তন ব্যর্থ হয়েছে।' });
     }
   };
 
@@ -588,8 +737,19 @@ export function AdminProductsPanel() {
       )}
 
       {feedback && (
-        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-xs font-medium text-emerald-800">
-          {feedback}
+        <div
+          className={`flex items-start gap-2 rounded-lg border px-4 py-2.5 text-xs font-medium ${
+            feedback.type === 'error'
+              ? 'border-red-200 bg-red-50 text-red-800'
+              : 'border-emerald-200 bg-emerald-50 text-emerald-800'
+          }`}
+        >
+          {feedback.type === 'error' ? (
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          ) : (
+            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+          )}
+          <span>{feedback.message}</span>
         </div>
       )}
 
@@ -1022,48 +1182,145 @@ export function AdminProductsPanel() {
               </div>
             </div>
 
-            {/* Images */}
-            <div className="sm:col-span-2 lg:col-span-3">
-              <p className="mb-1.5 text-xs font-semibold text-[#1C1917]">
-                পণ্যের ছবি (আপলোড করুন)
-              </p>
-              <div className="flex flex-wrap items-center gap-3">
+            {/* Product Images (Firebase Storage Drag-and-Drop & Multi-Image Uploader) */}
+            <div className="sm:col-span-2 lg:col-span-3 rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-xs font-bold text-[#1C1917]">
+                    পণ্যের ছবি (Firebase Storage Upload)
+                  </p>
+                  <p className="text-[11px] text-[#57534E]">
+                    JPG, JPEG, PNG বা WEBP ফরম্যাট (সর্বোচ্চ 5 MB/ছবি, সর্বোচ্চ ৬টি ছবি)। প্রথম ছবিটি প্রধান থাম্বনেইল হিসেবে দেখাবে।
+                  </p>
+                </div>
+                <span className="font-mono text-[11px] font-semibold text-[#57534E]">
+                  {editing.images.length}/6 ছবি
+                </span>
+              </div>
+
+              {editorUploadError && (
+                <div className="mt-3 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-800">
+                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>{editorUploadError}</span>
+                </div>
+              )}
+
+              {editorUploadProgress !== null && (
+                <div className="mt-3 rounded-lg border border-[#E7E5E4] bg-white p-3">
+                  <div className="flex items-center justify-between text-[11px] font-semibold text-[#1C1917]">
+                    <span className="inline-flex items-center gap-1.5 truncate">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-[#DC1F26]" />
+                      <span className="truncate">আপলোড হচ্ছে: {editorUploadLabel}</span>
+                    </span>
+                    <span className="font-mono tabular-nums text-[#DC1F26]">
+                      {editorUploadProgress}%
+                    </span>
+                  </div>
+                  <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[#F5F4F0]">
+                    <div
+                      className="h-full bg-[#DC1F26] transition-all duration-150"
+                      style={{ width: `${editorUploadProgress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
                 {editing.images.map((img, i) => (
                   <div
-                    key={i}
-                    className="relative h-20 w-24 overflow-hidden rounded-lg border border-[#D6D3D1]"
+                    key={`${img.slice(0, 32)}-${i}`}
+                    className={`group relative flex flex-col overflow-hidden rounded-lg border bg-white ${
+                      i === 0 ? 'border-[#DC1F26]' : 'border-[#D6D3D1]'
+                    }`}
                   >
-                    <img
-                      src={resolveAssetUrl(img)}
-                      alt=""
-                      className="h-full w-full object-cover"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const updated = editing.images.filter((_, idx) => idx !== i);
-                        setEditing({
-                          ...editing,
-                          image: updated[0] ?? '',
-                          images: updated,
-                        });
-                      }}
-                      className="absolute right-1 top-1 rounded-full bg-black/70 p-0.5 text-white"
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
+                    <div className="relative aspect-[4/3] w-full bg-[#F5F4F0]">
+                      <img
+                        src={resolveAssetUrl(img)}
+                        alt={`Product preview ${i + 1}`}
+                        className="h-full w-full object-cover"
+                      />
+                      {i === 0 && (
+                        <span className="absolute left-1.5 top-1.5 rounded bg-[#1C1917]/85 px-1.5 py-0.5 text-[9px] font-bold text-[#FACC15]">
+                          প্রধান ছবি
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        title="তালিকা থেকে সরান"
+                        onClick={() => {
+                          const updated = editing.images.filter((_, idx) => idx !== i);
+                          setEditing({
+                            ...editing,
+                            image: updated[0] ?? '',
+                            images: updated,
+                          });
+                        }}
+                        className="absolute right-1.5 top-1.5 cursor-pointer rounded-full bg-black/75 p-1 text-white transition-colors hover:bg-[#DC1F26]"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                    {i > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const reordered = [
+                            img,
+                            ...editing.images.filter((_, idx) => idx !== i),
+                          ];
+                          setEditing({
+                            ...editing,
+                            image: reordered[0] ?? '',
+                            images: reordered,
+                          });
+                        }}
+                        className="cursor-pointer border-t border-[#F5F4F0] bg-white px-2 py-1 text-[10px] font-semibold text-[#57534E] hover:bg-[#FAFAF8] hover:text-[#DC1F26]"
+                      >
+                        প্রধান করুন
+                      </button>
+                    )}
                   </div>
                 ))}
-                <label className="flex h-20 cursor-pointer items-center gap-2 rounded-lg border border-dashed border-[#D6D3D1] px-4 text-xs font-medium text-[#57534E] hover:border-[#DC1F26]">
-                  <Upload className="h-4 w-4" />
-                  <span>ছবি আপলোড</span>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={handleImageUpload}
-                    className="hidden"
-                  />
-                </label>
+
+                {editing.images.length < 6 && (
+                  <label
+                    onDragOver={(ev) => {
+                      ev.preventDefault();
+                      setDragActive(true);
+                    }}
+                    onDragLeave={() => setDragActive(false)}
+                    onDrop={(ev) => {
+                      ev.preventDefault();
+                      setDragActive(false);
+                      const dropped = ev.dataTransfer.files
+                        ? Array.from(ev.dataTransfer.files)
+                        : [];
+                      void uploadProductFilesToStorage(dropped);
+                    }}
+                    className={`flex aspect-[4/3] cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border-2 border-dashed px-3 text-center text-[11px] font-semibold transition-colors ${
+                      dragActive
+                        ? 'border-[#DC1F26] bg-red-50/50 text-[#DC1F26]'
+                        : 'border-[#D6D3D1] bg-white text-[#57534E] hover:border-[#DC1F26] hover:text-[#1C1917]'
+                    }`}
+                  >
+                    {editorUploadProgress !== null ? (
+                      <Loader2 className="h-5 w-5 animate-spin text-[#DC1F26]" />
+                    ) : (
+                      <ImagePlus className="h-5 w-5 text-[#DC1F26]" />
+                    )}
+                    <span>
+                      {editorUploadProgress !== null ? 'আপলোড হচ্ছে...' : 'ছবি যোগ / টেনে আনুন'}
+                    </span>
+                    <input
+                      type="file"
+                      multiple
+                      accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                      disabled={editorUploadProgress !== null}
+                      onChange={handleImageUpload}
+                      className="hidden"
+                    />
+                  </label>
+                )}
               </div>
             </div>
 
@@ -1277,24 +1534,30 @@ export function AdminProductsPanel() {
                           {canEdit && (
                             <>
                               <label
-                                title="শুধু ছবি আপলোড করুন"
+                                title="Firebase Storage-এ ছবি আপলোড করুন"
                                 className={`inline-flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1.5 text-[11px] font-semibold transition-colors ${
                                   thumbSrc
                                     ? 'border-[#E7E5E4] text-[#57534E] hover:border-[#1C1917] hover:text-[#1C1917]'
                                     : 'border-amber-300 bg-amber-50 text-amber-800 hover:border-amber-500'
                                 }`}
                               >
-                                <Camera className="h-3.5 w-3.5" />
+                                {uploadingRowId === p.id ? (
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[#DC1F26]" />
+                                ) : (
+                                  <Camera className="h-3.5 w-3.5" />
+                                )}
                                 <span className="hidden sm:inline">
                                   {uploadingRowId === p.id
-                                    ? 'আপলোড...'
+                                    ? rowUploadProgress !== null
+                                      ? `${rowUploadProgress}%`
+                                      : 'আপলোড...'
                                     : thumbSrc
                                     ? 'ছবি বদলান'
                                     : 'ছবি যোগ'}
                                 </span>
                                 <input
                                   type="file"
-                                  accept="image/*"
+                                  accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
                                   disabled={uploadingRowId === p.id}
                                   onChange={(ev) => handleQuickRowImageUpload(p, ev)}
                                   className="hidden"
@@ -1326,7 +1589,7 @@ export function AdminProductsPanel() {
                             <button
                               type="button"
                               title="Delete Permanently"
-                              onClick={() => handlePermanentDelete(p)}
+                              onClick={() => setPendingDeleteProduct(p)}
                               className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-red-700 hover:bg-red-50"
                             >
                               <Trash2 className="h-3.5 w-3.5" />
@@ -1371,6 +1634,55 @@ export function AdminProductsPanel() {
           </div>
         )}
       </div>
+
+      {/* Safe Permanent Delete Confirmation Modal */}
+      {pendingDeleteProduct && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-[#E7E5E4] bg-white p-6 shadow-xl">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-50 text-[#DC1F26]">
+                <Trash2 className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="font-display text-xl font-bold text-[#1C1917]">
+                  পণ্য স্থায়ীভাবে ডিলিট করবেন?
+                </h3>
+                <p className="mt-1 text-xs leading-relaxed text-[#57534E]">
+                  আপনি{' '}
+                  <strong className="text-[#1C1917]">
+                    {pendingDeleteProduct.nameBn || pendingDeleteProduct.name} (
+                    {pendingDeleteProduct.nameEn})
+                  </strong>{' '}
+                  স্থায়ীভাবে ডিলিট করতে যাচ্ছেন। ডিলিট করলে এটি আর পুনরুদ্ধার করা যাবে না।
+                </p>
+              </div>
+            </div>
+            <div className="mt-6 flex justify-end gap-2.5 border-t border-[#F5F4F0] pt-4">
+              <button
+                type="button"
+                disabled={deletingProduct}
+                onClick={() => setPendingDeleteProduct(null)}
+                className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold text-[#1C1917] hover:bg-[#FAFAF8]"
+              >
+                বাতিল
+              </button>
+              <button
+                type="button"
+                disabled={deletingProduct}
+                onClick={() => void confirmPermanentDelete()}
+                className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-[#DC1F26] px-4 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C] disabled:opacity-50"
+              >
+                {deletingProduct && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                <span>স্থায়ীভাবে ডিলিট করুন</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1382,6 +1694,9 @@ export function AdminCategoriesPanel() {
   const { allCategories, logAdminActivity } = useStore();
   const [editing, setEditing] = useState<Category | null>(null);
   const [isNew, setIsNew] = useState(false);
+  const [catUploading, setCatUploading] = useState(false);
+  const [catUploadPct, setCatUploadPct] = useState<number | null>(null);
+  const [pendingDeleteCat, setPendingDeleteCat] = useState<Category | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
 
   const startNew = () => {
@@ -1406,9 +1721,29 @@ export function AdminCategoriesPanel() {
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file || !editing) return;
-    const url = await compressImageToDataUrl(file, 900, 0.78);
-    setEditing({ ...editing, image: url });
+    setCatUploading(true);
+    setCatUploadPct(5);
+    setMsg(null);
+    try {
+      const result = await uploadCatalogImageToStorage({
+        folder: 'categories',
+        entityId: editing.id,
+        file,
+        onProgress: (pct) => setCatUploadPct(pct),
+      });
+      setEditing((prev) => (prev ? { ...prev, image: result.downloadUrl } : null));
+    } catch (err) {
+      setMsg(
+        err instanceof Error && err.message
+          ? err.message
+          : 'ক্যাটাগরির ছবি আপলোড ব্যর্থ হয়েছে।'
+      );
+    } finally {
+      setCatUploading(false);
+      setCatUploadPct(null);
+    }
   };
 
   const saveCategory = async (e: React.FormEvent) => {
@@ -1425,7 +1760,7 @@ export function AdminCategoriesPanel() {
       return;
     }
 
-    const slug = editing.slug.trim() || toSlug(nameEn || nameBn);
+    const slug = toSlug(editing.slug.trim() || nameEn || nameBn);
     const descEn = (editing.descriptionEn ?? '').trim();
     const descBn = editing.description.trim() || descEn || nameBn;
 
@@ -1555,8 +1890,37 @@ export function AdminCategoriesPanel() {
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs font-semibold">ছবি পরিবর্তন</label>
-            <input type="file" accept="image/*" onChange={handleUpload} className="text-xs" />
+            <label className="mb-1 block text-xs font-semibold">
+              ছবি পরিবর্তন (Firebase Storage · JPG/PNG/WEBP)
+            </label>
+            <div className="flex items-center gap-3">
+              <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3 py-2 text-xs font-semibold text-[#1C1917] hover:border-[#DC1F26]">
+                {catUploading ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[#DC1F26]" />
+                ) : (
+                  <Upload className="h-3.5 w-3.5" />
+                )}
+                <span>
+                  {catUploading
+                    ? `আপলোড হচ্ছে ${catUploadPct ?? 0}%`
+                    : 'ছবি নির্বাচন করুন'}
+                </span>
+                <input
+                  type="file"
+                  accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                  disabled={catUploading}
+                  onChange={handleUpload}
+                  className="hidden"
+                />
+              </label>
+              {editing.image && (
+                <img
+                  src={resolveAssetUrl(editing.image)}
+                  alt="Category preview"
+                  className="h-10 w-14 rounded-md border border-[#E7E5E4] object-cover"
+                />
+              )}
+            </div>
           </div>
           <div>
             <label className="mb-1 block text-xs font-semibold">Description (বাংলা)</label>
@@ -1679,7 +2043,7 @@ export function AdminCategoriesPanel() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => removeCategory(cat.id)}
+                    onClick={() => setPendingDeleteCat(cat)}
                     className="cursor-pointer rounded-md border border-[#E7E5E4] px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-50"
                   >
                     Delete
@@ -1690,6 +2054,43 @@ export function AdminCategoriesPanel() {
           );
         })}
       </div>
+
+      {pendingDeleteCat && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-[#E7E5E4] bg-white p-6 shadow-xl">
+            <h3 className="font-display text-xl font-bold text-[#1C1917]">
+              ক্যাটাগরি ডিলিট করবেন?
+            </h3>
+            <p className="mt-1 text-xs leading-relaxed text-[#57534E]">
+              আপনি <strong>{pendingDeleteCat.name}</strong> ক্যাটাগরিটি ডিলিট করতে যাচ্ছেন। এটি নিশ্চিত করতে নিচে চাপুন।
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingDeleteCat(null)}
+                className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold text-[#1C1917]"
+              >
+                বাতিল
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const id = pendingDeleteCat.id;
+                  setPendingDeleteCat(null);
+                  void removeCategory(id);
+                }}
+                className="cursor-pointer rounded-lg bg-[#DC1F26] px-4 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C]"
+              >
+                ডিলিট করুন
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2019,10 +2420,48 @@ export function AdminOccasionsPanel() {
 // 4. SHOWROOM MANAGEMENT
 // ========================
 export function AdminShowroomsPanel() {
-  const { allShowrooms, logAdminActivity } = useStore();
+  const {
+    firestoreShowrooms,
+    legacyDemoShowrooms,
+    logAdminActivity,
+  } = useStore();
   const [editing, setEditing] = useState<Showroom | null>(null);
   const [isNew, setIsNew] = useState(false);
+  const [purgingDemoDocs, setPurgingDemoDocs] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+
+  const purgeConfirmedDemoShowrooms = async () => {
+    if (legacyDemoShowrooms.length === 0) return;
+    setPurgingDemoDocs(true);
+    setMsg(null);
+    try {
+      const firestore = requireDb();
+      let deletedCount = 0;
+      for (const demoDoc of legacyDemoShowrooms) {
+        if (!CONFIRMED_DEMO_SHOWROOM_IDS.has(demoDoc.id) && !isDemoOrDummyShowroom(demoDoc)) {
+          continue;
+        }
+        await deleteDoc(doc(firestore, 'showrooms', demoDoc.id));
+        await logAdminActivity(
+          'delete',
+          'showrooms',
+          demoDoc.id,
+          demoDoc.nameEn || demoDoc.name,
+          'Removed confirmed legacy demo showroom record'
+        );
+        deletedCount += 1;
+      }
+      setMsg(
+        deletedCount > 0
+          ? `নিশ্চিতভাবে চিহ্নিত ${deletedCount}টি পুরোনো Demo Showroom ডকুমেন্ট Firestore থেকে স্থায়ীভাবে মুছে ফেলা হয়েছে।`
+          : 'মুছে ফেলার মতো কোনো Demo ডকুমেন্ট পাওয়া যায়নি।'
+      );
+    } catch {
+      setMsg('Demo ডকুমেন্ট মুছতে সমস্যা হয়েছে। অনুগ্রহ করে আপনার অনুমতি যাচাই করুন।');
+    } finally {
+      setPurgingDemoDocs(false);
+    }
+  };
 
   const saveShowroom = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2040,14 +2479,37 @@ export function AdminShowroomsPanel() {
     }
 
     const areaEn = (editing.areaEn ?? '').trim();
-    const areaBn = editing.area.trim() || areaEn || 'Dhaka';
+    const areaBn = editing.area.trim() || areaEn;
+    if (!areaBn) {
+      setMsg('অনুগ্রহ করে শোরুমের এলাকা (Area) লিখুন।');
+      return;
+    }
+
     const addressEn = (editing.addressEn ?? '').trim();
-    const addressBn = editing.address.trim() || addressEn || areaBn;
+    const addressBn = editing.address.trim() || addressEn;
+    if (!addressBn) {
+      setMsg('অনুগ্রহ করে সম্পূর্ণ ঠিকানা লিখুন।');
+      return;
+    }
+
+    const phone = editing.phone.trim();
+    if (phone.length < 6) {
+      setMsg('অনুগ্রহ করে সঠিক ফোন নম্বর লিখুন।');
+      return;
+    }
+
     const descEn = (editing.descriptionEn ?? '').trim();
     const descBn = (editing.description ?? '').trim() || descEn;
     const hoursEn = (editing.openingHoursEn ?? '').trim();
-    const hoursBn = editing.openingHours.trim() || hoursEn || 'প্রতিদিন সকাল ৮:০০ – রাত ১১:০০';
-    const phone = editing.phone.trim() || '+880 1700-000000';
+    const hoursBn = editing.openingHours.trim() || hoursEn || 'শুক্র–শনিবার · সকাল ৮:০০টা – রাত ১০:০০টা';
+    const rawLat = Number(editing.lat);
+    const rawLng = Number(editing.lng);
+    const hasCoords = Number.isFinite(rawLat) && Number.isFinite(rawLng) && (rawLat !== 0 || rawLng !== 0);
+    const safeMapUrl =
+      editing.mapUrl.trim() ||
+      (hasCoords
+        ? `https://maps.google.com/?q=${rawLat},${rawLng}`
+        : `https://maps.google.com/?q=${encodeURIComponent(addressEn || addressBn)}`);
 
     const payload: Record<string, unknown> = {
       id: editing.id,
@@ -2073,10 +2535,9 @@ export function AdminShowroomsPanel() {
       opening_time: (editing.opening_time ?? '').trim(),
       closing_time: (editing.closing_time ?? '').trim(),
       weekly_holiday: (editing.weekly_holiday ?? '').trim(),
-      mapUrl:
-        editing.mapUrl.trim() || `https://maps.google.com/?q=${editing.lat},${editing.lng}`,
-      lat: Number(editing.lat) || 23.7465,
-      lng: Number(editing.lng) || 90.376,
+      mapUrl: safeMapUrl,
+      lat: Number.isFinite(rawLat) ? rawLat : 0,
+      lng: Number.isFinite(rawLng) ? rawLng : 0,
       isMain: Boolean(editing.isMain),
       visible: editing.visible !== false,
       display_order: Number(editing.display_order) || 1,
@@ -2102,14 +2563,14 @@ export function AdminShowroomsPanel() {
   };
 
   return (
-    <div className="space-y-5">
-      <div className="flex items-center justify-between">
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="font-display text-2xl font-bold text-[#1C1917]">
             Showroom Management
           </h2>
           <p className="text-xs text-[#57534E]">
-            বাংলা ও English ভাষায় শোরুমের নাম, এলাকা, ঠিকানা, ফোন, ইমেইল, সময়সূচি, সাপ্তাহিক ছুটি ও ম্যাপ আপডেট করুন।
+            বাংলা ও English ভাষায় অনুমোদিত শোরুম ও অতিরিক্ত Firestore শাখার তথ্য পরিচালনা করুন।
           </p>
         </div>
         <button
@@ -2133,20 +2594,20 @@ export function AdminShowroomsPanel() {
               descriptionEn: '',
               description_bn: '',
               description_en: '',
-              phone: '+880 17',
+              phone: '',
               alternate_phone: '',
               email: '',
-              openingHours: 'প্রতিদিন সকাল ৮:০০ – রাত ১১:০০',
-              openingHoursEn: 'Daily 8:00 AM – 11:00 PM',
+              openingHours: 'শুক্র–শনিবার · সকাল ৮:০০টা – রাত ১০:০০টা',
+              openingHoursEn: 'Friday – Saturday · 8:00 AM – 10:00 PM',
               opening_time: '08:00 AM',
-              closing_time: '11:00 PM',
+              closing_time: '10:00 PM',
               weekly_holiday: 'Open Daily',
-              mapUrl: 'https://maps.google.com/?q=23.7465,90.3760',
-              lat: 23.7465,
-              lng: 90.376,
+              mapUrl: '',
+              lat: 0,
+              lng: 0,
               isMain: false,
               visible: true,
-              display_order: allShowrooms.length + 1,
+              display_order: CHATTOGRAM_OUTLETS.length + firestoreShowrooms.length + 1,
             });
           }}
           className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-4 py-2 text-xs font-semibold text-white hover:bg-[#DC1F26]"
@@ -2160,6 +2621,41 @@ export function AdminShowroomsPanel() {
         <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-[#B91C1C]">
           {msg}
         </p>
+      )}
+
+      {legacyDemoShowrooms.length > 0 && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
+          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+            <div>
+              <p className="text-xs font-bold text-amber-950">
+                Firestore-এ পুরোনো Demo Showroom ডকুমেন্ট শনাক্ত হয়েছে ({legacyDemoShowrooms.length}টি)
+              </p>
+              <p className="mt-1 text-[11px] text-amber-900">
+                ওয়েবসাইট UI ও অভিযোগ বক্স থেকে এগুলো ইতিমধ্যেই সম্পূর্ণ লুকানো হয়েছে। ডাটাবেস পরিষ্কার করতে চাইলে নিচের বাটনে ক্লিক করে শুধুমাত্র এই চিহ্নিত Demo রেকর্ডগুলো মুছে দিন (আসল কোনো শোরুম পরিবর্তন হবে না):
+              </p>
+              <ul className="mt-1.5 list-inside list-disc text-[11px] font-mono text-amber-900">
+                {legacyDemoShowrooms.map((d) => (
+                  <li key={d.id}>
+                    {d.id} — {d.nameEn || d.name}
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <button
+              type="button"
+              disabled={purgingDemoDocs}
+              onClick={() => void purgeConfirmedDemoShowrooms()}
+              className="inline-flex shrink-0 cursor-pointer items-center gap-2 rounded-lg bg-red-700 px-4 py-2.5 text-xs font-semibold text-white hover:bg-red-800 disabled:opacity-50"
+            >
+              {purgingDemoDocs ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Trash2 className="h-3.5 w-3.5" />
+              )}
+              <span>চিহ্নিত Demo ডকুমেন্ট মুছুন</span>
+            </button>
+          </div>
+        </div>
       )}
 
       {editing && (
@@ -2176,7 +2672,7 @@ export function AdminShowroomsPanel() {
               onChange={(e) =>
                 setEditing({ ...editing, name: e.target.value, name_bn: e.target.value })
               }
-              placeholder="যেমন: ধানমন্ডি ফ্ল্যাগশিপ শোরুম"
+              placeholder="যেমন: খুলশী মোড় শোরুম"
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
             />
           </div>
@@ -2188,7 +2684,7 @@ export function AdminShowroomsPanel() {
               onChange={(e) =>
                 setEditing({ ...editing, nameEn: e.target.value, name_en: e.target.value })
               }
-              placeholder="e.g. Dhanmondi Flagship Showroom"
+              placeholder="e.g. Khulshi More Outlet"
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
             />
           </div>
@@ -2198,7 +2694,7 @@ export function AdminShowroomsPanel() {
               type="text"
               value={editing.area}
               onChange={(e) => setEditing({ ...editing, area: e.target.value })}
-              placeholder="যেমন: ধানমন্ডি"
+              placeholder="যেমন: খুলশী, চট্টগ্রাম"
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
             />
           </div>
@@ -2208,7 +2704,7 @@ export function AdminShowroomsPanel() {
               type="text"
               value={editing.areaEn ?? ''}
               onChange={(e) => setEditing({ ...editing, areaEn: e.target.value })}
-              placeholder="e.g. Dhanmondi"
+              placeholder="e.g. Khulshi, Chattogram"
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
             />
           </div>
@@ -2218,6 +2714,7 @@ export function AdminShowroomsPanel() {
               type="text"
               value={editing.phone}
               onChange={(e) => setEditing({ ...editing, phone: e.target.value })}
+              placeholder="+8801XXXXXXXXX"
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
             />
           </div>
@@ -2246,6 +2743,7 @@ export function AdminShowroomsPanel() {
               type="url"
               value={editing.mapUrl}
               onChange={(e) => setEditing({ ...editing, mapUrl: e.target.value })}
+              placeholder="https://maps.app.goo.gl/..."
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
             />
           </div>
@@ -2255,7 +2753,7 @@ export function AdminShowroomsPanel() {
               type="text"
               value={editing.weekly_holiday ?? ''}
               onChange={(e) => setEditing({ ...editing, weekly_holiday: e.target.value })}
-              placeholder="e.g. Open Daily / Closed Tuesday"
+              placeholder="e.g. Open Daily"
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
             />
           </div>
@@ -2274,7 +2772,7 @@ export function AdminShowroomsPanel() {
               type="text"
               value={editing.openingHoursEn ?? ''}
               onChange={(e) => setEditing({ ...editing, openingHoursEn: e.target.value })}
-              placeholder="e.g. Daily 8:00 AM – 11:00 PM"
+              placeholder="e.g. Daily 8:00 AM – 10:00 PM"
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
             />
           </div>
@@ -2360,7 +2858,7 @@ export function AdminShowroomsPanel() {
                 checked={editing.isMain}
                 onChange={(e) => setEditing({ ...editing, isMain: e.target.checked })}
               />
-              <span>Main Flagship Showroom</span>
+              <span>Primary Office &amp; Outlet</span>
             </label>
             <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-semibold">
               <input
@@ -2389,83 +2887,132 @@ export function AdminShowroomsPanel() {
         </form>
       )}
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        {allShowrooms.map((sr) => {
-          const st = getShowroomText(sr);
-          return (
-            <div key={sr.id} className="rounded-xl border border-[#E7E5E4] bg-white p-5">
-              <div className="flex items-start justify-between">
-                <div>
-                  <p className="text-xs font-semibold text-[#DC1F26]">
-                    {st.areaBn}
-                    {st.areaEn ? ` · ${st.areaEn}` : ''}{' '}
-                    {sr.visible === false ? '· (Hidden)' : ''}
-                  </p>
-                  <h3 className="font-display text-xl font-bold text-[#1C1917]">{st.nameBn}</h3>
-                  {st.nameEn && (
-                    <p className="text-xs font-medium text-[#78716C]">{st.nameEn}</p>
+      {/* Firestore Custom Showrooms */}
+      <div className="space-y-3">
+        <h3 className="text-sm font-bold text-[#1C1917]">
+          অতিরিক্ত ডাইনামিক শোরুম (Firestore)
+        </h3>
+        {firestoreShowrooms.length === 0 ? (
+          <div className="rounded-xl border border-[#E7E5E4] bg-white p-6 text-center text-xs text-[#57534E]">
+            Firestore-এ এই মুহূর্তে কোনো অতিরিক্ত শোরুম ডকুমেন্ট নেই। নতুন শোরুম যোগ করতে উপরের “নতুন শোরুম” বাটন ব্যবহার করুন।
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            {firestoreShowrooms.map((sr) => {
+              const st = getShowroomText(sr);
+              return (
+                <div key={sr.id} className="rounded-xl border border-[#E7E5E4] bg-white p-5">
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <p className="text-xs font-semibold text-[#DC1F26]">
+                        {st.areaBn}
+                        {st.areaEn && st.areaEn !== st.areaBn ? ` · ${st.areaEn}` : ''}{' '}
+                        {sr.visible === false ? '· (Hidden)' : ''}
+                      </p>
+                      <h3 className="font-display text-xl font-bold text-[#1C1917]">{st.nameBn}</h3>
+                      {st.nameEn && (
+                        <p className="text-xs font-medium text-[#78716C]">{st.nameEn}</p>
+                      )}
+                    </div>
+                    <div className="flex gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsNew(false);
+                          setMsg(null);
+                          setEditing({
+                            ...sr,
+                            name: st.nameBn,
+                            nameEn: st.nameEn,
+                            name_bn: st.nameBn,
+                            name_en: st.nameEn,
+                            area: st.areaBn,
+                            areaEn: st.areaEn,
+                            address: st.addressBn,
+                            addressEn: st.addressEn,
+                            address_bn: st.addressBn,
+                            address_en: st.addressEn,
+                            description: st.descriptionBn,
+                            descriptionEn: st.descriptionEn,
+                            description_bn: st.descriptionBn,
+                            description_en: st.descriptionEn,
+                            openingHours: st.openingHoursBn,
+                            openingHoursEn: st.openingHoursEn,
+                          });
+                        }}
+                        className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-[#1C1917]"
+                      >
+                        <Edit3 className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await deleteDoc(doc(requireDb(), 'showrooms', sr.id));
+                            await logAdminActivity('delete', 'showrooms', sr.id, st.nameEn || st.nameBn);
+                          } catch {
+                            setMsg('ডিলিট করা যায়নি।');
+                          }
+                        }}
+                        className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-red-700"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                  <p className="mt-2 text-xs text-[#57534E]">{st.addressBn}</p>
+                  {st.addressEn && (
+                    <p className="mt-0.5 text-[11px] text-[#78716C]">{st.addressEn}</p>
                   )}
+                  <p className="mt-2 font-mono text-xs font-semibold text-[#1C1917]">
+                    {sr.phone} {sr.alternate_phone ? `· ${sr.alternate_phone}` : ''}
+                  </p>
+                  <p className="mt-1 text-xs text-[#78716C]">
+                    {st.openingHoursBn}
+                    {st.openingHoursEn ? ` · ${st.openingHoursEn}` : ''}
+                    {sr.weekly_holiday ? ` · ${sr.weekly_holiday}` : ''}
+                  </p>
                 </div>
-                <div className="flex gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsNew(false);
-                      setMsg(null);
-                      setEditing({
-                        ...sr,
-                        name: st.nameBn,
-                        nameEn: st.nameEn,
-                        name_bn: st.nameBn,
-                        name_en: st.nameEn,
-                        area: st.areaBn,
-                        areaEn: st.areaEn,
-                        address: st.addressBn,
-                        addressEn: st.addressEn,
-                        address_bn: st.addressBn,
-                        address_en: st.addressEn,
-                        description: st.descriptionBn,
-                        descriptionEn: st.descriptionEn,
-                        description_bn: st.descriptionBn,
-                        description_en: st.descriptionEn,
-                        openingHours: st.openingHoursBn,
-                        openingHoursEn: st.openingHoursEn,
-                      });
-                    }}
-                    className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-[#1C1917]"
-                  >
-                    <Edit3 className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      try {
-                        await deleteDoc(doc(requireDb(), 'showrooms', sr.id));
-                      } catch {
-                        setMsg('ডিলিট করা যায়নি।');
-                      }
-                    }}
-                    className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-red-700"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Approved Official Outlets Reference */}
+      <div className="space-y-3 border-t border-[#E7E5E4] pt-5">
+        <div>
+          <h3 className="text-sm font-bold text-[#1C1917]">
+            অনুমোদিত অফিশিয়াল শো-রুম · Official Chattogram Outlets
+          </h3>
+          <p className="text-[11px] text-[#57534E]">
+            ওয়েবসাইটের Our Outlets / আমাদের শো-রুম, Contact ও Complaint Box-এ ব্যবহৃত অনুমোদিত তালিকা।
+          </p>
+        </div>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          {CHATTOGRAM_OUTLETS.map((outlet) => (
+            <div key={outlet.id} className="rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-4">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <h4 className="font-display text-lg font-bold text-[#1C1917]">
+                    {outlet.nameBn}
+                  </h4>
+                  <p className="text-xs font-medium text-[#78716C]">{outlet.nameEn}</p>
                 </div>
+                {outlet.type && (
+                  <span className="text-[11px] font-bold text-[#B91C1C]">
+                    {outlet.type}
+                  </span>
+                )}
               </div>
-              <p className="mt-2 text-xs text-[#57534E]">{st.addressBn}</p>
-              {st.addressEn && (
-                <p className="mt-0.5 text-[11px] text-[#78716C]">{st.addressEn}</p>
-              )}
+              <p className="mt-2 text-xs text-[#57534E]">{outlet.addressBn}</p>
+              <p className="mt-0.5 text-[11px] text-[#78716C]">{outlet.addressEn}</p>
               <p className="mt-2 font-mono text-xs font-semibold text-[#1C1917]">
-                {sr.phone} {sr.alternate_phone ? `· ${sr.alternate_phone}` : ''}
-              </p>
-              <p className="mt-1 text-xs text-[#78716C]">
-                {st.openingHoursBn}
-                {st.openingHoursEn ? ` · ${st.openingHoursEn}` : ''}
-                {sr.weekly_holiday ? ` · ${sr.weekly_holiday}` : ''}
+                {outlet.phone}
               </p>
             </div>
-          );
-        })}
+          ))}
+        </div>
       </div>
     </div>
   );

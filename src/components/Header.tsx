@@ -119,7 +119,7 @@ export function Header({ onOpenChat }: HeaderProps) {
             <form
               onSubmit={handleSearchSubmit}
               role="search"
-              className="hidden h-9 w-48 items-center rounded-full border border-[#44403C] bg-[#292524] pl-3 pr-1.5 transition-colors focus-within:border-[#FACC15] md:flex lg:w-52 xl:w-60"
+              className="hidden h-9 w-48 items-center rounded-lg border border-[#44403C] bg-[#292524] pl-3 pr-1.5 transition-colors focus-within:border-[#FACC15] md:flex lg:w-52 xl:w-60"
             >
               <Search className="mr-1.5 h-3.5 w-3.5 shrink-0 text-[#A8A29E]" aria-hidden="true" />
               <input
@@ -135,7 +135,7 @@ export function Header({ onOpenChat }: HeaderProps) {
                   type="button"
                   onClick={() => setSearchQuery('')}
                   aria-label="Clear search"
-                  className="inline-flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-full text-[#A8A29E] hover:text-white"
+                  className="inline-flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-[#A8A29E] hover:text-white"
                 >
                   <X className="h-3 w-3" />
                 </button>

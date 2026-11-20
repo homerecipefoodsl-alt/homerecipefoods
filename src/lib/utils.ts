@@ -32,12 +32,14 @@ export function formatBdtPrice(amount: number): string {
 }
 
 export function toSlug(text: string): string {
-  return text
+  const normalized = text
     .toLowerCase()
     .trim()
     .replace(/[^a-z0-9\s-]/g, '')
     .replace(/\s+/g, '-')
-    .replace(/-+/g, '-') || `item-${Date.now()}`;
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || `item-${Date.now()}`;
 }
 
 export function generateSessionId(): string {

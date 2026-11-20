@@ -1542,7 +1542,7 @@ export default {
     }
 
     if (url.pathname === '/robots.txt') {
-      const origin = env.APP_URL || url.origin;
+      const origin = url.origin || env.APP_URL;
       return new Response(
         `User-agent: *\nAllow: /\nDisallow: /mahmud\nDisallow: /admin\nSitemap: ${origin}/sitemap.xml\n`,
         {
@@ -1552,10 +1552,11 @@ export default {
     }
 
     if (url.pathname === '/sitemap.xml') {
-      const origin = env.APP_URL || url.origin;
+      const origin = url.origin || env.APP_URL;
       const routes = [
         '/',
         '/products',
+        '/outlets',
         '/showrooms',
         '/jobs',
         '/career',

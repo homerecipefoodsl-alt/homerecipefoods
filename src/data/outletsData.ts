@@ -301,6 +301,8 @@ export const CHATTOGRAM_OUTLETS: readonly OutletItem[] = [
   },
 ];
 
+import type { Showroom } from '../types';
+
 export function formatPhoneHref(phone: string): string {
   return `tel:${phone.replace(/\s+/g, '')}`;
 }
@@ -317,3 +319,98 @@ export function getOutletSearchHaystack(outlet: OutletItem): string {
     .join(' ')
     .toLowerCase();
 }
+
+export const CONFIRMED_DEMO_SHOWROOM_IDS: ReadonlySet<string> = new Set([
+  'showroom-dhanmondi',
+  'showroom-banani',
+  'showroom-uttara',
+  'showroom-chattogram',
+]);
+
+const DEMO_PHONE_SET: ReadonlySet<string> = new Set([
+  '+8801711004411',
+  '+8801711004422',
+  '+8801711004433',
+  '+8801711004444',
+  '+8801700000000',
+]);
+
+export function isDemoOrDummyShowroom(sr: Partial<Showroom> | null | undefined): boolean {
+  if (!sr) return true;
+  const rawId = String(sr.id || '').trim().toLowerCase();
+  if (rawId && CONFIRMED_DEMO_SHOWROOM_IDS.has(rawId)) return true;
+  if (rawId && /^(demo|dummy|sample|test|placeholder)[-_]/.test(rawId)) return true;
+  if (rawId && /[-_](demo|dummy|sample|test|placeholder)$/.test(rawId)) return true;
+
+  const cleanPhone = String(sr.phone || '').replace(/[\s\-()]/g, '');
+  if (cleanPhone && DEMO_PHONE_SET.has(cleanPhone)) return true;
+
+  const combinedText = [
+    sr.name,
+    sr.nameEn,
+    sr.name_bn,
+    sr.name_en,
+    sr.area,
+    sr.areaEn,
+    sr.address,
+    sr.addressEn,
+    sr.address_bn,
+    sr.address_en,
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  if (
+    /\b(demo\s+showroom|demo\s+outlet|dummy\s+showroom|dummy\s+outlet|sample\s+showroom|sample\s+outlet|test\s+showroom|test\s+outlet|placeholder\s+showroom)\b/i.test(
+      combinedText
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    /ধানমন্ডি শোরুম|বনানী শোরুম|উত্তরা সেক্টর ৭ শোরুম|নাসিরাবাদ শোরুম \(চট্টগ্রাম\)|Dhanmondi Showroom \(Flagship\)|Banani Showroom|Uttara Sector 7 Showroom|Nasirabad Showroom \(Chattogram\)|Satmasjid Road, Dhanmondi|Plot 68, Road 11, Block F, Banani|Gareeb-e-Newaz Avenue, Sector 7, Uttara|GEC Circle Plaza, CDA Avenue, Nasirabad/i.test(
+      combinedText
+    )
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+export function outletItemToShowroom(outlet: OutletItem, displayOrder: number): Showroom {
+  const typeLabel = outlet.type || '';
+  return {
+    id: outlet.id,
+    name: outlet.nameBn,
+    nameEn: outlet.nameEn,
+    name_bn: outlet.nameBn,
+    name_en: outlet.nameEn,
+    area: outlet.nameBn,
+    areaEn: outlet.nameEn,
+    address: outlet.addressBn,
+    addressEn: outlet.addressEn,
+    address_bn: outlet.addressBn,
+    address_en: outlet.addressEn,
+    description: typeLabel,
+    descriptionEn: typeLabel,
+    description_bn: typeLabel,
+    description_en: typeLabel,
+    phone: outlet.phone,
+    openingHours: outlet.counterHoursBn,
+    openingHoursEn: outlet.counterHoursEn,
+    mapUrl: outlet.mapsUrl,
+    lat: 0,
+    lng: 0,
+    isMain: outlet.id === 'shah-garibullah-hs',
+    visible: outlet.status === 'active',
+    deleted: false,
+    display_order: displayOrder,
+  };
+}
+
+export const CANONICAL_OUTLET_SHOWROOMS: Showroom[] = CHATTOGRAM_OUTLETS.map((outlet, idx) =>
+  outletItemToShowroom(outlet, idx + 1)
+);
+

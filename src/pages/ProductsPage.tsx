@@ -159,8 +159,8 @@ export function ProductsPage() {
       {!categorySlug && (
         <div className="mt-4 space-y-2.5">
           <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
-            {/* Slim Rounded Search Bar (44px mobile, bounded desktop width) */}
-            <div className="mx-auto flex h-[44px] w-full max-w-md items-center rounded-2xl border border-[#E7E5E4] bg-white pl-3.5 pr-2 shadow-xs transition-all focus-within:border-[#DC1F26] focus-within:ring-2 focus-within:ring-[#DC1F26]/15 lg:mx-0 lg:h-10 lg:max-w-sm">
+            {/* Slim Search Bar (44px mobile, bounded desktop width) */}
+            <div className="mx-auto flex h-[44px] w-full max-w-md items-center rounded-xl border border-[#D6D3D1] bg-white pl-3.5 pr-2 transition-colors focus-within:border-[#DC1F26] lg:mx-0 lg:h-10 lg:max-w-sm">
               <Search className="mr-2 h-4 w-4 shrink-0 text-[#78716C]" aria-hidden="true" />
               <input
                 type="search"
@@ -175,7 +175,7 @@ export function ProductsPage() {
                   type="button"
                   onClick={() => setQueryText('')}
                   aria-label="Clear search"
-                  className="inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-full text-[#78716C] hover:bg-[#F5F4F0] hover:text-[#1C1917]"
+                  className="inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-lg text-[#78716C] hover:bg-[#F5F4F0] hover:text-[#1C1917]"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
@@ -192,10 +192,10 @@ export function ProductsPage() {
               aria-label="Filter by Category"
               value={selectedCategory}
               onChange={(e) => setSelectedCategory(e.target.value)}
-              className={`h-9 shrink-0 cursor-pointer rounded-full border px-3 text-xs font-medium transition-colors focus:border-[#DC1F26] focus:outline-none ${
+              className={`h-9 shrink-0 cursor-pointer rounded-lg border px-3 text-xs font-medium transition-colors focus:border-[#DC1F26] focus:outline-none ${
                 selectedCategory !== 'all'
                   ? 'border-[#1C1917] bg-[#1C1917] text-white'
-                  : 'border-[#E7E5E4] bg-white text-[#1C1917] shadow-xs hover:border-[#D6D3D1]'
+                  : 'border-[#D6D3D1] bg-white text-[#1C1917] hover:border-[#1C1917]/40'
               }`}
             >
               <option value="all">Category</option>
@@ -213,10 +213,10 @@ export function ProductsPage() {
               aria-label="Filter by Occasion"
               value={selectedOccasion}
               onChange={(e) => setSelectedOccasion(e.target.value)}
-              className={`h-9 shrink-0 cursor-pointer rounded-full border px-3 text-xs font-medium transition-colors focus:border-[#DC1F26] focus:outline-none ${
+              className={`h-9 shrink-0 cursor-pointer rounded-lg border px-3 text-xs font-medium transition-colors focus:border-[#DC1F26] focus:outline-none ${
                 selectedOccasion !== 'all'
                   ? 'border-[#1C1917] bg-[#1C1917] text-white'
-                  : 'border-[#E7E5E4] bg-white text-[#1C1917] shadow-xs hover:border-[#D6D3D1]'
+                  : 'border-[#D6D3D1] bg-white text-[#1C1917] hover:border-[#1C1917]/40'
               }`}
             >
               <option value="all">Occasion</option>
@@ -234,10 +234,10 @@ export function ProductsPage() {
               aria-label="Filter by Price Range"
               value={priceBucket}
               onChange={(e) => setPriceBucket(e.target.value as PriceBucket)}
-              className={`h-9 shrink-0 cursor-pointer rounded-full border px-3 text-xs font-medium transition-colors focus:border-[#DC1F26] focus:outline-none ${
+              className={`h-9 shrink-0 cursor-pointer rounded-lg border px-3 text-xs font-medium transition-colors focus:border-[#DC1F26] focus:outline-none ${
                 priceBucket !== 'all'
                   ? 'border-[#1C1917] bg-[#1C1917] text-white'
-                  : 'border-[#E7E5E4] bg-white text-[#1C1917] shadow-xs hover:border-[#D6D3D1]'
+                  : 'border-[#D6D3D1] bg-white text-[#1C1917] hover:border-[#1C1917]/40'
               }`}
             >
               <option value="all">Price</option>
@@ -251,10 +251,10 @@ export function ProductsPage() {
               aria-label="Filter by Product Type"
               value={selectedType}
               onChange={(e) => setSelectedType(e.target.value)}
-              className={`h-9 shrink-0 cursor-pointer rounded-full border px-3 text-xs font-medium transition-colors focus:border-[#DC1F26] focus:outline-none ${
+              className={`h-9 shrink-0 cursor-pointer rounded-lg border px-3 text-xs font-medium transition-colors focus:border-[#DC1F26] focus:outline-none ${
                 selectedType !== 'all'
                   ? 'border-[#1C1917] bg-[#1C1917] text-white'
-                  : 'border-[#E7E5E4] bg-white text-[#1C1917] shadow-xs hover:border-[#D6D3D1]'
+                  : 'border-[#D6D3D1] bg-white text-[#1C1917] hover:border-[#1C1917]/40'
               }`}
             >
               <option value="all">Type</option>

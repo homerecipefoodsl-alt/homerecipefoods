@@ -21,6 +21,11 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import {
+  CANONICAL_OUTLET_SHOWROOMS,
+  CONFIRMED_DEMO_SHOWROOM_IDS,
+  isDemoOrDummyShowroom,
+} from '../data/outletsData';
+import {
   MAHALLABIA_CATEGORY,
   PRODUCT_MASTER_LIST,
   buildProductMatchKey,
@@ -33,7 +38,6 @@ import {
   SEED_OCCASIONS,
   SEED_PRODUCTS,
   SEED_SEO_SETTINGS,
-  SEED_SHOWROOMS,
   SEED_SITE_SETTINGS,
 } from '../data/seedData';
 import { toSlug } from '../lib/utils';
@@ -146,6 +150,8 @@ interface StoreContextValue {
   allOccasions: Occasion[];
   allProducts: Product[];
   allShowrooms: Showroom[];
+  firestoreShowrooms: Showroom[];
+  legacyDemoShowrooms: Showroom[];
   allHeroBanners: HeroSlide[];
   allHomepageSections: HomepageSection[];
   allGreetingItems: GreetingItem[];
@@ -158,9 +164,11 @@ interface StoreContextValue {
   setLanguageMode: (lang: DisplayLanguage) => void;
   loading: boolean;
   productsLoading: boolean;
+  showroomsLoading: boolean;
   firestoreEmpty: boolean;
   error: string | null;
   productsError: string | null;
+  showroomsError: string | null;
 
   // Auth & RBAC state
   user: User | null;
@@ -234,8 +242,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   const [loading, setLoading] = useState(isFirebaseConfigured);
   const [productsLoading, setProductsLoading] = useState(isFirebaseConfigured);
+  const [showroomsLoading, setShowroomsLoading] = useState(isFirebaseConfigured);
   const [error, setError] = useState<string | null>(null);
   const [productsError, setProductsError] = useState<string | null>(null);
+  const [showroomsError, setShowroomsError] = useState<string | null>(null);
 
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(!isFirebaseConfigured);
@@ -792,10 +802,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     const unsubShowrooms = onSnapshot(
       collection(activeDb, 'showrooms'),
       (snap) => {
+        setShowroomsError(null);
         setDbShowrooms(snap.docs.map((d) => d.data() as Showroom));
+        setShowroomsLoading(false);
         markSettled('showrooms');
       },
-      () => markSettled('showrooms')
+      (err) => {
+        console.warn('Showrooms loading warning:', err);
+        setShowroomsError('শোরুম তালিকা ডাটাবেস থেকে লোড করা যায়নি; অনুমোদিত শোরুম তালিকা দেখানো হচ্ছে।');
+        setShowroomsLoading(false);
+        markSettled('showrooms');
+      }
     );
 
     const unsubGreetings = onSnapshot(
@@ -1080,8 +1097,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             ? docItem.occasions
             : seed?.occasions ?? [],
           showrooms: Array.isArray(docItem.showrooms)
-            ? docItem.showrooms
-            : seed?.showrooms ?? [],
+            ? docItem.showrooms.filter(
+                (sid): sid is string =>
+                  typeof sid === 'string' && !CONFIRMED_DEMO_SHOWROOM_IDS.has(sid)
+              )
+            : [],
           availability: docItem.availability || seed?.availability || 'In Showroom',
           importantNotes: docItem.importantNotes || seed?.importantNotes || '',
           featured: Boolean(docItem.featured),
@@ -1108,29 +1128,30 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [allProducts]
   );
 
-  const allShowrooms = useMemo(() => {
-    if (!dbShowrooms || dbShowrooms.length === 0) return SEED_SHOWROOMS;
+  const legacyDemoShowrooms = useMemo(() => {
+    if (!dbShowrooms || dbShowrooms.length === 0) return [];
+    return dbShowrooms.filter((docItem) => isDemoOrDummyShowroom(docItem));
+  }, [dbShowrooms]);
+
+  const firestoreShowrooms = useMemo(() => {
+    if (!dbShowrooms || dbShowrooms.length === 0) return [];
     return dbShowrooms
+      .filter((docItem) => !isDemoOrDummyShowroom(docItem))
       .map((docItem) => {
-        const seed = SEED_SHOWROOMS.find((s) => s.id === docItem.id);
         return {
-          ...seed,
           ...docItem,
-          nameEn: docItem.nameEn || docItem.name_en || seed?.nameEn || docItem.name,
-          name_bn: docItem.name_bn || docItem.name || seed?.name_bn || '',
-          name_en: docItem.name_en || docItem.nameEn || seed?.name_en || '',
-          areaEn: docItem.areaEn || seed?.areaEn || docItem.area,
-          addressEn: docItem.addressEn || docItem.address_en || seed?.addressEn || '',
-          address_bn: docItem.address_bn || docItem.address || seed?.address_bn || '',
-          address_en: docItem.address_en || docItem.addressEn || seed?.address_en || '',
-          description: docItem.description || docItem.description_bn || seed?.description || '',
-          descriptionEn:
-            docItem.descriptionEn || docItem.description_en || seed?.descriptionEn || '',
-          description_bn:
-            docItem.description_bn || docItem.description || seed?.description_bn || '',
-          description_en:
-            docItem.description_en || docItem.descriptionEn || seed?.description_en || '',
-          openingHoursEn: docItem.openingHoursEn || seed?.openingHoursEn || '',
+          nameEn: docItem.nameEn || docItem.name_en || docItem.name,
+          name_bn: docItem.name_bn || docItem.name || '',
+          name_en: docItem.name_en || docItem.nameEn || '',
+          areaEn: docItem.areaEn || docItem.area || '',
+          addressEn: docItem.addressEn || docItem.address_en || '',
+          address_bn: docItem.address_bn || docItem.address || '',
+          address_en: docItem.address_en || docItem.addressEn || '',
+          description: docItem.description || docItem.description_bn || '',
+          descriptionEn: docItem.descriptionEn || docItem.description_en || '',
+          description_bn: docItem.description_bn || docItem.description || '',
+          description_en: docItem.description_en || docItem.descriptionEn || '',
+          openingHoursEn: docItem.openingHoursEn || '',
           visible: docItem.visible !== false,
           deleted: Boolean(docItem.deleted),
         } as Showroom;
@@ -1138,8 +1159,23 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       .sort((a, b) => (a.display_order ?? 99) - (b.display_order ?? 99));
   }, [dbShowrooms]);
 
+  const allShowrooms = useMemo(() => {
+    const mergedMap = new Map<string, Showroom>();
+    CANONICAL_OUTLET_SHOWROOMS.forEach((outlet) => mergedMap.set(outlet.id, outlet));
+    firestoreShowrooms.forEach((fsSr) => {
+      const base = mergedMap.get(fsSr.id);
+      mergedMap.set(fsSr.id, base ? { ...base, ...fsSr } : fsSr);
+    });
+    return Array.from(mergedMap.values()).sort(
+      (a, b) => (a.display_order ?? 99) - (b.display_order ?? 99)
+    );
+  }, [firestoreShowrooms]);
+
   const showrooms = useMemo(
-    () => allShowrooms.filter((s) => s.visible !== false && !s.deleted),
+    () =>
+      allShowrooms.filter(
+        (s) => s.visible !== false && !s.deleted && !isDemoOrDummyShowroom(s)
+      ),
     [allShowrooms]
   );
 
@@ -1697,15 +1733,6 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
-    for (const sr of SEED_SHOWROOMS) {
-      const ref = doc(db, 'showrooms', sr.id);
-      const snap = await getDoc(ref);
-      if (!snap.exists()) {
-        batch.set(ref, { ...sr, visible: true, deleted: false, createdAt: now, updatedAt: now });
-        createdCount += 1;
-      }
-    }
-
     for (const prod of SEED_PRODUCTS) {
       const ref = doc(db, 'products', prod.id);
       const snap = await getDoc(ref);
@@ -2079,6 +2106,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         allOccasions,
         allProducts,
         allShowrooms,
+        firestoreShowrooms,
+        legacyDemoShowrooms,
         allHeroBanners,
         allHomepageSections,
         allGreetingItems,
@@ -2090,9 +2119,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setLanguageMode,
         loading,
         productsLoading,
+        showroomsLoading,
         firestoreEmpty,
         error,
         productsError,
+        showroomsError,
         user,
         authReady,
         userRole,
