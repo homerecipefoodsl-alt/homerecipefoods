@@ -1,8 +1,11 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "homerecipefoodsl",
+  "name": "homerecipefoods",
   "main": "worker/index.ts",
   "compatibility_date": "2025-04-01",
+  "keep_vars": true,
+  "observability": {
+    "enabled": true
+  },
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
@@ -12,8 +15,5 @@
       "/robots.txt",
       "/sitemap.xml"
     ]
-  },
-  "vars": {
-    "APP_URL": "https://homerecipefoods.workers.dev"
   }
 }
