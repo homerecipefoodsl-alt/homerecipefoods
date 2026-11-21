@@ -13,7 +13,6 @@ import {
   getDocFromServer,
   getFirestore,
 } from 'firebase/firestore';
-import { FirebaseStorage, getStorage } from 'firebase/storage';
 import firebaseAppletConfig from '../../firebase-applet-config.json';
 
 export const EXPECTED_FIREBASE_PROJECT_ID = 'ai-studio-applet-webapp-e4b0f';
@@ -49,14 +48,6 @@ const rawConfig = {
     firebaseAppletConfig.projectId ||
     ''
   ).trim(),
-  storageBucket: (
-    env.VITE_FIREBASE_STORAGE_BUCKET ||
-    firebaseAppletConfig.storageBucket ||
-    ''
-  )
-    .trim()
-    .replace(/^gs:\/\//i, '')
-    .replace(/\.frebasestorage\.app$/i, '.firebasestorage.app'),
   messagingSenderId: (
     env.VITE_FIREBASE_MESSAGING_SENDER_ID ||
     firebaseAppletConfig.messagingSenderId ||
@@ -75,7 +66,6 @@ export const firebaseMissingFields: string[] = [
   ...(!rawConfig.apiKey ? ['VITE_FIREBASE_API_KEY'] : []),
   ...(!rawConfig.authDomain ? ['VITE_FIREBASE_AUTH_DOMAIN'] : []),
   ...(!rawConfig.projectId ? ['VITE_FIREBASE_PROJECT_ID'] : []),
-  ...(!rawConfig.storageBucket ? ['VITE_FIREBASE_STORAGE_BUCKET'] : []),
   ...(!rawConfig.messagingSenderId ? ['VITE_FIREBASE_MESSAGING_SENDER_ID'] : []),
   ...(!rawConfig.appId ? ['VITE_FIREBASE_APP_ID'] : []),
 ];
@@ -98,7 +88,6 @@ export const firebasePublicInfo = {
   expectedProjectId: EXPECTED_FIREBASE_PROJECT_ID,
   projectId: rawConfig.projectId || '(not set)',
   authDomain: rawConfig.authDomain || '(not set)',
-  storageBucket: rawConfig.storageBucket || '(not set)',
   firestoreDatabaseId: rawConfig.firestoreDatabaseId || '(default)',
   hasRealtimeDatabase: Boolean(rawConfig.databaseURL),
 };
@@ -106,7 +95,6 @@ export const firebasePublicInfo = {
 let appInstance: FirebaseApp | null = null;
 let dbInstance: Firestore | null = null;
 let authInstance: Auth | null = null;
-let storageInstance: FirebaseStorage | null = null;
 let rtdbInstance: Database | null = null;
 
 if (isFirebaseConfigured) {
@@ -114,7 +102,6 @@ if (isFirebaseConfigured) {
     apiKey: rawConfig.apiKey,
     authDomain: rawConfig.authDomain,
     projectId: rawConfig.projectId,
-    storageBucket: rawConfig.storageBucket,
     messagingSenderId: rawConfig.messagingSenderId,
     appId: rawConfig.appId,
     ...(rawConfig.databaseURL ? { databaseURL: rawConfig.databaseURL } : {}),
@@ -130,9 +117,6 @@ if (isFirebaseConfigured) {
       : getFirestore(appInstance);
 
   authInstance = getAuth(appInstance);
-  storageInstance = getStorage(appInstance);
-  storageInstance.maxUploadRetryTime = 15000;
-  storageInstance.maxOperationRetryTime = 15000;
   if (rawConfig.databaseURL) {
     try {
       rtdbInstance = getDatabase(appInstance);
@@ -146,7 +130,6 @@ if (isFirebaseConfigured) {
 export const app = appInstance;
 export const db = dbInstance;
 export const auth = authInstance;
-export const storage = storageInstance;
 export const rtdb = rtdbInstance;
 
 export async function applyAuthPersistence(rememberSession: boolean): Promise<void> {

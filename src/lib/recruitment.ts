@@ -4,12 +4,6 @@ import {
   runTransaction,
   serverTimestamp,
 } from 'firebase/firestore';
-import {
-  type FirebaseStorage,
-  getDownloadURL,
-  ref,
-  uploadBytes,
-} from 'firebase/storage';
 import type { JobApplicationStatus, JobPosting } from '../types';
 import { toBengaliDigits } from './utils';
 
@@ -326,13 +320,10 @@ export function sanitizeUploadFileName(fileName: string): string {
 }
 
 export async function uploadRecruitmentFile(
-  storage: FirebaseStorage,
-  storagePath: string,
-  file: File
+  _storagePath: string,
+  _file: File
 ): Promise<string> {
-  const storageRef = ref(storage, storagePath);
-  const snap = await uploadBytes(storageRef, file, {
-    contentType: file.type || 'application/octet-stream',
-  });
-  return getDownloadURL(snap.ref);
+  throw new Error(
+    'ডকুমেন্ট আপলোড সেবা বর্তমানে সংরক্ষিত স্টোরেজের সাথে সংযুক্ত হচ্ছে। অনুগ্রহ করে পরে আবার চেষ্টা করুন।'
+  );
 }

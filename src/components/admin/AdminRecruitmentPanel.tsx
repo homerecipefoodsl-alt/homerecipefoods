@@ -2040,7 +2040,7 @@ export function AdminRecruitmentPanel() {
                       {applicantDocList(selectedApp).length > 0 && (
                         <div className="pt-1">
                           <p className="mb-1.5 font-semibold text-[#1C1917]">
-                            সংযুক্ত ফাইল (Firebase Storage):
+                            সংযুক্ত ফাইল:
                           </p>
                           <div className="flex flex-wrap gap-2">
                             {applicantDocList(selectedApp).map((docRef, idx) => (

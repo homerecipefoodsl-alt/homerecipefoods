@@ -8,6 +8,7 @@ export const ALLOWED_MEDIA_FOLDERS = [
 
 export type MediaUploadFolder = (typeof ALLOWED_MEDIA_FOLDERS)[number];
 
+export const DEFAULT_R2_BUCKET_NAME = 'home-recipe-product-images';
 export const MAX_MEDIA_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
 
 export const ALLOWED_MEDIA_MIME_TYPES = [
@@ -104,6 +105,30 @@ export function validateR2ReadKey(rawPath: string): string | null {
   return trimmed;
 }
 
+export function extractR2KeyFromInput(input: {
+  storagePath?: string;
+  downloadUrl?: string;
+}): string | null {
+  if (typeof input.storagePath === 'string' && input.storagePath.trim()) {
+    return validateR2ReadKey(input.storagePath);
+  }
+  if (typeof input.downloadUrl === 'string' && input.downloadUrl.trim()) {
+    const raw = input.downloadUrl.trim();
+    const marker = '/api/media/file/';
+    const idx = raw.indexOf(marker);
+    if (idx !== -1) {
+      return validateR2ReadKey(raw.slice(idx + marker.length));
+    }
+    try {
+      const parsed = new URL(raw);
+      return validateR2ReadKey(parsed.pathname.replace(/^\/+/, ''));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 export function inspectImageBytes(
   bytes: Uint8Array,
   declaredMime?: string
@@ -141,7 +166,7 @@ export function inspectImageBytes(
       ok: false,
       status: 415,
       code: 'UNSUPPORTED_MEDIA_TYPE',
-      message: 'অসমর্থিত ফাইল ফরম্যাট। শুধু JPG, PNG অথবা WEBP ছবি আপলোড করা যাবে।',
+      message: 'অসমর্থিত ফাইল ফরম্যাট। শুধু JPG, JPEG, PNG অথবা WEBP ছবি আপলোড করা যাবে।',
     };
   }
 
@@ -182,7 +207,7 @@ export function inspectImageBytes(
     ok: false,
     status: 415,
     code: 'INVALID_IMAGE_SIGNATURE',
-    message: 'নির্বাচিত ফাইলটি বৈধ JPG, PNG বা WEBP ছবি নয়।',
+    message: 'নির্বাচিত ফাইলটি বৈধ JPG, JPEG, PNG বা WEBP ছবি নয়।',
   };
 }
 
@@ -236,6 +261,15 @@ export function resolveAllowedApiCorsOrigin(
   return null;
 }
 
+export function isPrivateR2S3Host(urlStr: string): boolean {
+  try {
+    const parsed = new URL(urlStr);
+    return parsed.hostname.toLowerCase().endsWith('.r2.cloudflarestorage.com');
+  } catch {
+    return false;
+  }
+}
+
 export function buildR2MediaPublicUrl(params: {
   objectKey: string;
   publicBaseUrl?: string;
@@ -246,11 +280,12 @@ export function buildR2MediaPublicUrl(params: {
   if (rawPublic) {
     try {
       const parsed = new URL(rawPublic);
-      if (parsed.protocol === 'https:') {
+      // Never allow private S3 endpoint (*.r2.cloudflarestorage.com) to be returned as a public URL
+      if (parsed.protocol === 'https:' && !isPrivateR2S3Host(rawPublic)) {
         return `${parsed.origin}${parsed.pathname.replace(/\/+$/, '')}/${cleanKey}`;
       }
     } catch {
-      // Fall back to worker/app media serving route
+      // Fall back to Worker R2 media delivery route
     }
   }
 
@@ -274,13 +309,16 @@ export function inspectR2S3Credentials(env: {
   const accountId = (env.R2_ACCOUNT_ID || '').trim();
   const accessKeyId = (env.R2_ACCESS_KEY_ID || '').trim();
   const secretAccessKey = (env.R2_SECRET_ACCESS_KEY || '').trim();
-  const bucketName = (env.R2_BUCKET_NAME || 'homerecipefoods-media').trim();
+  const bucketName = (env.R2_BUCKET_NAME || DEFAULT_R2_BUCKET_NAME).trim();
 
   if (!accountId || !accessKeyId || !secretAccessKey || !bucketName) {
     return { configured: false };
   }
 
-  if (!/^[a-z0-9]{16,64}$/i.test(accountId) || !/^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/.test(bucketName)) {
+  if (
+    !/^[a-z0-9]{16,64}$/i.test(accountId) ||
+    !/^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/.test(bucketName)
+  ) {
     return { configured: false };
   }
 
@@ -330,7 +368,7 @@ async function hmacSha256Raw(
 }
 
 async function signR2S3Request(params: {
-  method: 'PUT' | 'GET';
+  method: 'PUT' | 'GET' | 'DELETE';
   creds: R2S3Credentials;
   objectKey: string;
   payloadHash: string;
@@ -465,4 +503,27 @@ export async function getObjectFromR2S3(params: {
     method: 'GET',
     headers: signed.headers,
   });
+}
+
+export async function deleteObjectFromR2S3(params: {
+  creds: R2S3Credentials;
+  objectKey: string;
+}): Promise<{ ok: true } | { ok: false; status: number }> {
+  const emptyHash = await sha256Hex('');
+  const signed = await signR2S3Request({
+    method: 'DELETE',
+    creds: params.creds,
+    objectKey: params.objectKey,
+    payloadHash: emptyHash,
+  });
+
+  const resp = await fetch(signed.url, {
+    method: 'DELETE',
+    headers: signed.headers,
+  });
+
+  if (!resp.ok && resp.status !== 204 && resp.status !== 404) {
+    return { ok: false, status: resp.status };
+  }
+  return { ok: true };
 }

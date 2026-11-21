@@ -26,7 +26,6 @@ import {
   OperationType,
   db,
   handleFirestoreError,
-  storage,
 } from '../lib/firebase';
 import {
   computeJobApplicationLock,
@@ -243,12 +242,11 @@ export function JobApplyPage() {
     e.preventDefault();
     setErrorMsg(null);
 
-    if (!db || !storage) {
-      setErrorMsg('ডাটাবেস বা ফাইল স্টোরেজ সংযোগ এই মুহূর্তে সক্রিয় নয়। একটু পর আবার চেষ্টা করুন।');
+    if (!db) {
+      setErrorMsg('ডাটাবেস সংযোগ এই মুহূর্তে সক্রিয় নয়। একটু পর আবার চেষ্টা করুন।');
       return;
     }
     const activeDb = db;
-    const activeStorage = storage;
 
     if (!job || getJobWindowState(job) !== 'open') {
       setErrorMsg('এই পদের জন্য আবেদন বর্তমানে চালু নেই।');
@@ -340,7 +338,7 @@ export function JobApplyPage() {
       setSubmitStepLabel('আবেদন নম্বর তৈরি হচ্ছে...');
       const applicationCode = await reserveNextApplicationId(activeDb);
 
-      // Step 2: Upload Photo & Documents to Firebase Storage (fail-fast before Firestore commit)
+      // Step 2: Upload Photo & Documents (fail-fast before Firestore commit)
       setSubmitStepLabel('ছবি ও ডকুমেন্ট আপলোড হচ্ছে...');
       let photoUrl = '';
       let photoStoragePath = '';
@@ -350,7 +348,7 @@ export function JobApplyPage() {
         photoStoragePath = `job-applications/${applicationCode}/photo/${sanitizeUploadFileName(
           photoFile.name
         )}`;
-        photoUrl = await uploadRecruitmentFile(activeStorage, photoStoragePath, photoFile);
+        photoUrl = await uploadRecruitmentFile(photoStoragePath, photoFile);
 
         const uploadDocIfPresent = async (
           file: File | null,
@@ -361,7 +359,7 @@ export function JobApplyPage() {
           const path = `job-applications/${applicationCode}/documents/${prefix}_${sanitizeUploadFileName(
             file.name
           )}`;
-          const url = await uploadRecruitmentFile(activeStorage, path, file);
+          const url = await uploadRecruitmentFile(path, file);
           return {
             name: file.name.slice(0, 120),
             docType,

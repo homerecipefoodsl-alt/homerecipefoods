@@ -18,6 +18,9 @@ import {
   buildR2ObjectKey,
   CATALOG_UPLOAD_PERMISSIONS,
   CATALOG_UPLOAD_STAFF_ROLES,
+  DEFAULT_R2_BUCKET_NAME,
+  deleteObjectFromR2S3,
+  extractR2KeyFromInput,
   getObjectFromR2S3,
   inspectImageBytes,
   inspectR2S3Credentials,
@@ -56,11 +59,12 @@ interface R2BucketBinding {
       customMetadata?: Record<string, string>;
     }
   ): Promise<unknown>;
+  delete(keys: string | string[]): Promise<void>;
 }
 
 interface Env {
   ASSETS: CloudflareAssetsBinding;
-  MEDIA_BUCKET?: R2BucketBinding;
+  PRODUCT_IMAGES?: R2BucketBinding;
   GEMINI_API_KEY?: string;
   APP_URL?: string;
   FIREBASE_SERVICE_ACCOUNT_JSON?: string;
@@ -136,7 +140,7 @@ const CORS_HEADERS: Record<string, string> = {
 
 function buildScopedCorsHeaders(corsOrigin: string | null): Record<string, string> {
   const headers: Record<string, string> = {
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     'Access-Control-Allow-Headers':
       'Content-Type, Authorization, X-Chat-Client-Id, X-Upload-Folder, X-Entity-Id, X-File-Name',
     Vary: 'Origin',
@@ -1864,8 +1868,8 @@ async function handleMediaUploadWorker(
     });
 
     const s3Creds = inspectR2S3Credentials(env);
-    if (env.MEDIA_BUCKET) {
-      await env.MEDIA_BUCKET.put(objectKey, bytes, {
+    if (env.PRODUCT_IMAGES) {
+      await env.PRODUCT_IMAGES.put(objectKey, bytes, {
         httpMetadata: {
           contentType: inspection.contentType,
           cacheControl: 'public, max-age=31536000, immutable',
@@ -1893,15 +1897,16 @@ async function handleMediaUploadWorker(
     } else {
       return scopedErrorResponse(
         'R2_NOT_CONFIGURED',
-        'Cloudflare R2 বাকেট (homerecipefoods-media) এখনো Worker-এ যুক্ত হয়নি।',
+        `Cloudflare R2 বাকেট (${DEFAULT_R2_BUCKET_NAME}) Worker-এর PRODUCT_IMAGES বাইন্ডিংয়ে পাওয়া যায়নি।`,
         503,
         corsOrigin
       );
     }
 
-    const workerOrigin = url.origin.startsWith('http://') && !url.hostname.includes('localhost')
-      ? url.origin.replace(/^http:\/\//i, 'https://')
-      : url.origin;
+    const workerOrigin =
+      url.origin.startsWith('http://') && !url.hostname.includes('localhost')
+        ? url.origin.replace(/^http:\/\//i, 'https://')
+        : url.origin;
     const downloadUrl = buildR2MediaPublicUrl({
       objectKey,
       publicBaseUrl: env.R2_PUBLIC_URL,
@@ -1932,6 +1937,125 @@ async function handleMediaUploadWorker(
   }
 }
 
+async function handleMediaDeleteWorker(
+  request: Request,
+  env: Env,
+  corsOrigin: string | null,
+  rawKeyFromPath?: string
+): Promise<Response> {
+  try {
+    const authHeader = request.headers.get('authorization') || '';
+    const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (!idToken) {
+      return scopedErrorResponse(
+        'UNAUTHORIZED',
+        'ছবি মুছতে অ্যাডমিন অ্যাকাউন্টে লগইন থাকতে হবে।',
+        401,
+        corsOrigin
+      );
+    }
+
+    const { projectId, firestoreDatabaseId } = getFirebaseRuntimeConfig(env);
+    let decoded: VerifiedFirebaseToken;
+    try {
+      decoded = await verifyFirebaseIdTokenWorker(idToken, projectId);
+    } catch {
+      return scopedErrorResponse(
+        'UNAUTHORIZED',
+        'আপনার লগইন সেশন শেষ হয়ে গেছে। অনুগ্রহ করে আবার লগইন করুন।',
+        401,
+        corsOrigin
+      );
+    }
+
+    if (!decoded.email || !decoded.emailVerified) {
+      return scopedErrorResponse(
+        'UNVERIFIED_ADMIN',
+        'অ্যাডমিন ইমেইল যাচাইকৃত না হলে ছবি মুছা যাবে না।',
+        403,
+        corsOrigin
+      );
+    }
+
+    const authority = await verifyCatalogUploadAuthorityWorker(
+      idToken,
+      decoded.uid,
+      decoded.email,
+      projectId,
+      firestoreDatabaseId
+    );
+    if (!authority.allowed) {
+      return scopedErrorResponse(
+        'PERMISSION_DENIED',
+        'ছবি মুছে ফেলার জন্য আপনার পর্যাপ্ত প্রশাসনিক অনুমতি নেই।',
+        403,
+        corsOrigin
+      );
+    }
+
+    let objectKey: string | null = rawKeyFromPath ? validateR2ReadKey(rawKeyFromPath) : null;
+    if (!objectKey) {
+      const body = (await request.json().catch(() => ({}))) as {
+        storagePath?: string;
+        downloadUrl?: string;
+      };
+      objectKey = extractR2KeyFromInput(body);
+    }
+
+    if (!objectKey) {
+      return scopedErrorResponse(
+        'INVALID_OBJECT_KEY',
+        'বৈধ R2 object key প্রদান করা হয়নি।',
+        400,
+        corsOrigin
+      );
+    }
+
+    const s3Creds = inspectR2S3Credentials(env);
+    if (env.PRODUCT_IMAGES) {
+      await env.PRODUCT_IMAGES.delete(objectKey);
+    } else if (s3Creds.configured) {
+      const delRes = await deleteObjectFromR2S3({
+        creds: s3Creds.creds,
+        objectKey,
+      });
+      if (delRes.ok === false) {
+        return scopedErrorResponse(
+          'R2_DELETE_FAILED',
+          'Cloudflare R2 থেকে ছবিটি মুছে ফেলা যায়নি।',
+          502,
+          corsOrigin
+        );
+      }
+    } else {
+      return scopedErrorResponse(
+        'R2_NOT_CONFIGURED',
+        `Cloudflare R2 বাকেট (${DEFAULT_R2_BUCKET_NAME}) Worker-এর PRODUCT_IMAGES বাইন্ডিংয়ে পাওয়া যায়নি।`,
+        503,
+        corsOrigin
+      );
+    }
+
+    return scopedJsonResponse(
+      {
+        success: true,
+        ok: true,
+        deletedKey: objectKey,
+        storageProvider: 'cloudflare-r2',
+      },
+      200,
+      corsOrigin
+    );
+  } catch {
+    return scopedErrorResponse(
+      'MEDIA_DELETE_ERROR',
+      'ছবি মুছে ফেলার সময় সার্ভারে সমস্যা হয়েছে।',
+      500,
+      corsOrigin
+    );
+  }
+}
+
 async function handleMediaFileGetWorker(
   request: Request,
   env: Env,
@@ -1942,8 +2066,8 @@ async function handleMediaFileGetWorker(
     return new Response('Not found', { status: 404 });
   }
 
-  if (env.MEDIA_BUCKET) {
-    const obj = await env.MEDIA_BUCKET.get(objectKey);
+  if (env.PRODUCT_IMAGES) {
+    const obj = await env.PRODUCT_IMAGES.get(objectKey);
     if (!obj || !obj.body) {
       return new Response('Image not found', { status: 404 });
     }
@@ -2015,9 +2139,20 @@ export default {
         env.APP_URL
       );
 
-      if (url.pathname.startsWith('/api/media/file/') && request.method === 'GET') {
+      if (url.pathname.startsWith('/api/media/file/')) {
         const rawKey = url.pathname.slice('/api/media/file/'.length);
-        return handleMediaFileGetWorker(request, env, rawKey);
+        if (request.method === 'GET') {
+          return handleMediaFileGetWorker(request, env, rawKey);
+        }
+        if (request.method === 'OPTIONS') {
+          return new Response(null, {
+            status: 204,
+            headers: buildScopedCorsHeaders(corsOrigin),
+          });
+        }
+        if (request.method === 'DELETE') {
+          return handleMediaDeleteWorker(request, env, corsOrigin, rawKey);
+        }
       }
 
       if (url.pathname === '/api/media/upload') {
@@ -2032,14 +2167,28 @@ export default {
         }
       }
 
+      if (url.pathname === '/api/media/delete') {
+        if (request.method === 'OPTIONS') {
+          return new Response(null, {
+            status: 204,
+            headers: buildScopedCorsHeaders(corsOrigin),
+          });
+        }
+        if (request.method === 'POST' || request.method === 'DELETE') {
+          return handleMediaDeleteWorker(request, env, corsOrigin);
+        }
+      }
+
       if (url.pathname === '/api/media/health' && request.method === 'GET') {
         const s3Configured = inspectR2S3Credentials(env).configured;
         return scopedJsonResponse(
           {
             success: true,
-            ok: Boolean(env.MEDIA_BUCKET || s3Configured),
+            ok: Boolean(env.PRODUCT_IMAGES || s3Configured),
             provider: 'cloudflare-r2',
-            bindingActive: Boolean(env.MEDIA_BUCKET),
+            bindingName: 'PRODUCT_IMAGES',
+            bucketName: DEFAULT_R2_BUCKET_NAME,
+            bindingActive: Boolean(env.PRODUCT_IMAGES),
             s3FallbackActive: s3Configured,
           },
           200,
@@ -2061,7 +2210,8 @@ export default {
           brand: 'Home Recipe Foods',
           runtime: 'cloudflare-worker',
           firebaseProjectId: getFirebaseRuntimeConfig(env).projectId,
-          r2MediaBound: Boolean(env.MEDIA_BUCKET),
+          r2MediaBound: Boolean(env.PRODUCT_IMAGES),
+          r2BindingName: 'PRODUCT_IMAGES',
         });
       }
 

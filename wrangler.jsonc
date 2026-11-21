@@ -18,8 +18,8 @@
   },
   "r2_buckets": [
     {
-      "binding": "MEDIA_BUCKET",
-      "bucket_name": "homerecipefoods-media"
+      "binding": "PRODUCT_IMAGES",
+      "bucket_name": "home-recipe-product-images"
     }
   ]
 }

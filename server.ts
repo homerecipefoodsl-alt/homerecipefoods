@@ -20,6 +20,9 @@ import {
   buildR2ObjectKey,
   CATALOG_UPLOAD_PERMISSIONS,
   CATALOG_UPLOAD_STAFF_ROLES,
+  DEFAULT_R2_BUCKET_NAME,
+  deleteObjectFromR2S3,
+  extractR2KeyFromInput,
   getObjectFromR2S3,
   inspectImageBytes,
   inspectR2S3Credentials,
@@ -89,14 +92,20 @@ app.use('/api', (req, res, next) => {
     process.env.APP_URL
   );
   res.setHeader('Vary', 'Origin');
-  if (req.path === '/media/upload' || req.path.startsWith('/admin/') || req.path.startsWith('/auth/')) {
+  if (
+    req.path === '/media/upload' ||
+    req.path === '/media/delete' ||
+    req.method === 'DELETE' ||
+    req.path.startsWith('/admin/') ||
+    req.path.startsWith('/auth/')
+  ) {
     if (corsOrigin) {
       res.setHeader('Access-Control-Allow-Origin', corsOrigin);
     }
   } else {
     res.setHeader('Access-Control-Allow-Origin', corsOrigin || '*');
   }
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader(
     'Access-Control-Allow-Headers',
     'Content-Type, Authorization, X-Chat-Client-Id, X-Upload-Folder, X-Entity-Id, X-File-Name'
@@ -1711,6 +1720,8 @@ app.get('/api/media/health', (_req, res) => {
     success: true,
     ok: s3Configured,
     provider: 'cloudflare-r2',
+    bindingName: 'PRODUCT_IMAGES',
+    bucketName: DEFAULT_R2_BUCKET_NAME,
     bindingActive: false,
     s3FallbackActive: s3Configured,
   });
@@ -1932,6 +1943,96 @@ app.use('/api/media/upload', (err: unknown, _req: Request, res: Response, next: 
     return;
   }
   next(err);
+});
+
+async function handleExpressMediaDelete(req: Request, res: Response, rawPathKey?: string) {
+  try {
+    const authHeader = req.headers.authorization || '';
+    const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (!idToken) {
+      sendError(res, 'UNAUTHORIZED', 'ছবি মুছতে অ্যাডমিন অ্যাকাউন্টে লগইন থাকতে হবে।', 401);
+      return;
+    }
+
+    let decoded: VerifiedFirebaseToken;
+    try {
+      decoded = await verifyFirebaseIdToken(idToken);
+    } catch {
+      sendError(
+        res,
+        'UNAUTHORIZED',
+        'আপনার লগইন সেশন শেষ হয়ে গেছে। অনুগ্রহ করে আবার লগইন করুন।',
+        401
+      );
+      return;
+    }
+
+    if (!decoded.email || !decoded.emailVerified) {
+      sendError(
+        res,
+        'UNVERIFIED_ADMIN',
+        'অ্যাডমিন ইমেইল যাচাইকৃত না হলে ছবি মুছা যাবে না।',
+        403
+      );
+      return;
+    }
+
+    const authority = await verifyCatalogUploadAuthority(idToken, decoded.uid, decoded.email);
+    if (!authority.allowed) {
+      sendError(
+        res,
+        'PERMISSION_DENIED',
+        'ছবি মুছে ফেলার জন্য আপনার পর্যাপ্ত প্রশাসনিক অনুমতি নেই।',
+        403
+      );
+      return;
+    }
+
+    const objectKey = rawPathKey
+      ? validateR2ReadKey(rawPathKey)
+      : extractR2KeyFromInput((req.body || {}) as { storagePath?: string; downloadUrl?: string });
+
+    if (!objectKey) {
+      sendError(res, 'INVALID_OBJECT_KEY', 'বৈধ R2 object key প্রদান করা হয়নি।', 400);
+      return;
+    }
+
+    const s3Creds = inspectR2S3Credentials(process.env);
+    if (!s3Creds.configured) {
+      sendError(
+        res,
+        'R2_NOT_CONFIGURED',
+        `Cloudflare R2 বাকেট (${DEFAULT_R2_BUCKET_NAME}) সার্ভারে কনফিগার করা নেই।`,
+        503
+      );
+      return;
+    }
+
+    const delRes = await deleteObjectFromR2S3({
+      creds: s3Creds.creds,
+      objectKey,
+    });
+    if (delRes.ok === false) {
+      sendError(res, 'R2_DELETE_FAILED', 'Cloudflare R2 থেকে ছবিটি মুছে ফেলা যায়নি।', 502);
+      return;
+    }
+
+    res.json({
+      success: true,
+      ok: true,
+      deletedKey: objectKey,
+      storageProvider: 'cloudflare-r2',
+    });
+  } catch {
+    sendError(res, 'MEDIA_DELETE_ERROR', 'ছবি মুছে ফেলার সময় সার্ভারে সমস্যা হয়েছে।', 500);
+  }
+}
+
+app.post('/api/media/delete', (req, res) => handleExpressMediaDelete(req, res));
+app.delete('/api/media/delete', (req, res) => handleExpressMediaDelete(req, res));
+app.delete('/api/media/file/*', (req, res) => {
+  const rawKey = req.path.replace(/^\/api\/media\/file\//, '');
+  return handleExpressMediaDelete(req, res, rawKey);
 });
 
 app.post('/api/chat/ai', handleAiChatEndpoint);

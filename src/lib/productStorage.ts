@@ -188,7 +188,7 @@ function mapUploadHttpError(status: number, body: MediaUploadApiResponse | null)
     case 415:
       return 'অসমর্থিত ফাইল ফরম্যাট। শুধু JPG, PNG অথবা WEBP ছবি ব্যবহার করুন।';
     case 503:
-      return 'Cloudflare R2 স্টোরেজ বাকেট এখনো সংযুক্ত করা হয়নি। Cloudflare Dashboard → R2-তে "homerecipefoods-media" বাকেট তৈরি করুন।';
+      return 'Cloudflare R2 বাকেট (home-recipe-product-images) এখনো Worker-এর PRODUCT_IMAGES বাইন্ডিংয়ে সংযুক্ত করা হয়নি।';
     default:
       return 'Cloudflare R2-তে ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে কিছুক্ষণ পর আবার চেষ্টা করুন।';
   }
@@ -246,7 +246,15 @@ function sendBinaryUploadRequest(params: {
 
 function isValidHostedImageUrl(url: string): boolean {
   if (!url || isForbiddenInlineImageUrl(url)) return false;
-  return url.startsWith('https://') || url.startsWith('http://') || url.startsWith('/api/media/file/');
+  if (url.startsWith('/api/media/file/')) return true;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+    if (parsed.hostname.toLowerCase().endsWith('.r2.cloudflarestorage.com')) return false;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function uploadCatalogImageToStorage(params: {
@@ -330,4 +338,31 @@ export async function uploadCatalogImageToStorage(params: {
     fileName: preparedFile.name,
     sizeBytes: response.body.sizeBytes || preparedFile.size,
   };
+}
+
+export async function deleteCatalogImageFromStorage(params: {
+  storagePath?: string;
+  downloadUrl?: string;
+}): Promise<void> {
+  if (!auth?.currentUser || !auth.currentUser.emailVerified) {
+    throw new Error('ছবি মুছতে যাচাইকৃত অ্যাডমিন অ্যাকাউন্টে লগইন থাকতে হবে।');
+  }
+
+  const idToken = await auth.currentUser.getIdToken();
+  const resp = await fetch('/api/media/delete', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify({
+      storagePath: params.storagePath,
+      downloadUrl: params.downloadUrl,
+    }),
+  });
+
+  if (!resp.ok) {
+    const body = (await resp.json().catch(() => null)) as MediaUploadApiResponse | null;
+    throw new Error(mapUploadHttpError(resp.status, body));
+  }
 }
