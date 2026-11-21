@@ -24,6 +24,7 @@ import {
   deleteDoc,
   deleteField,
   doc,
+  getDoc,
   serverTimestamp,
   setDoc,
   updateDoc,
@@ -42,7 +43,11 @@ import {
   getShowroomText,
 } from '../../lib/bilingual';
 import { OperationType, handleFirestoreError, requireDb } from '../../lib/firebase';
-import { uploadCatalogImageToStorage, validateCatalogImageFile } from '../../lib/productStorage';
+import {
+  isForbiddenInlineImageUrl,
+  uploadCatalogImageToStorage,
+  validateCatalogImageFile,
+} from '../../lib/productStorage';
 import { formatBdtPrice, toSlug } from '../../lib/utils';
 import type {
   Category,
@@ -51,6 +56,106 @@ import type {
   ProductAvailability,
   Showroom,
 } from '../../types';
+
+const REQUIRED_PRODUCT_SCHEMA_KEYS = [
+  'id',
+  'name',
+  'nameEn',
+  'slug',
+  'category',
+  'categoryName',
+  'productType',
+  'price',
+  'priceUnit',
+  'shortDescription',
+  'description',
+  'images',
+  'ingredients',
+  'sizes',
+  'weight',
+  'occasions',
+  'showrooms',
+  'availability',
+  'importantNotes',
+  'featured',
+  'popular',
+] as const;
+
+const REQUIRED_CATEGORY_SCHEMA_KEYS = [
+  'id',
+  'name',
+  'nameEn',
+  'slug',
+  'description',
+  'image',
+  'order',
+] as const;
+
+const VALID_AVAILABILITIES: ReadonlySet<ProductAvailability> = new Set([
+  'In Showroom',
+  'Pre-Order at Showroom',
+  'Seasonal',
+  'Out of Stock',
+]);
+
+function sanitizeStoredImageUrls(urls: unknown): string[] {
+  if (!Array.isArray(urls)) return [];
+  const seen = new Set<string>();
+  const clean: string[] = [];
+  for (const item of urls) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (!trimmed || isForbiddenInlineImageUrl(trimmed) || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    clean.push(trimmed);
+    if (clean.length >= 6) break;
+  }
+  return clean;
+}
+
+function hasValidTimestamp(value: unknown): boolean {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      'toMillis' in value &&
+      typeof (value as { toMillis?: unknown }).toMillis === 'function'
+  );
+}
+
+function hasCompleteSchema(
+  data: Record<string, unknown> | undefined,
+  requiredKeys: readonly string[]
+): boolean {
+  if (!data) return false;
+  return requiredKeys.every((key) => key in data);
+}
+
+function mapCatalogSaveError(err: unknown, context: string): string {
+  console.error(`[CatalogSave:${context}]`, err);
+  const rawCode =
+    err && typeof err === 'object' && 'code' in err
+      ? String((err as { code?: unknown }).code || '').toLowerCase()
+      : '';
+  const rawMessage = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+
+  if (rawCode.includes('permission-denied') || rawMessage.includes('missing or insufficient permissions')) {
+    return 'সংরক্ষণের অনুমতি পাওয়া যায়নি। অনুগ্রহ করে অ্যাডমিন অ্যাকাউন্ট যাচাই করে আবার চেষ্টা করুন।';
+  }
+  if (rawCode.includes('unauthenticated')) {
+    return 'আপনার লগইন সেশন শেষ হয়ে গেছে। অনুগ্রহ করে আবার লগইন করুন।';
+  }
+  if (
+    rawCode.includes('unavailable') ||
+    rawCode.includes('network') ||
+    rawMessage.includes('offline')
+  ) {
+    return 'ইন্টারনেট সংযোগের কারণে সংরক্ষণ করা যায়নি। অনুগ্রহ করে আবার চেষ্টা করুন।';
+  }
+  if (rawCode.includes('invalid-argument')) {
+    return 'প্রদত্ত তথ্যের ফরম্যাট সঠিক নয়। অনুগ্রহ করে ঘরগুলো যাচাই করে আবার চেষ্টা করুন।';
+  }
+  return 'সংরক্ষণে সমস্যা হয়েছে। অনুগ্রহ করে তথ্যগুলো যাচাই করে আবার চেষ্টা করুন।';
+}
 
 // ========================
 // 1. PRODUCT MANAGEMENT
@@ -85,7 +190,6 @@ export function AdminProductsPanel() {
   const [editorUploadLabel, setEditorUploadLabel] = useState<string>('');
   const [editorUploadPreviewUrl, setEditorUploadPreviewUrl] = useState<string | null>(null);
   const [editorUploadError, setEditorUploadError] = useState<string | null>(null);
-  const [editorUploadNotice, setEditorUploadNotice] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deletingProduct, setDeletingProduct] = useState(false);
@@ -234,14 +338,13 @@ export function AdminProductsPanel() {
       return null;
     });
     setEditorUploadError(null);
-    setEditorUploadNotice(null);
     setFeedback(null);
   };
 
   const uploadProductFilesToStorage = async (files: File[]) => {
     if (!editing || files.length === 0) return;
 
-    const currentImages = editing.images.filter(Boolean);
+    const currentImages = sanitizeStoredImageUrls(editing.images);
     const remainingSlots = Math.max(0, 6 - currentImages.length);
     if (remainingSlots <= 0) {
       setEditorUploadError('একটি পণ্যে সর্বোচ্চ ৬টি ছবি রাখা যাবে। নতুন ছবি যোগ করতে একটি ছবি সরান।');
@@ -258,13 +361,10 @@ export function AdminProductsPanel() {
     }
 
     setEditorUploadError(null);
-    setEditorUploadNotice(null);
 
     let accumulatedImages = [...currentImages];
     let activePreviewUrl: string | null = null;
-    let lastFallbackReason: string | null = null;
-    let uploadedViaStorageCount = 0;
-    let uploadedViaFallbackCount = 0;
+    let uploadedCount = 0;
 
     try {
       for (let i = 0; i < queue.length; i += 1) {
@@ -287,30 +387,15 @@ export function AdminProductsPanel() {
           onProgress: (pct) => setEditorUploadProgress(pct),
         });
 
-        const nextCandidateImages = [
+        if (!result.downloadUrl || isForbiddenInlineImageUrl(result.downloadUrl)) {
+          throw new Error('ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে পরে আবার চেষ্টা করুন।');
+        }
+
+        accumulatedImages = [
           result.downloadUrl,
           ...accumulatedImages.filter((u) => u !== result.downloadUrl),
         ].slice(0, 6);
-
-        const totalInlineBytes = nextCandidateImages
-          .filter((u) => u.startsWith('data:'))
-          .reduce((sum, u) => sum + u.length, 0);
-
-        if (totalInlineBytes > 780000) {
-          setEditorUploadError(
-            'এই পণ্যে সংযুক্ত কমপ্রেসড ছবির মোট আকার ডাটাবেস সীমা (780 KB) অতিক্রম করছে। নতুন ছবি যোগ করতে আগে একটি পুরোনো ছবি সরান অথবা Firebase Console থেকে Firebase Storage চালু করুন।'
-          );
-          break;
-        }
-
-        accumulatedImages = nextCandidateImages;
-
-        if (result.mode === 'firebase-storage') {
-          uploadedViaStorageCount += 1;
-        } else {
-          uploadedViaFallbackCount += 1;
-          lastFallbackReason = result.fallbackReason || lastFallbackReason;
-        }
+        uploadedCount += 1;
 
         setEditing((prev) =>
           prev
@@ -323,26 +408,17 @@ export function AdminProductsPanel() {
         );
       }
 
-      if (uploadedViaFallbackCount > 0) {
-        setEditorUploadNotice(
-          `${lastFallbackReason || 'Firebase Storage চালু না থাকায়'} ছবিটি অপ্টিমাইজ/কমপ্রেস করে সরাসরি ডাটাবেসে সেভের জন্য যুক্ত করা হয়েছে। পণ্যে স্থায়ী করতে নিচের "সংরক্ষণ করুন" বাটনে চাপুন। (Firebase Storage চালু করতে: Firebase Console → Build → Storage → Get Started)`
-        );
-      }
-
-      if (uploadedViaStorageCount > 0 || uploadedViaFallbackCount > 0) {
+      if (uploadedCount > 0) {
         setFeedback({
           type: 'success',
-          message:
-            uploadedViaStorageCount > 0 && uploadedViaFallbackCount === 0
-              ? 'ছবি Firebase Storage-এ সফলভাবে আপলোড হয়েছে। পরিবর্তন স্থায়ী করতে "সংরক্ষণ করুন" চাপুন।'
-              : 'ছবি সফলভাবে প্রস্তুত ও যুক্ত হয়েছে। পরিবর্তন স্থায়ী করতে "সংরক্ষণ করুন" চাপুন।',
+          message: 'ছবি সফলভাবে যুক্ত হয়েছে। পণ্যে স্থায়ী করতে "সংরক্ষণ করুন" বাটনে ক্লিক করুন।',
         });
       }
     } catch (err) {
       const msg =
         err instanceof Error && err.message
           ? err.message
-          : 'ছবি আপলোড ব্যর্থ হয়েছে। ফাইল ফরম্যাট ও Firebase Storage যাচাই করুন।';
+          : 'ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে আবার চেষ্টা করুন।';
       setEditorUploadError(msg);
     } finally {
       if (activePreviewUrl) {
@@ -360,6 +436,140 @@ export function AdminProductsPanel() {
     await uploadProductFilesToStorage(fileList);
   };
 
+  const buildNormalizedProductPayload = (params: {
+    source: Product;
+    ingredientsList: string[];
+    sizesList: string[];
+    cleanImages: string[];
+    includeDeleteOldPrice?: boolean;
+  }): Record<string, unknown> => {
+    const { source, ingredientsList, sizesList, cleanImages, includeDeleteOldPrice } = params;
+    const nameBn = (source.name || source.nameBn || source.nameEn || 'পণ্য').trim().slice(0, 160);
+    const nameEn = (source.nameEn || source.name_en || nameBn).trim().slice(0, 160);
+    const resolvedCategorySlug = toSlug(
+      (source.category || allCategories[0]?.slug || 'custom-cake').trim()
+    );
+    const catObj = allCategories.find((c) => c.slug === resolvedCategorySlug);
+    const catText = catObj ? getCategoryText(catObj) : null;
+    const slug = toSlug((source.slug || '').trim() || nameEn || nameBn);
+    const resolvedUnit = ((source.unit ?? source.priceUnit) || 'Piece').trim().slice(0, 60) || 'Piece';
+    const shortDescEn = (source.shortDescriptionEn ?? source.short_description_en ?? '')
+      .trim()
+      .slice(0, 300);
+    const shortDescBn = (source.shortDescription.trim() || shortDescEn || nameBn).slice(0, 300);
+    const fullDescEn = (source.descriptionEn ?? source.description_en ?? shortDescEn)
+      .trim()
+      .slice(0, 4000);
+    const fullDescBn = (
+      source.description.trim() ||
+      shortDescBn ||
+      fullDescEn ||
+      nameBn
+    ).slice(0, 4000);
+    const rawPrice = Number(source.price);
+    const numericPrice = Number.isFinite(rawPrice)
+      ? Math.min(1000000, Math.max(0, rawPrice))
+      : 0;
+    const rawDisplayOrder = Number(source.display_order);
+    const safeDisplayOrder = Number.isFinite(rawDisplayOrder)
+      ? Math.min(10000, Math.max(0, Math.round(rawDisplayOrder)))
+      : 1;
+    const safeAvailability: ProductAvailability = VALID_AVAILABILITIES.has(source.availability)
+      ? source.availability
+      : 'In Showroom';
+
+    const payload: Record<string, unknown> = {
+      id: source.id,
+      name: nameBn,
+      nameBn,
+      nameEn,
+      name_bn: nameBn,
+      name_en: nameEn,
+      slug,
+      category: resolvedCategorySlug,
+      categoryName: (
+        source.categoryName ||
+        catText?.nameBn ||
+        resolvedCategorySlug
+      )
+        .trim()
+        .slice(0, 120),
+      categoryNameEn: (source.categoryNameEn || catText?.nameEn || '')
+        .trim()
+        .slice(0, 120),
+      productType: (source.productType.trim() || 'Bakery & Sweets').slice(0, 120),
+      price: numericPrice,
+      priceUnit: resolvedUnit,
+      unit: resolvedUnit,
+      shortDescription: shortDescBn,
+      shortDescriptionEn: shortDescEn,
+      short_description_bn: shortDescBn,
+      short_description_en: shortDescEn,
+      description: fullDescBn,
+      descriptionEn: fullDescEn,
+      description_bn: fullDescBn,
+      description_en: fullDescEn,
+      image: cleanImages[0] ?? '',
+      images: cleanImages,
+      ingredients: ingredientsList
+        .map((s) => s.trim().slice(0, 120))
+        .filter(Boolean)
+        .slice(0, 25),
+      sizes: sizesList
+        .map((s) => s.trim().slice(0, 80))
+        .filter(Boolean)
+        .slice(0, 10),
+      weight: (source.weight || '').trim().slice(0, 80),
+      occasions: (Array.isArray(source.occasions) ? source.occasions : [])
+        .map((o) => String(o).trim().slice(0, 80))
+        .filter(Boolean)
+        .slice(0, 15),
+      showrooms: (Array.isArray(source.showrooms) ? source.showrooms : [])
+        .map((sid) => String(sid).trim().slice(0, 128))
+        .filter((sid) => Boolean(sid) && !CONFIRMED_DEMO_SHOWROOM_IDS.has(sid))
+        .slice(0, 20),
+      availability: safeAvailability,
+      importantNotes: (source.importantNotes || '').trim().slice(0, 800),
+      featured: Boolean(source.featured),
+      popular: Boolean(source.popular),
+      visible: source.visible !== false,
+      deleted: Boolean(source.deleted),
+      display_order: safeDisplayOrder,
+      status: source.deleted ? 'archived' : source.visible === false ? 'draft' : 'published',
+      updatedAt: serverTimestamp(),
+    };
+
+    if (source.masterKey) {
+      payload.masterKey = String(source.masterKey).slice(0, 240);
+    }
+
+    const hasValidOldPrice =
+      typeof source.old_price === 'number' &&
+      Number.isFinite(source.old_price) &&
+      source.old_price > 0;
+    if (hasValidOldPrice) {
+      payload.old_price = Math.min(1000000, Math.max(0, Number(source.old_price)));
+    } else if (includeDeleteOldPrice) {
+      payload.old_price = deleteField();
+    }
+
+    const trimmedDiscount = source.discount?.trim() ?? '';
+    if (trimmedDiscount) {
+      payload.discount = trimmedDiscount.slice(0, 60);
+    } else if (includeDeleteOldPrice) {
+      payload.discount = '';
+    }
+
+    const trimmedPriceLabel = source.price_label?.trim() ?? '';
+    if (trimmedPriceLabel) {
+      payload.price_label = trimmedPriceLabel.slice(0, 80);
+    } else if (includeDeleteOldPrice) {
+      payload.price_label = '';
+    }
+
+    return payload;
+  };
+
   const handleQuickRowImageUpload = async (
     prod: Product,
     e: React.ChangeEvent<HTMLInputElement>
@@ -370,6 +580,8 @@ export function AdminProductsPanel() {
     setUploadingRowId(prod.id);
     setRowUploadProgress(0);
     setFeedback(null);
+
+    let uploadedUrl = '';
     try {
       const uploaded = await uploadCatalogImageToStorage({
         folder: 'products',
@@ -377,50 +589,100 @@ export function AdminProductsPanel() {
         file,
         onProgress: (pct) => setRowUploadProgress(pct),
       });
-      const firestore = requireDb();
-      const existingList = Array.isArray(prod.images) ? prod.images.filter(Boolean) : [];
-      let nextImages = [
-        uploaded.downloadUrl,
-        ...existingList.filter((u) => u !== uploaded.downloadUrl),
-      ].slice(0, 6);
-      // Trim older inline data-URLs from tail if cumulative inline bytes exceed Firestore 1 MiB safety budget
-      while (
-        nextImages.length > 1 &&
-        nextImages.filter((u) => u.startsWith('data:')).reduce((s, u) => s + u.length, 0) > 780000
-      ) {
-        nextImages = nextImages.slice(0, -1);
+      if (!uploaded.downloadUrl || isForbiddenInlineImageUrl(uploaded.downloadUrl)) {
+        throw new Error('ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে পরে আবার চেষ্টা করুন।');
       }
-      await updateDoc(doc(firestore, 'products', prod.id), {
-        image: uploaded.downloadUrl,
-        images: nextImages,
-        updatedAt: serverTimestamp(),
-      });
+      uploadedUrl = uploaded.downloadUrl;
+    } catch (uploadErr) {
+      const msg =
+        uploadErr instanceof Error && uploadErr.message
+          ? uploadErr.message
+          : 'ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে আবার চেষ্টা করুন।';
+      setFeedback({ type: 'error', message: msg });
+      setUploadingRowId(null);
+      setRowUploadProgress(null);
+      return;
+    }
+
+    try {
+      const firestore = requireDb();
+      const productRef = doc(firestore, 'products', prod.id);
+      const existingSnap = await getDoc(productRef);
+      const existingData = existingSnap.exists()
+        ? (existingSnap.data() as Record<string, unknown>)
+        : undefined;
+
+      const existingImages = sanitizeStoredImageUrls(
+        Array.isArray(existingData?.images) ? existingData.images : prod.images
+      );
+      const nextImages = [
+        uploadedUrl,
+        ...existingImages.filter((u) => u !== uploadedUrl),
+      ].slice(0, 6);
+
+      if (
+        existingSnap.exists() &&
+        hasCompleteSchema(existingData, REQUIRED_PRODUCT_SCHEMA_KEYS) &&
+        hasValidTimestamp(existingData?.createdAt)
+      ) {
+        await updateDoc(productRef, {
+          image: uploadedUrl,
+          images: nextImages,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        const mergedSource: Product = {
+          ...prod,
+          ...(existingData ? (existingData as Partial<Product>) : {}),
+          id: prod.id,
+          image: uploadedUrl,
+          images: nextImages,
+        };
+        const fullPayload = buildNormalizedProductPayload({
+          source: mergedSource,
+          ingredientsList: Array.isArray(mergedSource.ingredients)
+            ? mergedSource.ingredients
+            : [],
+          sizesList: Array.isArray(mergedSource.sizes) ? mergedSource.sizes : [],
+          cleanImages: nextImages,
+          includeDeleteOldPrice: Boolean(existingData && 'old_price' in existingData),
+        });
+
+        if (!existingSnap.exists()) {
+          await setDoc(productRef, {
+            ...fullPayload,
+            createdAt: serverTimestamp(),
+          });
+        } else {
+          await updateDoc(
+            productRef,
+            hasValidTimestamp(existingData?.createdAt)
+              ? fullPayload
+              : { ...fullPayload, createdAt: serverTimestamp() }
+          );
+        }
+      }
+
       await logAdminActivity(
         'image_upload',
         'products',
         prod.id,
         prod.nameEn || prod.name,
-        uploaded.mode === 'firebase-storage'
-          ? `Uploaded photo to Firebase Storage for ${prod.nameBn || prod.name}`
-          : `Saved optimized photo to Firestore for ${prod.nameBn || prod.name} (Storage fallback)`
+        `Uploaded product photo for ${prod.nameBn || prod.name}`
       );
       setFeedback({
         type: 'success',
-        message:
-          uploaded.mode === 'firebase-storage'
-            ? `"${prod.nameBn || prod.name}" এর ছবি Firebase Storage-এ সফলভাবে আপডেট হয়েছে।`
-            : `"${prod.nameBn || prod.name}" এর ছবি অপ্টিমাইজ করে ডাটাবেসে সেভ হয়েছে। (${uploaded.fallbackReason || 'Firebase Storage চালু থাকলে মূল ফাইল সেভ হবে'})`,
+        message: `"${prod.nameBn || prod.name}"-এর ছবি সফলভাবে সংরক্ষণ হয়েছে।`,
       });
     } catch (err) {
-      const msg =
-        err instanceof Error && err.message
-          ? err.message
-          : 'ছবি আপলোড ব্যর্থ হয়েছে।';
-      setFeedback({ type: 'error', message: msg });
+      setFeedback({
+        type: 'error',
+        message: mapCatalogSaveError(err, 'quick_image_save'),
+      });
       try {
         handleFirestoreError(err, OperationType.WRITE, `products/${prod.id}`);
       } catch {
-        // Logged
+        // Logged for console diagnostics
       }
     } finally {
       setUploadingRowId(null);
@@ -451,11 +713,11 @@ export function AdminProductsPanel() {
     const nameBn = editing.name.trim();
     const nameEn = editing.nameEn.trim();
     if (!nameBn) {
-      setFeedback({ type: 'error', message: 'অনুগ্রহ করে বাংলা নাম দিন।' });
+      setFeedback({ type: 'error', message: 'অনুগ্রহ করে পণ্যটির বাংলা নাম লিখুন।' });
       return;
     }
     if (!nameEn) {
-      setFeedback({ type: 'error', message: 'অনুগ্রহ করে English Name দিন।' });
+      setFeedback({ type: 'error', message: 'অনুগ্রহ করে পণ্যটির English Name লিখুন।' });
       return;
     }
     if (editorUploadProgress !== null) {
@@ -465,23 +727,38 @@ export function AdminProductsPanel() {
       });
       return;
     }
+    if (editing.images.some((u) => isForbiddenInlineImageUrl(u)) || isForbiddenInlineImageUrl(editing.image)) {
+      setFeedback({
+        type: 'error',
+        message: 'অবৈধ ছবির ফরম্যাট পাওয়া গেছে। অনুগ্রহ করে ছবিটি পুনরায় আপলোড করুন।',
+      });
+      return;
+    }
 
     setSaving(true);
     setFeedback(null);
 
-    const nextImages = editing.images.filter(Boolean).slice(0, 6);
+    const nextImages = sanitizeStoredImageUrls(editing.images);
     const primaryImage = nextImages[0] ?? '';
 
     try {
       const firestore = requireDb();
+      const productRef = doc(firestore, 'products', editing.id);
+      const existingSnap = await getDoc(productRef);
+      const existingData = existingSnap.exists()
+        ? (existingSnap.data() as Record<string, unknown>)
+        : undefined;
 
-      // Safe image-only update guard: if admin only uploaded/changed photo, touch ONLY image fields
+      // Safe image-only fast update ONLY when existing Firestore doc already satisfies complete schema
       if (
         !isNew &&
+        existingSnap.exists() &&
         originalSnapshot &&
-        serializeNonImageState(editing, ingredientsText, sizesText) === originalSnapshot
+        serializeNonImageState(editing, ingredientsText, sizesText) === originalSnapshot &&
+        hasCompleteSchema(existingData, REQUIRED_PRODUCT_SCHEMA_KEYS) &&
+        hasValidTimestamp(existingData?.createdAt)
       ) {
-        await updateDoc(doc(firestore, 'products', editing.id), {
+        await updateDoc(productRef, {
           image: primaryImage,
           images: nextImages,
           updatedAt: serverTimestamp(),
@@ -491,136 +768,61 @@ export function AdminProductsPanel() {
           'products',
           editing.id,
           nameEn,
-          `Updated product photo only for ${nameBn}`
+          `Updated product photo for ${nameBn}`
         );
         setEditing(null);
-        setFeedback({ type: 'success', message: 'পণ্যের ছবি নিরাপদে সংরক্ষণ করা হয়েছে।' });
+        setFeedback({ type: 'success', message: 'পণ্যের ছবি সফলভাবে সংরক্ষণ হয়েছে।' });
         return;
       }
 
-      const resolvedCategorySlug = toSlug(
-        editing.category.trim() || allCategories[0]?.slug || 'custom-cake'
-      );
-      const catObj = allCategories.find((c) => c.slug === resolvedCategorySlug);
-      const catText = catObj ? getCategoryText(catObj) : null;
-      const slug = toSlug(editing.slug.trim() || nameEn || nameBn);
       const ingredients = ingredientsText
         .split(',')
         .map((s) => s.trim())
-        .filter(Boolean)
-        .slice(0, 25);
+        .filter(Boolean);
       const sizes = sizesText
         .split(',')
         .map((s) => s.trim())
-        .filter(Boolean)
-        .slice(0, 10);
+        .filter(Boolean);
 
-      const resolvedUnit = (editing.unit ?? editing.priceUnit).trim() || 'Piece';
-      const shortDescEn = (editing.shortDescriptionEn ?? '').trim();
-      const shortDescBn = editing.shortDescription.trim() || shortDescEn || nameBn;
-      const fullDescEn = (editing.descriptionEn ?? '').trim() || shortDescEn;
-      const fullDescBn = editing.description.trim() || shortDescBn || fullDescEn || nameBn;
-      const rawPrice = Number(editing.price);
-      const numericPrice = Number.isFinite(rawPrice)
-        ? Math.min(1000000, Math.max(0, rawPrice))
-        : 0;
-      const rawDisplayOrder = Number(editing.display_order);
-      const safeDisplayOrder = Number.isFinite(rawDisplayOrder)
-        ? Math.min(10000, Math.max(0, Math.round(rawDisplayOrder)))
-        : 1;
+      const payload = buildNormalizedProductPayload({
+        source: {
+          ...editing,
+          image: primaryImage,
+          images: nextImages,
+        },
+        ingredientsList: ingredients,
+        sizesList: sizes,
+        cleanImages: nextImages,
+        includeDeleteOldPrice: Boolean(existingData && 'old_price' in existingData),
+      });
 
-      const payload: Record<string, unknown> = {
-        id: editing.id,
-        name: nameBn.slice(0, 160),
-        nameBn: nameBn.slice(0, 160),
-        nameEn: nameEn.slice(0, 160),
-        name_bn: nameBn.slice(0, 160),
-        name_en: nameEn.slice(0, 160),
-        slug,
-        category: resolvedCategorySlug,
-        categoryName: (editing.categoryName || catText?.nameBn || resolvedCategorySlug).slice(0, 120),
-        categoryNameEn: (editing.categoryNameEn || catText?.nameEn || '').slice(0, 120),
-        productType: (editing.productType.trim() || 'Bakery & Sweets').slice(0, 120),
-        price: numericPrice,
-        priceUnit: resolvedUnit.slice(0, 60),
-        unit: resolvedUnit.slice(0, 60),
-        shortDescription: shortDescBn.slice(0, 300),
-        shortDescriptionEn: shortDescEn.slice(0, 300),
-        short_description_bn: shortDescBn.slice(0, 300),
-        short_description_en: shortDescEn.slice(0, 300),
-        description: fullDescBn.slice(0, 4000),
-        descriptionEn: fullDescEn.slice(0, 4000),
-        description_bn: fullDescBn.slice(0, 4000),
-        description_en: fullDescEn.slice(0, 4000),
-        image: primaryImage,
-        images: nextImages,
-        ingredients,
-        sizes,
-        weight: editing.weight.trim().slice(0, 80),
-        occasions: editing.occasions.slice(0, 15),
-        showrooms: editing.showrooms
-          .filter((sid) => !CONFIRMED_DEMO_SHOWROOM_IDS.has(sid))
-          .slice(0, 20),
-        availability: editing.availability,
-        importantNotes: editing.importantNotes.trim().slice(0, 800),
-        featured: Boolean(editing.featured),
-        popular: Boolean(editing.popular),
-        visible: editing.visible !== false,
-        deleted: Boolean(editing.deleted),
-        display_order: safeDisplayOrder,
-        status: editing.deleted ? 'archived' : editing.visible === false ? 'draft' : 'published',
-        updatedAt: serverTimestamp(),
-      };
-
-      if (editing.masterKey) {
-        payload.masterKey = editing.masterKey;
-      }
-
-      const hasValidOldPrice =
-        typeof editing.old_price === 'number' &&
-        Number.isFinite(editing.old_price) &&
-        editing.old_price > 0;
-      if (hasValidOldPrice) {
-        payload.old_price = editing.old_price;
-      } else if (!isNew) {
-        payload.old_price = deleteField();
-      }
-
-      const trimmedDiscount = editing.discount?.trim() ?? '';
-      if (trimmedDiscount) {
-        payload.discount = trimmedDiscount.slice(0, 60);
-      } else if (!isNew) {
-        payload.discount = '';
-      }
-
-      const trimmedPriceLabel = editing.price_label?.trim() ?? '';
-      if (trimmedPriceLabel) {
-        payload.price_label = trimmedPriceLabel.slice(0, 80);
-      } else if (!isNew) {
-        payload.price_label = '';
-      }
-
-      if (isNew) {
-        await setDoc(doc(firestore, 'products', editing.id), {
+      if (!existingSnap.exists()) {
+        await setDoc(productRef, {
           ...payload,
           createdAt: serverTimestamp(),
         });
         await logAdminActivity('create', 'products', editing.id, nameEn, `Created product ${nameBn}`);
       } else {
-        await updateDoc(doc(firestore, 'products', editing.id), payload);
+        await updateDoc(
+          productRef,
+          hasValidTimestamp(existingData?.createdAt)
+            ? payload
+            : { ...payload, createdAt: serverTimestamp() }
+        );
         await logAdminActivity('update', 'products', editing.id, nameEn, `Updated product ${nameBn}`);
       }
+
       setEditing(null);
-      setFeedback({ type: 'success', message: 'পণ্য সফলভাবে সংরক্ষণ করা হয়েছে।' });
+      setFeedback({ type: 'success', message: 'পণ্য সফলভাবে সংরক্ষণ হয়েছে।' });
     } catch (err) {
       setFeedback({
         type: 'error',
-        message: 'সংরক্ষণে সমস্যা হয়েছে। ফিল্ডগুলোর তথ্য ও Firebase অনুমতি যাচাই করুন।',
+        message: mapCatalogSaveError(err, 'product_save'),
       });
       try {
         handleFirestoreError(err, OperationType.WRITE, `products/${editing.id}`);
       } catch {
-        // Logged
+        // Logged for console diagnostics
       }
     } finally {
       setSaving(false);
@@ -1263,15 +1465,13 @@ export function AdminProductsPanel() {
               </div>
             </div>
 
-            {/* Product Images (Firebase Storage Drag-and-Drop & Multi-Image Uploader) */}
+            {/* Product Images */}
             <div className="sm:col-span-2 lg:col-span-3 rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <p className="text-xs font-bold text-[#1C1917]">
-                    পণ্যের ছবি (Firebase Storage Upload)
-                  </p>
+                  <p className="text-xs font-bold text-[#1C1917]">পণ্যের ছবি</p>
                   <p className="text-[11px] text-[#57534E]">
-                    JPG, JPEG, PNG বা WEBP ফরম্যাট (সর্বোচ্চ 5 MB/ছবি, সর্বোচ্চ ৬টি ছবি)। প্রথম ছবিটি প্রধান থাম্বনেইল হিসেবে দেখাবে।
+                    JPG, PNG বা WEBP ফরম্যাট · সর্বোচ্চ ৫ এমবি (সর্বোচ্চ ৬টি ছবি)। প্রথম ছবিটি প্রধান ছবি হিসেবে প্রদর্শিত হবে।
                   </p>
                 </div>
                 <span className="font-mono text-[11px] font-semibold text-[#57534E]">
@@ -1283,13 +1483,6 @@ export function AdminProductsPanel() {
                 <div className="mt-3 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-800">
                   <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   <span>{editorUploadError}</span>
-                </div>
-              )}
-
-              {editorUploadNotice && (
-                <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900">
-                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-700" />
-                  <span>{editorUploadNotice}</span>
                 </div>
               )}
 
@@ -1308,7 +1501,7 @@ export function AdminProductsPanel() {
                         <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[#DC1F26]" />
                         <span className="truncate">
                           {editorUploadProgress === 0
-                            ? `সংযোগ যাচাই ও প্রস্তুত হচ্ছে: ${editorUploadLabel}`
+                            ? `প্রস্তুত হচ্ছে: ${editorUploadLabel}`
                             : `আপলোড হচ্ছে: ${editorUploadLabel}`}
                         </span>
                       </span>
@@ -1338,7 +1531,7 @@ export function AdminProductsPanel() {
                       <span className="absolute inset-x-1.5 bottom-1.5 rounded bg-black/75 px-1.5 py-0.5 text-center font-mono text-[10px] font-bold text-white">
                         {editorUploadProgress === 0
                           ? 'প্রস্তুত হচ্ছে...'
-                          : `${editorUploadProgress}% আপলোড...`}
+                          : `${editorUploadProgress}%`}
                       </span>
                     </div>
                   </div>
@@ -1651,7 +1844,7 @@ export function AdminProductsPanel() {
                           {canEdit && (
                             <>
                               <label
-                                title="Firebase Storage-এ ছবি আপলোড করুন"
+                                title="পণ্যের ছবি আপলোড করুন"
                                 className={`inline-flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1.5 text-[11px] font-semibold transition-colors ${
                                   thumbSrc
                                     ? 'border-[#E7E5E4] text-[#57534E] hover:border-[#1C1917] hover:text-[#1C1917]'
@@ -1815,7 +2008,7 @@ export function AdminCategoriesPanel() {
   const [catUploadPct, setCatUploadPct] = useState<number | null>(null);
   const [catPreviewUrl, setCatPreviewUrl] = useState<string | null>(null);
   const [pendingDeleteCat, setPendingDeleteCat] = useState<Category | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const startNew = () => {
     setIsNew(true);
@@ -1843,7 +2036,7 @@ export function AdminCategoriesPanel() {
     if (!file || !editing) return;
     const validationError = validateCatalogImageFile(file);
     if (validationError) {
-      setMsg(validationError);
+      setMsg({ type: 'error', text: validationError });
       return;
     }
     const localUrl = URL.createObjectURL(file);
@@ -1858,18 +2051,22 @@ export function AdminCategoriesPanel() {
         file,
         onProgress: (pct) => setCatUploadPct(pct),
       });
-      setEditing((prev) => (prev ? { ...prev, image: result.downloadUrl } : null));
-      if (result.mode === 'firestore-compressed' && result.fallbackReason) {
-        setMsg(
-          `${result.fallbackReason} — ছবিটি অপ্টিমাইজ করে প্রস্তুত করা হয়েছে, স্থায়ী করতে সেভ করুন।`
-        );
+      if (!result.downloadUrl || isForbiddenInlineImageUrl(result.downloadUrl)) {
+        throw new Error('ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে পরে আবার চেষ্টা করুন।');
       }
+      setEditing((prev) => (prev ? { ...prev, image: result.downloadUrl } : null));
+      setMsg({
+        type: 'success',
+        text: 'ছবি সফলভাবে যুক্ত হয়েছে। স্থায়ী করতে "সংরক্ষণ" বাটনে ক্লিক করুন।',
+      });
     } catch (err) {
-      setMsg(
-        err instanceof Error && err.message
-          ? err.message
-          : 'ক্যাটাগরির ছবি আপলোড ব্যর্থ হয়েছে।'
-      );
+      setMsg({
+        type: 'error',
+        text:
+          err instanceof Error && err.message
+            ? err.message
+            : 'ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে আবার চেষ্টা করুন।',
+      });
     } finally {
       URL.revokeObjectURL(localUrl);
       setCatPreviewUrl(null);
@@ -1881,20 +2078,32 @@ export function AdminCategoriesPanel() {
   const saveCategory = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editing) return;
-    const nameBn = editing.name.trim();
-    const nameEn = editing.nameEn.trim();
+    const nameBn = editing.name.trim().slice(0, 120);
+    const nameEn = editing.nameEn.trim().slice(0, 120);
     if (!nameBn) {
-      setMsg('অনুগ্রহ করে বাংলা নাম দিন।');
+      setMsg({ type: 'error', text: 'অনুগ্রহ করে বাংলা নাম লিখুন।' });
       return;
     }
     if (!nameEn) {
-      setMsg('অনুগ্রহ করে English Name দিন।');
+      setMsg({ type: 'error', text: 'অনুগ্রহ করে English Name লিখুন।' });
+      return;
+    }
+    if (catUploading) {
+      setMsg({ type: 'error', text: 'ছবি আপলোড সম্পন্ন হওয়া পর্যন্ত অনুগ্রহ করে অপেক্ষা করুন।' });
+      return;
+    }
+    if (isForbiddenInlineImageUrl(editing.image)) {
+      setMsg({ type: 'error', text: 'অবৈধ ছবির ফরম্যাট পাওয়া গেছে। অনুগ্রহ করে ছবিটি পুনরায় আপলোড করুন।' });
       return;
     }
 
     const slug = toSlug(editing.slug.trim() || nameEn || nameBn);
-    const descEn = (editing.descriptionEn ?? '').trim();
-    const descBn = editing.description.trim() || descEn || nameBn;
+    const descEn = (editing.descriptionEn ?? '').trim().slice(0, 600);
+    const descBn = (editing.description.trim() || descEn || nameBn).slice(0, 600);
+    const rawOrder = Number(editing.order);
+    const safeOrder = Number.isFinite(rawOrder)
+      ? Math.min(1000, Math.max(0, Math.round(rawOrder)))
+      : 1;
 
     const payload = {
       id: editing.id,
@@ -1907,40 +2116,96 @@ export function AdminCategoriesPanel() {
       descriptionEn: descEn,
       description_bn: descBn,
       description_en: descEn,
-      image: editing.image,
-      order: Number(editing.order) || 1,
+      image: (editing.image || '/src/assets/images/hero_bakery_clean_1794746110066.jpg').trim(),
+      order: safeOrder,
       visible: editing.visible !== false,
       deleted: Boolean(editing.deleted),
       updatedAt: serverTimestamp(),
     };
     try {
       const firestore = requireDb();
-      if (isNew) {
-        await setDoc(doc(firestore, 'categories', editing.id), {
+      const catRef = doc(firestore, 'categories', editing.id);
+      const existingSnap = await getDoc(catRef);
+      const existingData = existingSnap.exists()
+        ? (existingSnap.data() as Record<string, unknown>)
+        : undefined;
+
+      if (!existingSnap.exists()) {
+        await setDoc(catRef, {
           ...payload,
           createdAt: serverTimestamp(),
         });
         await logAdminActivity('create', 'categories', editing.id, nameEn);
       } else {
-        await updateDoc(doc(firestore, 'categories', editing.id), payload);
+        await updateDoc(
+          catRef,
+          hasValidTimestamp(existingData?.createdAt)
+            ? payload
+            : { ...payload, createdAt: serverTimestamp() }
+        );
         await logAdminActivity('update', 'categories', editing.id, nameEn);
       }
       setEditing(null);
-      setMsg('ক্যাটাগরি সংরক্ষণ করা হয়েছে।');
-    } catch {
-      setMsg('ক্যাটাগরি সেভ করতে সমস্যা হয়েছে।');
+      setMsg({ type: 'success', text: 'ক্যাটাগরি সফলভাবে সংরক্ষণ হয়েছে।' });
+    } catch (err) {
+      setMsg({ type: 'error', text: mapCatalogSaveError(err, 'category_save') });
+      try {
+        handleFirestoreError(err, OperationType.WRITE, `categories/${editing.id}`);
+      } catch {
+        // Logged for console diagnostics
+      }
     }
   };
 
   const toggleCategoryVisibility = async (cat: Category) => {
     try {
       const firestore = requireDb();
-      await updateDoc(doc(firestore, 'categories', cat.id), {
-        visible: cat.visible === false,
-        updatedAt: serverTimestamp(),
-      });
-    } catch {
-      setMsg('স্ট্যাটাস পরিবর্তন করা যায়নি।');
+      const catRef = doc(firestore, 'categories', cat.id);
+      const existingSnap = await getDoc(catRef);
+      const existingData = existingSnap.exists()
+        ? (existingSnap.data() as Record<string, unknown>)
+        : undefined;
+      if (
+        existingSnap.exists() &&
+        hasCompleteSchema(existingData, REQUIRED_CATEGORY_SCHEMA_KEYS) &&
+        hasValidTimestamp(existingData?.createdAt)
+      ) {
+        await updateDoc(catRef, {
+          visible: cat.visible === false,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        const ct = getCategoryText(cat);
+        const fullCatPayload = {
+          id: cat.id,
+          name: ct.nameBn.slice(0, 120),
+          nameEn: (ct.nameEn || ct.nameBn).slice(0, 120),
+          name_bn: ct.nameBn.slice(0, 120),
+          name_en: (ct.nameEn || ct.nameBn).slice(0, 120),
+          slug: toSlug(cat.slug || ct.nameEn || ct.nameBn),
+          description: (ct.descriptionBn || ct.nameBn).slice(0, 600),
+          descriptionEn: ct.descriptionEn.slice(0, 600),
+          description_bn: (ct.descriptionBn || ct.nameBn).slice(0, 600),
+          description_en: ct.descriptionEn.slice(0, 600),
+          image: cat.image || '/src/assets/images/hero_bakery_clean_1794746110066.jpg',
+          order: Math.min(1000, Math.max(0, Math.round(Number(cat.order) || 1))),
+          visible: cat.visible === false,
+          deleted: Boolean(cat.deleted),
+          updatedAt: serverTimestamp(),
+        };
+        if (!existingSnap.exists()) {
+          await setDoc(catRef, { ...fullCatPayload, createdAt: serverTimestamp() });
+        } else {
+          await updateDoc(
+            catRef,
+            hasValidTimestamp(existingData?.createdAt)
+              ? fullCatPayload
+              : { ...fullCatPayload, createdAt: serverTimestamp() }
+          );
+        }
+      }
+    } catch (err) {
+      setMsg({ type: 'error', text: mapCatalogSaveError(err, 'category_visibility') });
     }
   };
 
@@ -1949,9 +2214,9 @@ export function AdminCategoriesPanel() {
       const firestore = requireDb();
       await deleteDoc(doc(firestore, 'categories', id));
       await logAdminActivity('delete', 'categories', id, id);
-      setMsg('ক্যাটাগরি ডিলিট করা হয়েছে।');
-    } catch {
-      setMsg('ডিলিট করা যায়নি।');
+      setMsg({ type: 'success', text: 'ক্যাটাগরি ডিলিট করা হয়েছে।' });
+    } catch (err) {
+      setMsg({ type: 'error', text: mapCatalogSaveError(err, 'category_delete') });
     }
   };
 
@@ -1977,8 +2242,14 @@ export function AdminCategoriesPanel() {
       </div>
 
       {msg && (
-        <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-[#B91C1C]">
-          {msg}
+        <p
+          className={`rounded-lg border px-3 py-2 text-xs font-medium ${
+            msg.type === 'error'
+              ? 'border-red-200 bg-red-50 text-[#B91C1C]'
+              : 'border-emerald-200 bg-emerald-50 text-emerald-800'
+          }`}
+        >
+          {msg.text}
         </p>
       )}
 
@@ -2023,7 +2294,7 @@ export function AdminCategoriesPanel() {
           </div>
           <div>
             <label className="mb-1 block text-xs font-semibold">
-              ছবি পরিবর্তন (Firebase Storage · JPG/PNG/WEBP)
+              ক্যাটাগরির ছবি (JPG, PNG বা WEBP · সর্বোচ্চ ৫ এমবি)
             </label>
             <div className="flex items-center gap-3">
               <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3 py-2 text-xs font-semibold text-[#1C1917] hover:border-[#DC1F26]">

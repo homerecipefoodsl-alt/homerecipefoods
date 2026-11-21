@@ -23,7 +23,6 @@ import {
   setDoc,
   updateDoc,
 } from 'firebase/firestore';
-import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import { useStore } from '../../context/StoreContext';
 import {
   db,
@@ -31,9 +30,11 @@ import {
   firebaseMissingFields,
   firebasePublicInfo,
   requireDb,
-  storage,
 } from '../../lib/firebase';
-import { compressImageToDataUrl } from '../../lib/utils';
+import {
+  isForbiddenInlineImageUrl,
+  uploadCatalogImageToStorage,
+} from '../../lib/productStorage';
 import type {
   ActivityLog,
   HomepageSection,
@@ -275,10 +276,14 @@ export function AdminMediaLibraryPanel() {
   const [uploadFolder, setUploadFolder] = useState<MediaFolder>('Products');
   const [uploading, setUploading] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
     setUploading(true);
     setFeedback(null);
@@ -286,31 +291,24 @@ export function AdminMediaLibraryPanel() {
     try {
       const firestore = requireDb();
       const mediaId = `med_${Date.now()}`;
-      let finalUrl = '';
+      const uploaded = await uploadCatalogImageToStorage({
+        folder: 'media',
+        entityId: uploadFolder,
+        file,
+      });
 
-      let storagePath = '';
-      if (storage) {
-        try {
-          storagePath = `media/${uploadFolder}/${mediaId}_${file.name}`;
-          const storageRef = ref(storage, storagePath);
-          await uploadBytes(storageRef, file);
-          finalUrl = await getDownloadURL(storageRef);
-        } catch {
-          storagePath = '';
-          finalUrl = await compressImageToDataUrl(file, 1000, 0.78);
-        }
-      } else {
-        finalUrl = await compressImageToDataUrl(file, 1000, 0.78);
+      if (!uploaded.downloadUrl || isForbiddenInlineImageUrl(uploaded.downloadUrl)) {
+        throw new Error('ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে পরে আবার চেষ্টা করুন।');
       }
 
       const item: MediaItem = {
         id: mediaId,
         name: file.name,
-        url: finalUrl,
-        storagePath,
+        url: uploaded.downloadUrl,
+        storagePath: uploaded.storagePath,
         folder: uploadFolder,
         mimeType: file.type || 'image/jpeg',
-        sizeBytes: file.size,
+        sizeBytes: uploaded.sizeBytes,
         uploadedByEmail: user?.email || '',
         deleted: false,
       };
@@ -320,9 +318,14 @@ export function AdminMediaLibraryPanel() {
         createdAt: serverTimestamp(),
       });
       await logAdminActivity('upload', 'media', mediaId, file.name, `Folder=${uploadFolder}`);
-      setFeedback('ছবিটি Media Library-তে যুক্ত হয়েছে।');
-    } catch {
-      setFeedback('আপলোড ব্যর্থ হয়েছে।');
+      setFeedback({ type: 'success', message: 'ছবিটি সফলভাবে সংরক্ষণ হয়েছে।' });
+    } catch (err) {
+      console.error('[MediaLibrary] Upload failed:', err);
+      const message =
+        err instanceof Error && err.message
+          ? err.message
+          : 'ছবি আপলোড করা যায়নি। অনুগ্রহ করে আবার চেষ্টা করুন।';
+      setFeedback({ type: 'error', message });
     } finally {
       setUploading(false);
     }
@@ -387,8 +390,14 @@ export function AdminMediaLibraryPanel() {
       </div>
 
       {feedback && (
-        <p className="rounded-lg bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800">
-          {feedback}
+        <p
+          className={`rounded-lg border px-3 py-2 text-xs font-semibold ${
+            feedback.type === 'error'
+              ? 'border-red-200 bg-red-50 text-red-800'
+              : 'border-emerald-200 bg-emerald-50 text-emerald-800'
+          }`}
+        >
+          {feedback.message}
         </p>
       )}
 

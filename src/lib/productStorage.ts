@@ -6,7 +6,6 @@ import {
   uploadBytesResumable,
 } from 'firebase/storage';
 import { auth, storage } from './firebase';
-import { compressImageToDataUrl } from './utils';
 
 export const ALLOWED_PRODUCT_IMAGE_TYPES = [
   'image/jpeg',
@@ -16,19 +15,16 @@ export const ALLOWED_PRODUCT_IMAGE_TYPES = [
 ] as const;
 
 export const MAX_PRODUCT_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
+const OPTIMIZE_THRESHOLD_BYTES = 1200 * 1024; // ~1.2 MB
+const MAX_UPLOAD_DIMENSION = 1600;
 const STORAGE_STALL_TIMEOUT_MS = 12000;
 const BUCKET_PROBE_TIMEOUT_MS = 3500;
-const FIRESTORE_IMAGE_MAX_BYTES = 135000;
-
-export type CatalogUploadMode = 'firebase-storage' | 'firestore-compressed';
 
 export interface CatalogImageUploadResult {
   downloadUrl: string;
   storagePath: string;
   fileName: string;
   sizeBytes: number;
-  mode: CatalogUploadMode;
-  fallbackReason?: string;
 }
 
 interface BucketHealthCacheEntry {
@@ -38,6 +34,12 @@ interface BucketHealthCacheEntry {
 }
 
 const bucketHealthCache = new Map<string, BucketHealthCacheEntry>();
+
+export function isForbiddenInlineImageUrl(url: string | null | undefined): boolean {
+  if (typeof url !== 'string') return false;
+  const normalized = url.trim().toLowerCase();
+  return normalized.startsWith('data:') || normalized.startsWith('blob:');
+}
 
 function sanitizeImageFileName(fileName: string): string {
   const cleaned = fileName
@@ -68,7 +70,7 @@ function inferContentTypeFromFile(file: File): string {
 
 export function validateCatalogImageFile(file: File): string | null {
   if (!file) {
-    return 'অনুগ্রহ করে একটি ছবি নির্বাচন করুন। (No file selected)';
+    return 'অনুগ্রহ করে একটি ছবি নির্বাচন করুন।';
   }
 
   const lowerName = file.name.trim().toLowerCase();
@@ -78,9 +80,9 @@ export function validateCatalogImageFile(file: File): string | null {
     rawMime as (typeof ALLOWED_PRODUCT_IMAGE_TYPES)[number]
   );
 
-  // Reject non-image MIME types strictly even if a user renamed e.g. file.pdf -> file.jpg
+  // Reject non-image MIME types strictly even if renamed (e.g. document.pdf -> photo.jpg)
   if (rawMime ? !validMime : !validExtension) {
-    return 'অসমর্থিত ফাইল ফরম্যাট! শুধু JPG, JPEG, PNG অথবা WEBP ছবি আপলোড করুন।';
+    return 'অসমর্থিত ফাইল ফরম্যাট। শুধু JPG, PNG অথবা WEBP ছবি ব্যবহার করুন।';
   }
 
   if (file.size <= 0) {
@@ -89,26 +91,100 @@ export function validateCatalogImageFile(file: File): string | null {
 
   if (file.size > MAX_PRODUCT_IMAGE_BYTES) {
     const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
-    return `ছবির আকার অনেক বড় (${sizeMb} MB)। সর্বোচ্চ 5 MB আকারের ছবি আপলোড করা যাবে।`;
+    return `ছবির আকার অনেক বড় (${sizeMb} MB)। সর্বোচ্চ ৫ এমবি আকারের ছবি আপলোড করা যাবে।`;
   }
 
   return null;
 }
 
 /**
+ * Gently optimizes large images (> 1.2 MB) into a crisp File/Blob before uploading
+ * to Firebase Storage. Never generates data: URLs or touches the database.
+ */
+async function optimizeImageFileForStorage(file: File): Promise<File> {
+  if (typeof document === 'undefined' || file.size <= OPTIMIZE_THRESHOLD_BYTES) {
+    return file;
+  }
+
+  const targetMime =
+    inferContentTypeFromFile(file) === 'image/png' ? 'image/webp' : inferContentTypeFromFile(file);
+
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('Image decode failed'));
+      el.src = objectUrl;
+    });
+
+    let width = img.naturalWidth || img.width;
+    let height = img.naturalHeight || img.height;
+    if (!width || !height) return file;
+
+    if (width <= MAX_UPLOAD_DIMENSION && height <= MAX_UPLOAD_DIMENSION && file.size <= OPTIMIZE_THRESHOLD_BYTES) {
+      return file;
+    }
+
+    if (width > MAX_UPLOAD_DIMENSION || height > MAX_UPLOAD_DIMENSION) {
+      if (width >= height) {
+        height = Math.max(1, Math.round((height * MAX_UPLOAD_DIMENSION) / width));
+        width = MAX_UPLOAD_DIMENSION;
+      } else {
+        width = Math.max(1, Math.round((width * MAX_UPLOAD_DIMENSION) / height));
+        height = MAX_UPLOAD_DIMENSION;
+      }
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return file;
+
+    if (targetMime === 'image/jpeg') {
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(0, 0, width, height);
+    }
+    ctx.drawImage(img, 0, 0, width, height);
+
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob((result) => resolve(result), targetMime, 0.86);
+    });
+
+    if (!blob || blob.size <= 0 || blob.size >= file.size) {
+      return file;
+    }
+
+    const ext = targetMime === 'image/webp' ? 'webp' : targetMime === 'image/png' ? 'png' : 'jpg';
+    const baseName = file.name.replace(/\.[^.]+$/, '') || 'product';
+    return new File([blob], `${baseName}.${ext}`, {
+      type: targetMime,
+      lastModified: Date.now(),
+    });
+  } catch (err) {
+    console.warn('[ProductStorage] Pre-upload image optimization skipped:', err);
+    return file;
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+/**
  * Simple CORS GET request (no custom headers -> no preflight OPTIONS) to check
  * whether the Firebase Storage bucket actually exists before calling uploadBytesResumable.
  * When a bucket doesn't exist, preflight OPTIONS returns 404, which browsers turn into
- * status=0 network errors that cause Firebase Storage SDK to retry silently for 10 minutes.
+ * status=0 network errors that cause Firebase Storage SDK to retry silently for minutes.
  */
 async function probeStorageBucketHealth(
   bucketName: string
 ): Promise<{ exists: boolean; reason?: string }> {
-  const normalizedBucket = bucketName.replace(/^gs:\/\//, '').trim();
+  const normalizedBucket = bucketName.replace(/^gs:\/\//i, '').trim();
   if (!normalizedBucket) {
+    console.error('[ProductStorage] Missing VITE_FIREBASE_STORAGE_BUCKET configuration.');
     return {
       exists: false,
-      reason: 'VITE_FIREBASE_STORAGE_BUCKET কনফিগার করা নেই।',
+      reason: 'ছবি আপলোড করার জন্য Firebase Storage চালু করা প্রয়োজন।',
     };
   }
 
@@ -134,7 +210,10 @@ async function probeStorageBucketHealth(
     );
 
     if (response.status === 404) {
-      const reason = `Firebase Storage bucket (${normalizedBucket}) এখনো Firebase Console-এ চালু করা হয়নি (404 Bucket Not Found)।`;
+      console.error(
+        `[ProductStorage] Firebase Storage bucket "${normalizedBucket}" returned 404 Not Found. Enable Storage in Firebase Console → Build → Storage → Get Started.`
+      );
+      const reason = 'ছবি আপলোড করার জন্য Firebase Storage চালু করা প্রয়োজন।';
       bucketHealthCache.set(normalizedBucket, {
         exists: false,
         checkedAt: now,
@@ -143,70 +222,58 @@ async function probeStorageBucketHealth(
       return { exists: false, reason };
     }
 
-    // 200, 401, or 403 means the bucket exists and Storage rules responded
+    // 200, 401, or 403 confirms the Storage bucket exists
     bucketHealthCache.set(normalizedBucket, { exists: true, checkedAt: now });
     return { exists: true };
   } catch {
-    // If probe itself hits a timeout or network block, let uploadResumableToPath + stall watchdog decide
+    // If probe itself hits timeout/offline, proceed to resumable upload + stall watchdog
     return { exists: true };
   } finally {
     globalThis.clearTimeout(timer);
   }
 }
 
-function mapStorageUploadError(err: unknown): string {
+function mapStorageUploadError(err: unknown, storagePath: string): string {
+  console.error('[ProductStorage] Upload error:', { path: storagePath, error: err });
+
   if (err instanceof StorageError) {
     const details = `${err.message || ''} ${err.serverResponse || ''}`.toLowerCase();
     switch (err.code) {
       case 'storage/bucket-not-found':
       case 'storage/project-not-found':
-        return 'Firebase Storage bucket পাওয়া যায়নি (404)। Firebase Console → Build → Storage → Get Started চালু করে storage.rules পাবলিশ করুন।';
+        return 'ছবি আপলোড করার জন্য Firebase Storage চালু করা প্রয়োজন।';
       case 'storage/unauthorized':
-        return 'Firebase Storage-এ ছবি আপলোডের অনুমতি পাওয়া যায়নি (403)। অ্যাডমিন একাউন্ট রিফ্রেশ করুন বা Firebase Console-এ storage.rules পাবলিশ করুন।';
-      case 'storage/canceled':
-        return 'আপলোড সংযোগ দীর্ঘক্ষণ সাড়া দেয়নি বা বাতিল হয়েছে (Storage bucket বা নেটওয়ার্ক যাচাই করুন)।';
-      case 'storage/quota-exceeded':
-        return 'Firebase Storage কোটা পূর্ণ হয়ে গেছে।';
-      case 'storage/retry-limit-exceeded':
-        return 'Firebase Storage-এ সংযোগ সম্পন্ন হয়নি (সম্ভবত Storage bucket চালু নেই অথবা CORS/নেটওয়ার্ক ব্লক হয়েছে)।';
       case 'storage/unauthenticated':
-        return 'অ্যাডমিন লগইন সেশন পাওয়া যায়নি। পুনরায় লগইন করুন।';
+        return 'ছবিটি আপলোড করা যায়নি। আপনার প্রশাসনিক অনুমতি বা Firebase Storage সেটিংস পরীক্ষা করুন।';
+      case 'storage/quota-exceeded':
+        return 'ছবি সংরক্ষণের নির্ধারিত জায়গা পূর্ণ হয়ে গেছে। অনুগ্রহ করে অ্যাডমিনিস্ট্রেটরের সাথে যোগাযোগ করুন।';
+      case 'storage/canceled':
+      case 'storage/retry-limit-exceeded':
+        return 'ইন্টারনেট সংযোগের কারণে ছবিটি আপলোড করা যায়নি। আবার চেষ্টা করুন।';
       case 'storage/unknown':
         if (
           details.includes('404') ||
           details.includes('not found') ||
           details.includes('bucket')
         ) {
-          return 'Firebase Storage চালু বা কনফিগার করা পাওয়া যায়নি (404)। Firebase Console → Build → Storage → Get Started চালু করুন।';
+          return 'ছবি আপলোড করার জন্য Firebase Storage চালু করা প্রয়োজন।';
         }
-        return `Storage আপলোড ব্যর্থ (${err.code})। Firebase Storage সেটআপ ও নেটওয়ার্ক যাচাই করুন।`;
+        return 'ছবি সংরক্ষণ করা যাচ্ছে না। Firebase Storage বর্তমানে উপলভ্য নয়।';
       default:
-        return `Storage আপলোড ব্যর্থ (${err.code})। আবার চেষ্টা করুন।`;
+        return 'ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে কিছুক্ষণ পর আবার চেষ্টা করুন।';
     }
   }
-  if (err instanceof Error && err.message) {
-    return err.message;
-  }
-  return 'ছবি আপলোড করা যায়নি। নেটওয়ার্ক ও Firebase Storage কনফিগারেশন যাচাই করুন।';
-}
 
-function isStorageInfrastructureUnavailable(err: unknown): boolean {
-  if (err instanceof StorageError) {
-    if (
-      err.code === 'storage/bucket-not-found' ||
-      err.code === 'storage/project-not-found' ||
-      err.code === 'storage/unauthorized' ||
-      err.code === 'storage/retry-limit-exceeded' ||
-      err.code === 'storage/canceled' ||
-      err.code === 'storage/unknown'
-    ) {
-      return true;
+  if (err instanceof Error) {
+    if (err.message.includes('STORAGE_STALL_TIMEOUT')) {
+      return 'ইন্টারনেট সংযোগের কারণে ছবিটি আপলোড করা যায়নি। আবার চেষ্টা করুন।';
+    }
+    if (err.message) {
+      return err.message;
     }
   }
-  if (err instanceof Error && err.message.includes('STORAGE_STALL_TIMEOUT')) {
-    return true;
-  }
-  return false;
+
+  return 'ছবি সংরক্ষণ করা যাচ্ছে না। Firebase Storage বর্তমানে উপলভ্য নয়।';
 }
 
 function uploadResumableToPath(
@@ -245,7 +312,7 @@ function uploadResumableToPath(
         task.cancel();
         reject(
           new Error(
-            'STORAGE_STALL_TIMEOUT: Firebase Storage ১২ সেকেন্ডে কোনো সাড়া দেয়নি (সম্ভবত Storage bucket চালু নেই বা CORS ব্লক হয়েছে)।'
+            'STORAGE_STALL_TIMEOUT: Upload connection stalled with no bytes transferred.'
           )
         );
       }, STORAGE_STALL_TIMEOUT_MS);
@@ -261,7 +328,6 @@ function uploadResumableToPath(
           lastBytesTransferred = snapshot.bytesTransferred;
           resetStallTimer();
         }
-        // Only report 1-99% after actual bytes move; avoid fake 1% on 0 bytes
         if (snapshot.totalBytes > 0 && snapshot.bytesTransferred > 0 && onProgress) {
           const pct = Math.min(
             99,
@@ -281,9 +347,13 @@ function uploadResumableToPath(
         if (settled) return;
         try {
           const downloadUrl = await getDownloadURL(task.snapshot.ref);
-          if (!downloadUrl || !downloadUrl.startsWith('https://')) {
+          if (
+            !downloadUrl ||
+            !downloadUrl.startsWith('https://') ||
+            isForbiddenInlineImageUrl(downloadUrl)
+          ) {
             settled = true;
-            reject(new Error('Firebase Storage থেকে বৈধ ডাউনলোড URL পাওয়া যায়নি।'));
+            reject(new Error('ছবি আপলোডের পর বৈধ ছবির লিংক পাওয়া যায়নি।'));
             return;
           }
           settled = true;
@@ -293,7 +363,6 @@ function uploadResumableToPath(
             storagePath,
             fileName: file.name,
             sizeBytes: file.size,
-            mode: 'firebase-storage',
           });
         } catch (urlErr) {
           settled = true;
@@ -304,31 +373,8 @@ function uploadResumableToPath(
   });
 }
 
-async function compressCatalogFallback(
-  file: File,
-  fallbackReason: string,
-  onProgress?: (percent: number) => void
-): Promise<CatalogImageUploadResult> {
-  onProgress?.(45);
-  const compressedDataUrl = await compressImageToDataUrl(
-    file,
-    840,
-    0.8,
-    FIRESTORE_IMAGE_MAX_BYTES
-  );
-  onProgress?.(100);
-  return {
-    downloadUrl: compressedDataUrl,
-    storagePath: '',
-    fileName: file.name,
-    sizeBytes: compressedDataUrl.length,
-    mode: 'firestore-compressed',
-    fallbackReason,
-  };
-}
-
 export async function uploadCatalogImageToStorage(params: {
-  folder: 'products' | 'categories';
+  folder: 'products' | 'categories' | 'media';
   entityId: string;
   file: File;
   onProgress?: (percent: number) => void;
@@ -339,79 +385,62 @@ export async function uploadCatalogImageToStorage(params: {
   }
 
   if (!auth?.currentUser) {
-    throw new Error('ছবি আপলোড করতে অ্যাডমিন একাউন্টে লগইন থাকতে হবে।');
+    throw new Error('ছবি আপলোড করতে অ্যাডমিন অ্যাকাউন্টে লগইন থাকতে হবে।');
   }
 
   if (!auth.currentUser.emailVerified) {
     throw new Error(
-      'অ্যাডমিন ইমেইল ভেরিফাইড না হলে ছবি আপলোড করা যাবে না। ইমেইল ভেরিফাই করে পুনরায় চেষ্টা করুন।'
+      'অ্যাডমিন ইমেইল যাচাইকৃত না হলে ছবি আপলোড করা যাবে না। অনুগ্রহ করে ইমেইল যাচাই করে আবার চেষ্টা করুন।'
     );
   }
 
   try {
     await auth.currentUser.getIdToken();
-  } catch {
-    throw new Error('অ্যাডমিন লগইন টোকেন রিফ্রেশ করা যায়নি। পুনরায় লগইন করুন।');
+  } catch (tokenErr) {
+    console.error('[ProductStorage] Failed to refresh ID token:', tokenErr);
+    throw new Error('আপনার লগইন সেশন শেষ হয়ে গেছে। অনুগ্রহ করে আবার লগইন করুন।');
   }
 
   if (!storage) {
-    return compressCatalogFallback(
-      params.file,
-      'Firebase Storage কনফিগার করা নেই; অপ্টিমাইজড ডাটাবেস ছবি হিসেবে প্রস্তুত করা হয়েছে।',
-      params.onProgress
-    );
+    console.error('[ProductStorage] Firebase Storage SDK instance is not initialized.');
+    throw new Error('ছবি সংরক্ষণ করা যাচ্ছে না। Firebase Storage বর্তমানে উপলভ্য নয়।');
   }
 
   const configuredBucket = storage.app.options.storageBucket || '';
   const health = await probeStorageBucketHealth(configuredBucket);
   if (!health.exists) {
-    return compressCatalogFallback(
-      params.file,
-      health.reason ||
-        'Firebase Storage bucket এখনো চালু নেই (404); অপ্টিমাইজড ছবি হিসেবে ডাটাবেসের জন্য প্রস্তুত করা হয়েছে।',
-      params.onProgress
-    );
+    throw new Error(health.reason || 'ছবি আপলোড করার জন্য Firebase Storage চালু করা প্রয়োজন।');
   }
 
+  const preparedFile = await optimizeImageFileForStorage(params.file);
   const safeId = sanitizeEntityId(params.entityId);
-  const safeFile = sanitizeImageFileName(params.file.name);
+  const safeFile = sanitizeImageFileName(preparedFile.name);
   const uniqueStamp = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   const primaryPath = `${params.folder}/${safeId}/${uniqueStamp}_${safeFile}`;
 
   try {
-    return await uploadResumableToPath(storage, primaryPath, params.file, params.onProgress);
+    return await uploadResumableToPath(storage, primaryPath, preparedFile, params.onProgress);
   } catch (err) {
-    // If updated storage.rules (/products/ or /categories/) has not yet been deployed to Firebase Console,
-    // attempt the existing /media/{folder}/{fileName} path allowed in prior storage.rules.
-    if (err instanceof StorageError && err.code === 'storage/unauthorized') {
+    // If updated storage.rules (/products/ or /categories/) has not yet been published,
+    // attempt the /media/{folder}/{fileName} path from existing storage.rules.
+    if (
+      params.folder !== 'media' &&
+      err instanceof StorageError &&
+      err.code === 'storage/unauthorized'
+    ) {
       const legacyMediaPath = `media/${params.folder}/${safeId}_${uniqueStamp}_${safeFile}`;
       try {
         return await uploadResumableToPath(
           storage,
           legacyMediaPath,
-          params.file,
+          preparedFile,
           params.onProgress
         );
       } catch (fallbackErr) {
-        if (isStorageInfrastructureUnavailable(fallbackErr)) {
-          return compressCatalogFallback(
-            params.file,
-            mapStorageUploadError(fallbackErr),
-            params.onProgress
-          );
-        }
-        throw new Error(mapStorageUploadError(fallbackErr));
+        throw new Error(mapStorageUploadError(fallbackErr, legacyMediaPath));
       }
     }
 
-    if (isStorageInfrastructureUnavailable(err)) {
-      return compressCatalogFallback(
-        params.file,
-        mapStorageUploadError(err),
-        params.onProgress
-      );
-    }
-
-    throw new Error(mapStorageUploadError(err));
+    throw new Error(mapStorageUploadError(err, primaryPath));
   }
 }

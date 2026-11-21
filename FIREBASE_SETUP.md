@@ -8,7 +8,7 @@ This application connects strictly to the existing Firebase project **`ai-studio
 
 - **Web App**: Configured via `firebase-applet-config.json` (`appId: 1:771532162522:web:8dfcecb6033932861cace3`).
 - **Cloud Firestore**: Active on named database **`ai-studio-8e160dd1-e90f-4eac-89d5-fbd11fce8ac3`** with existing business collections preserved in place.
-- **Firebase Storage**: Configured with bucket `ai-studio-applet-webapp-e4b0f.firebasestorage.app` (with graceful data-URL image upload fallback if Storage bucket rules or billing are uninitialized).
+- **Firebase Storage**: Configured with bucket `ai-studio-applet-webapp-e4b0f.firebasestorage.app` (stores HTTPS image URLs only; requires Firebase Console → Build → Storage → Get Started to be enabled).
 - **Firebase Realtime Database**: Optional (not enabled by default; set `VITE_FIREBASE_DATABASE_URL` only if RTDB is enabled in the project).
 - **Firebase Authentication**: Required for `/mahmud` Admin Panel login (Email/Password provider).
 

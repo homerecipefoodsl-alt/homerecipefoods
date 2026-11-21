@@ -18,7 +18,7 @@ import firebaseAppletConfig from '../../firebase-applet-config.json';
 
 export const EXPECTED_FIREBASE_PROJECT_ID = 'ai-studio-applet-webapp-e4b0f';
 
-const env = import.meta.env;
+const env = import.meta.env ?? ({} as Record<string, string | undefined>);
 
 const rawDatabaseUrl = (env.VITE_FIREBASE_DATABASE_URL || '').trim();
 const isValidRealtimeDbUrl = (() => {
@@ -53,7 +53,10 @@ const rawConfig = {
     env.VITE_FIREBASE_STORAGE_BUCKET ||
     firebaseAppletConfig.storageBucket ||
     ''
-  ).trim(),
+  )
+    .trim()
+    .replace(/^gs:\/\//i, '')
+    .replace(/\.frebasestorage\.app$/i, '.firebasestorage.app'),
   messagingSenderId: (
     env.VITE_FIREBASE_MESSAGING_SENDER_ID ||
     firebaseAppletConfig.messagingSenderId ||
