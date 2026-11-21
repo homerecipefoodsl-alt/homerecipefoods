@@ -130,6 +130,37 @@ function hasCompleteSchema(
   return requiredKeys.every((key) => key in data);
 }
 
+function isExistingProductDocRuleReady(data: Record<string, unknown> | undefined): boolean {
+  if (!data || !hasCompleteSchema(data, REQUIRED_PRODUCT_SCHEMA_KEYS)) return false;
+  if (!hasValidTimestamp(data.createdAt)) return false;
+  if (typeof data.id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(data.id)) return false;
+  if (typeof data.slug !== 'string' || !/^[a-z0-9-]{1,160}$/.test(data.slug)) return false;
+  if (typeof data.category !== 'string' || !/^[a-z0-9-]{1,160}$/.test(data.category)) return false;
+  if (typeof data.price !== 'number' || !Number.isFinite(data.price) || data.price < 0) return false;
+  if (
+    'old_price' in data &&
+    (typeof data.old_price !== 'number' || !Number.isFinite(data.old_price) || data.old_price < 0)
+  ) {
+    return false;
+  }
+  if (
+    'display_order' in data &&
+    (typeof data.display_order !== 'number' || !Number.isInteger(data.display_order))
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isExistingCategoryDocRuleReady(data: Record<string, unknown> | undefined): boolean {
+  if (!data || !hasCompleteSchema(data, REQUIRED_CATEGORY_SCHEMA_KEYS)) return false;
+  if (!hasValidTimestamp(data.createdAt)) return false;
+  if (typeof data.id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(data.id)) return false;
+  if (typeof data.slug !== 'string' || !/^[a-z0-9-]{1,160}$/.test(data.slug)) return false;
+  if (typeof data.order !== 'number' || !Number.isInteger(data.order)) return false;
+  return true;
+}
+
 function mapCatalogSaveError(err: unknown, context: string): string {
   console.error(`[CatalogSave:${context}]`, err);
   const rawCode =
@@ -622,8 +653,7 @@ export function AdminProductsPanel() {
 
       if (
         existingSnap.exists() &&
-        hasCompleteSchema(existingData, REQUIRED_PRODUCT_SCHEMA_KEYS) &&
-        hasValidTimestamp(existingData?.createdAt)
+        isExistingProductDocRuleReady(existingData)
       ) {
         await updateDoc(productRef, {
           image: uploadedUrl,
@@ -755,8 +785,7 @@ export function AdminProductsPanel() {
         existingSnap.exists() &&
         originalSnapshot &&
         serializeNonImageState(editing, ingredientsText, sizesText) === originalSnapshot &&
-        hasCompleteSchema(existingData, REQUIRED_PRODUCT_SCHEMA_KEYS) &&
-        hasValidTimestamp(existingData?.createdAt)
+        isExistingProductDocRuleReady(existingData)
       ) {
         await updateDoc(productRef, {
           image: primaryImage,
@@ -2167,8 +2196,7 @@ export function AdminCategoriesPanel() {
         : undefined;
       if (
         existingSnap.exists() &&
-        hasCompleteSchema(existingData, REQUIRED_CATEGORY_SCHEMA_KEYS) &&
-        hasValidTimestamp(existingData?.createdAt)
+        isExistingCategoryDocRuleReady(existingData)
       ) {
         await updateDoc(catRef, {
           visible: cat.visible === false,
@@ -2556,8 +2584,8 @@ export function AdminOccasionsPanel() {
       }
       setEditing(null);
       setMsg('উপলক্ষ সেভ হয়েছে।');
-    } catch {
-      setMsg('সেভ করতে সমস্যা হয়েছে।');
+    } catch (err) {
+      setMsg(mapCatalogSaveError(err, 'occasion_save'));
     }
   };
 
@@ -2960,8 +2988,8 @@ export function AdminShowroomsPanel() {
       }
       setEditing(null);
       setMsg('শোরুম তথ্য সংরক্ষণ করা হয়েছে।');
-    } catch {
-      setMsg('সংরক্ষণে সমস্যা হয়েছে।');
+    } catch (err) {
+      setMsg(mapCatalogSaveError(err, 'showroom_save'));
     }
   };
 

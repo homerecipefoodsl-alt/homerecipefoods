@@ -1162,14 +1162,17 @@ service cloud.firestore {
       allow update: if hasPermission('categories_manage')
         && isValidId(categoryId)
         && isValidCategory(incoming())
-        && incoming().id == existing().id
+        && (
+          ('id' in existing() && incoming().id == existing().id)
+          || (!('id' in existing()) && incoming().id == categoryId)
+        )
         && incoming().updatedAt == request.time
         && (
           ('createdAt' in existing()
             && existing().createdAt is timestamp
             && incoming().createdAt == existing().createdAt
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
+              'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
               'description', 'descriptionEn', 'description_bn', 'description_en',
               'image', 'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
               'updatedAt'
@@ -1178,7 +1181,7 @@ service cloud.firestore {
           ((!('createdAt' in existing()) || !(existing().createdAt is timestamp))
             && incoming().createdAt == request.time
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
+              'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
               'description', 'descriptionEn', 'description_bn', 'description_en',
               'image', 'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
               'createdAt', 'updatedAt'
@@ -1199,15 +1202,31 @@ service cloud.firestore {
       allow update: if hasPermission('categories_manage')
         && isValidId(occasionId)
         && isValidOccasion(incoming())
-        && incoming().id == existing().id
-        && incoming().createdAt == existing().createdAt
+        && (
+          ('id' in existing() && incoming().id == existing().id)
+          || (!('id' in existing()) && incoming().id == occasionId)
+        )
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
-          'description', 'descriptionEn', 'description_bn', 'description_en',
-          'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
-          'updatedAt'
-        ]);
+        && (
+          ('createdAt' in existing()
+            && existing().createdAt is timestamp
+            && incoming().createdAt == existing().createdAt
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
+              'description', 'descriptionEn', 'description_bn', 'description_en',
+              'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
+              'updatedAt'
+            ]))
+          ||
+          ((!('createdAt' in existing()) || !(existing().createdAt is timestamp))
+            && incoming().createdAt == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
+              'description', 'descriptionEn', 'description_bn', 'description_en',
+              'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
+              'createdAt', 'updatedAt'
+            ]))
+        );
       allow delete: if hasPermission('categories_manage') && isValidId(occasionId);
     }
 
@@ -1223,14 +1242,17 @@ service cloud.firestore {
       allow update: if hasPermission('products_edit')
         && isValidId(productId)
         && isValidProduct(incoming())
-        && incoming().id == existing().id
+        && (
+          ('id' in existing() && incoming().id == existing().id)
+          || (!('id' in existing()) && incoming().id == productId)
+        )
         && incoming().updatedAt == request.time
         && (
           ('createdAt' in existing()
             && existing().createdAt is timestamp
             && incoming().createdAt == existing().createdAt
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
+              'id', 'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
               'category', 'categorySlug', 'categoryName', 'categoryNameEn', 'productType',
               'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
               'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
@@ -1245,7 +1267,7 @@ service cloud.firestore {
           ((!('createdAt' in existing()) || !(existing().createdAt is timestamp))
             && incoming().createdAt == request.time
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
+              'id', 'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
               'category', 'categorySlug', 'categoryName', 'categoryNameEn', 'productType',
               'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
               'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
@@ -1272,19 +1294,39 @@ service cloud.firestore {
       allow update: if hasPermission('showrooms_manage')
         && isValidId(showroomId)
         && isValidShowroom(incoming())
-        && incoming().id == existing().id
-        && incoming().createdAt == existing().createdAt
+        && (
+          ('id' in existing() && incoming().id == existing().id)
+          || (!('id' in existing()) && incoming().id == showroomId)
+        )
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'name', 'nameEn', 'name_bn', 'name_en',
-          'area', 'areaEn', 'address', 'addressEn', 'address_bn', 'address_en',
-          'description', 'descriptionEn', 'description_bn', 'description_en',
-          'phone', 'alternate_phone', 'email',
-          'openingHours', 'openingHoursEn', 'opening_time', 'closing_time', 'weekly_holiday',
-          'mapUrl', 'lat', 'lng', 'images', 'available_categories', 'available_products',
-          'isMain', 'visible', 'deleted', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription',
-          'updatedAt'
-        ]);
+        && (
+          ('createdAt' in existing()
+            && existing().createdAt is timestamp
+            && incoming().createdAt == existing().createdAt
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'id', 'name', 'nameEn', 'name_bn', 'name_en',
+              'area', 'areaEn', 'address', 'addressEn', 'address_bn', 'address_en',
+              'description', 'descriptionEn', 'description_bn', 'description_en',
+              'phone', 'alternate_phone', 'email',
+              'openingHours', 'openingHoursEn', 'opening_time', 'closing_time', 'weekly_holiday',
+              'mapUrl', 'lat', 'lng', 'images', 'available_categories', 'available_products',
+              'isMain', 'visible', 'deleted', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription',
+              'updatedAt'
+            ]))
+          ||
+          ((!('createdAt' in existing()) || !(existing().createdAt is timestamp))
+            && incoming().createdAt == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'id', 'name', 'nameEn', 'name_bn', 'name_en',
+              'area', 'areaEn', 'address', 'addressEn', 'address_bn', 'address_en',
+              'description', 'descriptionEn', 'description_bn', 'description_en',
+              'phone', 'alternate_phone', 'email',
+              'openingHours', 'openingHoursEn', 'opening_time', 'closing_time', 'weekly_holiday',
+              'mapUrl', 'lat', 'lng', 'images', 'available_categories', 'available_products',
+              'isMain', 'visible', 'deleted', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription',
+              'createdAt', 'updatedAt'
+            ]))
+        );
       allow delete: if hasPermission('showrooms_manage') && isValidId(showroomId);
     }
 
@@ -1534,7 +1576,7 @@ service cloud.firestore {
       allow get: if isValidId(logId) && (isSuperAdmin() || hasPermission('reports_view') || hasPermission('dashboard_view'));
       allow list: if isSuperAdmin() || hasPermission('reports_view') || hasPermission('dashboard_view');
       allow create: if isValidId(logId)
-        && hasActiveRbacDoc()
+        && (hasActiveRbacDoc() || isPrimarySuperAdmin() || hasActiveAdminDoc())
         && isValidActivityLog(incoming())
         && incoming().id == logId
         && incoming().admin_uid == request.auth.uid

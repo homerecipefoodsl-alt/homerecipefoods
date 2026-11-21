@@ -512,22 +512,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             resolvedAdminRecord = aData;
             const adminNonActive =
               !aData.active || aData.status === 'disabled' || aData.status === 'suspended';
-            if (!adminNonActive && resolvedStatus === 'active') {
+            if (!adminNonActive && resolvedStatus === 'active' && !rbacSnapDataCache) {
               resolvedRole = aData.role;
               if (!resolvedPermissions) {
                 resolvedPermissions = Array.isArray(aData.permissions)
                   ? aData.permissions
                   : DEFAULT_ROLE_PERMISSIONS[aData.role] ?? [];
               }
-              if (!isPrimarySuperAdminEmail) {
-                try {
-                  await updateDoc(adminRef, {
-                    last_login_at: now,
-                    updated_at: now,
-                  });
-                } catch {
-                  // Ignore if disallowed
-                }
+            }
+            if (!adminNonActive && resolvedStatus === 'active' && !isPrimarySuperAdminEmail) {
+              try {
+                await updateDoc(adminRef, {
+                  last_login_at: now,
+                  updated_at: now,
+                });
+              } catch {
+                // Ignore if disallowed
               }
             } else if (adminNonActive && !isPrimarySuperAdminEmail) {
               resolvedRole = 'customer';
@@ -650,11 +650,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         }
 
         let latestRbacStatus: AccountStatus = resolvedStatus;
+        let hasLiveRbacDoc = Boolean(rbacSnapDataCache);
 
         // Live subscriptions so role/status/permission changes apply immediately
         unsubRbac = onSnapshot(
           rbacRef,
           (snap) => {
+            hasLiveRbacDoc = snap.exists();
             if (!snap.exists()) {
               if (!isPrimarySuperAdminEmail) {
                 latestRbacStatus = 'disabled';
@@ -695,7 +697,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                 setUserRole('customer');
                 setRbacPermissions([]);
                 setAccountStatus(a.status === 'suspended' ? 'suspended' : 'disabled');
-              } else if (latestRbacStatus === 'active') {
+              } else if (latestRbacStatus === 'active' && !hasLiveRbacDoc) {
                 setUserRole(a.role);
                 if (Array.isArray(a.permissions)) {
                   setRbacPermissions(a.permissions);
