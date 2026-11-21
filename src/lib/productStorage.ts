@@ -1,11 +1,4 @@
-import {
-  FirebaseStorage,
-  StorageError,
-  getDownloadURL,
-  ref,
-  uploadBytesResumable,
-} from 'firebase/storage';
-import { auth, storage } from './firebase';
+import { auth } from './firebase';
 
 export const ALLOWED_PRODUCT_IMAGE_TYPES = [
   'image/jpeg',
@@ -17,8 +10,9 @@ export const ALLOWED_PRODUCT_IMAGE_TYPES = [
 export const MAX_PRODUCT_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
 const OPTIMIZE_THRESHOLD_BYTES = 1200 * 1024; // ~1.2 MB
 const MAX_UPLOAD_DIMENSION = 1600;
-const STORAGE_STALL_TIMEOUT_MS = 12000;
-const BUCKET_PROBE_TIMEOUT_MS = 3500;
+const UPLOAD_TIMEOUT_MS = 25000;
+
+export type MediaUploadFolder = 'products' | 'categories' | 'media' | 'banners' | 'showrooms';
 
 export interface CatalogImageUploadResult {
   downloadUrl: string;
@@ -27,13 +21,17 @@ export interface CatalogImageUploadResult {
   sizeBytes: number;
 }
 
-interface BucketHealthCacheEntry {
-  exists: boolean;
-  checkedAt: number;
-  reason?: string;
+interface MediaUploadApiResponse {
+  success?: boolean;
+  ok?: boolean;
+  downloadUrl?: string;
+  storagePath?: string;
+  fileName?: string;
+  sizeBytes?: number;
+  error?: string;
+  code?: string;
+  message?: string;
 }
-
-const bucketHealthCache = new Map<string, BucketHealthCacheEntry>();
 
 export function isForbiddenInlineImageUrl(url: string | null | undefined): boolean {
   if (typeof url !== 'string') return false;
@@ -98,8 +96,8 @@ export function validateCatalogImageFile(file: File): string | null {
 }
 
 /**
- * Gently optimizes large images (> 1.2 MB) into a crisp File/Blob before uploading
- * to Firebase Storage. Never generates data: URLs or touches the database.
+ * Gently optimizes large images (> 1.2 MB) into a crisp File before uploading
+ * to Cloudflare R2. Never generates data: URLs or embeds files in Firestore.
  */
 async function optimizeImageFileForStorage(file: File): Promise<File> {
   if (typeof document === 'undefined' || file.size <= OPTIMIZE_THRESHOLD_BYTES) {
@@ -122,7 +120,11 @@ async function optimizeImageFileForStorage(file: File): Promise<File> {
     let height = img.naturalHeight || img.height;
     if (!width || !height) return file;
 
-    if (width <= MAX_UPLOAD_DIMENSION && height <= MAX_UPLOAD_DIMENSION && file.size <= OPTIMIZE_THRESHOLD_BYTES) {
+    if (
+      width <= MAX_UPLOAD_DIMENSION &&
+      height <= MAX_UPLOAD_DIMENSION &&
+      file.size <= OPTIMIZE_THRESHOLD_BYTES
+    ) {
       return file;
     }
 
@@ -170,211 +172,85 @@ async function optimizeImageFileForStorage(file: File): Promise<File> {
   }
 }
 
-/**
- * Simple CORS GET request (no custom headers -> no preflight OPTIONS) to check
- * whether the Firebase Storage bucket actually exists before calling uploadBytesResumable.
- * When a bucket doesn't exist, preflight OPTIONS returns 404, which browsers turn into
- * status=0 network errors that cause Firebase Storage SDK to retry silently for minutes.
- */
-async function probeStorageBucketHealth(
-  bucketName: string
-): Promise<{ exists: boolean; reason?: string }> {
-  const normalizedBucket = bucketName.replace(/^gs:\/\//i, '').trim();
-  if (!normalizedBucket) {
-    console.error('[ProductStorage] Missing VITE_FIREBASE_STORAGE_BUCKET configuration.');
-    return {
-      exists: false,
-      reason: 'ছবি আপলোড করার জন্য Firebase Storage চালু করা প্রয়োজন।',
-    };
+function mapUploadHttpError(status: number, body: MediaUploadApiResponse | null): string {
+  const serverMessage = typeof body?.message === 'string' ? body.message.trim() : '';
+  if (serverMessage) {
+    return serverMessage;
   }
 
-  const cached = bucketHealthCache.get(normalizedBucket);
-  const now = Date.now();
-  if (cached) {
-    const ttl = cached.exists ? 60_000 : 15_000;
-    if (now - cached.checkedAt < ttl) {
-      return { exists: cached.exists, reason: cached.reason };
-    }
-  }
-
-  const controller = new AbortController();
-  const timer = globalThis.setTimeout(() => controller.abort(), BUCKET_PROBE_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(
-      `https://firebasestorage.googleapis.com/v0/b/${encodeURIComponent(normalizedBucket)}/o?maxResults=1`,
-      {
-        method: 'GET',
-        signal: controller.signal,
-      }
-    );
-
-    if (response.status === 404) {
-      console.error(
-        `[ProductStorage] Firebase Storage bucket "${normalizedBucket}" returned 404 Not Found. Enable Storage in Firebase Console → Build → Storage → Get Started.`
-      );
-      const reason = 'ছবি আপলোড করার জন্য Firebase Storage চালু করা প্রয়োজন।';
-      bucketHealthCache.set(normalizedBucket, {
-        exists: false,
-        checkedAt: now,
-        reason,
-      });
-      return { exists: false, reason };
-    }
-
-    // 200, 401, or 403 confirms the Storage bucket exists
-    bucketHealthCache.set(normalizedBucket, { exists: true, checkedAt: now });
-    return { exists: true };
-  } catch {
-    // If probe itself hits timeout/offline, proceed to resumable upload + stall watchdog
-    return { exists: true };
-  } finally {
-    globalThis.clearTimeout(timer);
+  switch (status) {
+    case 401:
+      return 'আপনার লগইন সেশন শেষ হয়ে গেছে। অনুগ্রহ করে আবার লগইন করুন।';
+    case 403:
+      return 'ছবিটি আপলোড করা যায়নি। আপনার প্রশাসনিক অনুমতি যাচাই করুন।';
+    case 413:
+      return 'ছবির আকার অনেক বড়। সর্বোচ্চ ৫ এমবি আকারের ছবি আপলোড করা যাবে।';
+    case 415:
+      return 'অসমর্থিত ফাইল ফরম্যাট। শুধু JPG, PNG অথবা WEBP ছবি ব্যবহার করুন।';
+    case 503:
+      return 'Cloudflare R2 স্টোরেজ বাকেট এখনো সংযুক্ত করা হয়নি। Cloudflare Dashboard → R2-তে "homerecipefoods-media" বাকেট তৈরি করুন।';
+    default:
+      return 'Cloudflare R2-তে ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে কিছুক্ষণ পর আবার চেষ্টা করুন।';
   }
 }
 
-function mapStorageUploadError(err: unknown, storagePath: string): string {
-  console.error('[ProductStorage] Upload error:', { path: storagePath, error: err });
-
-  if (err instanceof StorageError) {
-    const details = `${err.message || ''} ${err.serverResponse || ''}`.toLowerCase();
-    switch (err.code) {
-      case 'storage/bucket-not-found':
-      case 'storage/project-not-found':
-        return 'ছবি আপলোড করার জন্য Firebase Storage চালু করা প্রয়োজন।';
-      case 'storage/unauthorized':
-      case 'storage/unauthenticated':
-        return 'ছবিটি আপলোড করা যায়নি। আপনার প্রশাসনিক অনুমতি বা Firebase Storage সেটিংস পরীক্ষা করুন।';
-      case 'storage/quota-exceeded':
-        return 'ছবি সংরক্ষণের নির্ধারিত জায়গা পূর্ণ হয়ে গেছে। অনুগ্রহ করে অ্যাডমিনিস্ট্রেটরের সাথে যোগাযোগ করুন।';
-      case 'storage/canceled':
-      case 'storage/retry-limit-exceeded':
-        return 'ইন্টারনেট সংযোগের কারণে ছবিটি আপলোড করা যায়নি। আবার চেষ্টা করুন।';
-      case 'storage/unknown':
-        if (
-          details.includes('404') ||
-          details.includes('not found') ||
-          details.includes('bucket')
-        ) {
-          return 'ছবি আপলোড করার জন্য Firebase Storage চালু করা প্রয়োজন।';
-        }
-        return 'ছবি সংরক্ষণ করা যাচ্ছে না। Firebase Storage বর্তমানে উপলভ্য নয়।';
-      default:
-        return 'ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে কিছুক্ষণ পর আবার চেষ্টা করুন।';
-    }
-  }
-
-  if (err instanceof Error) {
-    if (err.message.includes('STORAGE_STALL_TIMEOUT')) {
-      return 'ইন্টারনেট সংযোগের কারণে ছবিটি আপলোড করা যায়নি। আবার চেষ্টা করুন।';
-    }
-    if (err.message) {
-      return err.message;
-    }
-  }
-
-  return 'ছবি সংরক্ষণ করা যাচ্ছে না। Firebase Storage বর্তমানে উপলভ্য নয়।';
-}
-
-function uploadResumableToPath(
-  activeStorage: FirebaseStorage,
-  storagePath: string,
-  file: File,
-  onProgress?: (percent: number) => void
-): Promise<CatalogImageUploadResult> {
-  activeStorage.maxUploadRetryTime = 15000;
-  activeStorage.maxOperationRetryTime = 15000;
-
+function sendBinaryUploadRequest(params: {
+  endpointUrl: string;
+  idToken: string;
+  file: File;
+  contentType: string;
+  onProgress?: (percent: number) => void;
+}): Promise<{ status: number; body: MediaUploadApiResponse | null }> {
   return new Promise((resolve, reject) => {
-    const storageRef = ref(activeStorage, storagePath);
-    const contentType = inferContentTypeFromFile(file);
-    const task = uploadBytesResumable(storageRef, file, {
-      contentType,
-      cacheControl: 'public, max-age=31536000',
-    });
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', params.endpointUrl, true);
+    xhr.timeout = UPLOAD_TIMEOUT_MS;
+    xhr.setRequestHeader('Authorization', `Bearer ${params.idToken}`);
+    xhr.setRequestHeader('Content-Type', params.contentType);
 
-    let settled = false;
-    let lastBytesTransferred = -1;
-    let stallTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const clearStallTimer = () => {
-      if (stallTimer !== null) {
-        globalThis.clearTimeout(stallTimer);
-        stallTimer = null;
-      }
+    xhr.upload.onprogress = (event) => {
+      if (!params.onProgress || !event.lengthComputable || event.total <= 0) return;
+      const pct = Math.min(95, Math.max(1, Math.round((event.loaded / event.total) * 95)));
+      params.onProgress(pct);
     };
 
-    const resetStallTimer = () => {
-      clearStallTimer();
-      stallTimer = globalThis.setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        task.cancel();
-        reject(
-          new Error(
-            'STORAGE_STALL_TIMEOUT: Upload connection stalled with no bytes transferred.'
-          )
-        );
-      }, STORAGE_STALL_TIMEOUT_MS);
+    xhr.upload.onload = () => {
+      params.onProgress?.(98);
     };
 
-    resetStallTimer();
-
-    task.on(
-      'state_changed',
-      (snapshot) => {
-        if (settled) return;
-        if (snapshot.bytesTransferred > lastBytesTransferred) {
-          lastBytesTransferred = snapshot.bytesTransferred;
-          resetStallTimer();
-        }
-        if (snapshot.totalBytes > 0 && snapshot.bytesTransferred > 0 && onProgress) {
-          const pct = Math.min(
-            99,
-            Math.max(1, Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100))
-          );
-          onProgress(pct);
-        }
-      },
-      (err) => {
-        clearStallTimer();
-        if (settled) return;
-        settled = true;
-        reject(err);
-      },
-      async () => {
-        clearStallTimer();
-        if (settled) return;
-        try {
-          const downloadUrl = await getDownloadURL(task.snapshot.ref);
-          if (
-            !downloadUrl ||
-            !downloadUrl.startsWith('https://') ||
-            isForbiddenInlineImageUrl(downloadUrl)
-          ) {
-            settled = true;
-            reject(new Error('ছবি আপলোডের পর বৈধ ছবির লিংক পাওয়া যায়নি।'));
-            return;
-          }
-          settled = true;
-          onProgress?.(100);
-          resolve({
-            downloadUrl,
-            storagePath,
-            fileName: file.name,
-            sizeBytes: file.size,
-          });
-        } catch (urlErr) {
-          settled = true;
-          reject(urlErr);
-        }
+    xhr.onload = () => {
+      let parsed: MediaUploadApiResponse | null = null;
+      try {
+        parsed = xhr.responseText ? (JSON.parse(xhr.responseText) as MediaUploadApiResponse) : null;
+      } catch {
+        parsed = null;
       }
-    );
+      resolve({ status: xhr.status, body: parsed });
+    };
+
+    xhr.onerror = () => {
+      reject(new Error('ইন্টারনেট সংযোগের কারণে ছবিটি আপলোড করা যায়নি। আবার চেষ্টা করুন।'));
+    };
+
+    xhr.ontimeout = () => {
+      reject(new Error('ইন্টারনেট সংযোগের কারণে ছবিটি আপলোড করা যায়নি। আবার চেষ্টা করুন।'));
+    };
+
+    xhr.onabort = () => {
+      reject(new Error('ছবি আপলোড বাতিল করা হয়েছে।'));
+    };
+
+    xhr.send(params.file);
   });
 }
 
+function isValidHostedImageUrl(url: string): boolean {
+  if (!url || isForbiddenInlineImageUrl(url)) return false;
+  return url.startsWith('https://') || url.startsWith('http://') || url.startsWith('/api/media/file/');
+}
+
 export async function uploadCatalogImageToStorage(params: {
-  folder: 'products' | 'categories' | 'media';
+  folder: MediaUploadFolder;
   entityId: string;
   file: File;
   onProgress?: (percent: number) => void;
@@ -394,53 +270,64 @@ export async function uploadCatalogImageToStorage(params: {
     );
   }
 
+  let idToken: string;
   try {
-    await auth.currentUser.getIdToken();
+    idToken = await auth.currentUser.getIdToken();
   } catch (tokenErr) {
     console.error('[ProductStorage] Failed to refresh ID token:', tokenErr);
     throw new Error('আপনার লগইন সেশন শেষ হয়ে গেছে। অনুগ্রহ করে আবার লগইন করুন।');
   }
 
-  if (!storage) {
-    console.error('[ProductStorage] Firebase Storage SDK instance is not initialized.');
-    throw new Error('ছবি সংরক্ষণ করা যাচ্ছে না। Firebase Storage বর্তমানে উপলভ্য নয়।');
-  }
-
-  const configuredBucket = storage.app.options.storageBucket || '';
-  const health = await probeStorageBucketHealth(configuredBucket);
-  if (!health.exists) {
-    throw new Error(health.reason || 'ছবি আপলোড করার জন্য Firebase Storage চালু করা প্রয়োজন।');
-  }
-
   const preparedFile = await optimizeImageFileForStorage(params.file);
   const safeId = sanitizeEntityId(params.entityId);
   const safeFile = sanitizeImageFileName(preparedFile.name);
-  const uniqueStamp = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-  const primaryPath = `${params.folder}/${safeId}/${uniqueStamp}_${safeFile}`;
+  const contentType = inferContentTypeFromFile(preparedFile);
 
-  try {
-    return await uploadResumableToPath(storage, primaryPath, preparedFile, params.onProgress);
-  } catch (err) {
-    // If updated storage.rules (/products/ or /categories/) has not yet been published,
-    // attempt the /media/{folder}/{fileName} path from existing storage.rules.
-    if (
-      params.folder !== 'media' &&
-      err instanceof StorageError &&
-      err.code === 'storage/unauthorized'
-    ) {
-      const legacyMediaPath = `media/${params.folder}/${safeId}_${uniqueStamp}_${safeFile}`;
-      try {
-        return await uploadResumableToPath(
-          storage,
-          legacyMediaPath,
-          preparedFile,
-          params.onProgress
-        );
-      } catch (fallbackErr) {
-        throw new Error(mapStorageUploadError(fallbackErr, legacyMediaPath));
-      }
+  const query = new URLSearchParams({
+    folder: params.folder,
+    entityId: safeId,
+    filename: safeFile,
+  });
+  const endpointUrl = `/api/media/upload?${query.toString()}`;
+
+  let response = await sendBinaryUploadRequest({
+    endpointUrl,
+    idToken,
+    file: preparedFile,
+    contentType,
+    onProgress: params.onProgress,
+  });
+
+  if (response.status === 401 && auth.currentUser) {
+    try {
+      const refreshedToken = await auth.currentUser.getIdToken(true);
+      response = await sendBinaryUploadRequest({
+        endpointUrl,
+        idToken: refreshedToken,
+        file: preparedFile,
+        contentType,
+        onProgress: params.onProgress,
+      });
+    } catch {
+      // Keep original 401 handling
     }
-
-    throw new Error(mapStorageUploadError(err, primaryPath));
   }
+
+  if (response.status < 200 || response.status >= 300 || !response.body?.ok) {
+    throw new Error(mapUploadHttpError(response.status, response.body));
+  }
+
+  const downloadUrl = (response.body.downloadUrl || '').trim();
+  const storagePath = (response.body.storagePath || '').trim();
+  if (!isValidHostedImageUrl(downloadUrl) || !storagePath) {
+    throw new Error('ছবি আপলোডের পর বৈধ Cloudflare R2 লিংক পাওয়া যায়নি।');
+  }
+
+  params.onProgress?.(100);
+  return {
+    downloadUrl,
+    storagePath,
+    fileName: preparedFile.name,
+    sizeBytes: response.body.sizeBytes || preparedFile.size,
+  };
 }

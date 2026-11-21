@@ -37,7 +37,12 @@ npx wrangler deploy
 ```
 Verify that `dist/index.html` and `dist/assets/*` were generated cleanly (without `_redirects`).
 
-### 3. Configure Secrets (One-Time)
+### 3. Create Cloudflare R2 Media Bucket (One-Time, Before Deploying)
+Product, category, and media images are stored in Cloudflare R2 via the `MEDIA_BUCKET` binding in `wrangler.jsonc`:
+1. Open **Cloudflare Dashboard → R2 Object Storage → Create bucket**
+2. Name the bucket **`homerecipefoods-media`** (Location: Automatic) → **Create bucket**
+
+### 4. Configure Secrets (One-Time)
 Update `"APP_URL"` in `wrangler.jsonc` if using a custom domain, then upload your Firebase Service Account JSON (for project `ai-studio-applet-webapp-e4b0f`) and Gemini API key:
 
 ```bash

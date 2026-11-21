@@ -15,5 +15,11 @@
       "/robots.txt",
       "/sitemap.xml"
     ]
-  }
+  },
+  "r2_buckets": [
+    {
+      "binding": "MEDIA_BUCKET",
+      "bucket_name": "homerecipefoods-media"
+    }
+  ]
 }

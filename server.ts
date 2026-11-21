@@ -14,6 +14,21 @@ import {
   inspectServiceAccountConfig,
   type ServiceAccountConfig,
 } from './shared/firebaseServiceAccount';
+import {
+  ALLOWED_MEDIA_MIME_TYPES,
+  buildR2MediaPublicUrl,
+  buildR2ObjectKey,
+  CATALOG_UPLOAD_PERMISSIONS,
+  CATALOG_UPLOAD_STAFF_ROLES,
+  getObjectFromR2S3,
+  inspectImageBytes,
+  inspectR2S3Credentials,
+  isAllowedMediaFolder,
+  MAX_MEDIA_IMAGE_BYTES,
+  putObjectToR2S3,
+  resolveAllowedApiCorsOrigin,
+  validateR2ReadKey,
+} from './shared/r2Media';
 
 dotenv.config();
 
@@ -63,9 +78,29 @@ app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
 
 // Ensure CORS & preflight headers on all /api/* routes and prevent caching
 app.use('/api', (req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const host = req.get('host') || `localhost:${PORT}`;
+  const proto = req.headers['x-forwarded-proto']
+    ? String(req.headers['x-forwarded-proto']).split(',')[0].trim()
+    : req.protocol;
+  const currentOrigin = `${proto}://${host}`;
+  const corsOrigin = resolveAllowedApiCorsOrigin(
+    req.headers.origin,
+    currentOrigin,
+    process.env.APP_URL
+  );
+  res.setHeader('Vary', 'Origin');
+  if (req.path === '/media/upload' || req.path.startsWith('/admin/') || req.path.startsWith('/auth/')) {
+    if (corsOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+    }
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', corsOrigin || '*');
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Chat-Client-Id');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, Authorization, X-Chat-Client-Id, X-Upload-Folder, X-Entity-Id, X-File-Name'
+  );
   res.setHeader('Cache-Control', 'no-store');
   if (req.method === 'OPTIONS') {
     res.status(204).end();
@@ -421,6 +456,83 @@ async function verifyCallerStaffAuthority(
       status: 'disabled',
     };
   }
+}
+
+async function verifyCatalogUploadAuthority(
+  idToken: string,
+  callerUid: string,
+  callerEmail: string
+): Promise<{ allowed: boolean; role: string }> {
+  if (callerEmail === PRIMARY_SUPER_ADMIN_EMAIL) {
+    return { allowed: true, role: 'super_admin' };
+  }
+
+  try {
+    const rbacUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+      firebaseProjectId
+    )}/databases/${encodeURIComponent(
+      firestoreDatabaseId
+    )}/documents/rbac_roles/${encodeURIComponent(callerEmail)}`;
+    const rbacResp = await fetch(rbacUrl, {
+      headers: { Authorization: `Bearer ${idToken}` },
+    });
+
+    if (rbacResp.ok) {
+      const docData = (await rbacResp.json()) as {
+        fields?: {
+          role?: { stringValue?: string };
+          status?: { stringValue?: string };
+          permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
+        };
+      };
+      const role = docData.fields?.role?.stringValue || '';
+      const status = docData.fields?.status?.stringValue || '';
+      const permissions = (docData.fields?.permissions?.arrayValue?.values || [])
+        .map((v) => v.stringValue || '')
+        .filter(Boolean);
+      const isActive = status === 'active';
+      const hasCatalogPerm =
+        CATALOG_UPLOAD_STAFF_ROLES.has(role) ||
+        CATALOG_UPLOAD_PERMISSIONS.some((perm) => permissions.includes(perm));
+      return { allowed: isActive && hasCatalogPerm, role: role || 'customer' };
+    }
+
+    if (rbacResp.status === 404 && callerUid) {
+      const adminUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+        firebaseProjectId
+      )}/databases/${encodeURIComponent(
+        firestoreDatabaseId
+      )}/documents/admins/${encodeURIComponent(callerUid)}`;
+      const adminResp = await fetch(adminUrl, {
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      if (adminResp.ok) {
+        const adminData = (await adminResp.json()) as {
+          fields?: {
+            role?: { stringValue?: string };
+            active?: { booleanValue?: boolean };
+            status?: { stringValue?: string };
+            permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
+          };
+        };
+        const role = adminData.fields?.role?.stringValue || '';
+        const status = adminData.fields?.status?.stringValue || 'active';
+        const active = adminData.fields?.active?.booleanValue === true;
+        const permissions = (adminData.fields?.permissions?.arrayValue?.values || [])
+          .map((v) => v.stringValue || '')
+          .filter(Boolean);
+        const isActive = active && status === 'active';
+        const hasCatalogPerm =
+          CATALOG_UPLOAD_STAFF_ROLES.has(role) ||
+          CATALOG_UPLOAD_PERMISSIONS.some((perm) => permissions.includes(perm));
+        return { allowed: isActive && hasCatalogPerm, role: role || 'customer' };
+      }
+    }
+  } catch {
+    // Deny on verification failure
+  }
+
+  return { allowed: false, role: 'customer' };
 }
 
 async function syncFirebaseStaffCustomClaims(params: {
@@ -1592,6 +1704,235 @@ async function handleAiChatEndpoint(req: Request, res: Response) {
     slot.release();
   }
 }
+
+app.get('/api/media/health', (_req, res) => {
+  const s3Configured = inspectR2S3Credentials(process.env).configured;
+  res.json({
+    success: true,
+    ok: s3Configured,
+    provider: 'cloudflare-r2',
+    bindingActive: false,
+    s3FallbackActive: s3Configured,
+  });
+});
+
+app.get('/api/media/file/*', async (req, res) => {
+  try {
+    const rawKey = req.path.replace(/^\/api\/media\/file\//, '');
+    const objectKey = validateR2ReadKey(rawKey);
+    if (!objectKey) {
+      res.status(404).send('Not found');
+      return;
+    }
+
+    const s3Creds = inspectR2S3Credentials(process.env);
+    if (!s3Creds.configured) {
+      res.status(503).send('Cloudflare R2 credentials not configured on Express server.');
+      return;
+    }
+
+    const s3Resp = await getObjectFromR2S3({
+      creds: s3Creds.creds,
+      objectKey,
+    });
+    if (!s3Resp.ok) {
+      res.status(s3Resp.status === 404 ? 404 : 502).send('Image not found');
+      return;
+    }
+
+    const rawMime = (s3Resp.headers.get('content-type') || '').toLowerCase();
+    const safeMime = (ALLOWED_MEDIA_MIME_TYPES as readonly string[]).includes(rawMime)
+      ? rawMime
+      : objectKey.endsWith('.png')
+      ? 'image/png'
+      : objectKey.endsWith('.webp')
+      ? 'image/webp'
+      : 'image/jpeg';
+
+    const buf = Buffer.from(await s3Resp.arrayBuffer());
+    res.setHeader('Content-Type', safeMime);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.status(200).send(buf);
+  } catch {
+    res.status(500).send('Failed to fetch media file');
+  }
+});
+
+app.post(
+  '/api/media/upload',
+  express.raw({
+    type: ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'application/octet-stream'],
+    limit: MAX_MEDIA_IMAGE_BYTES,
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const authHeader = req.headers.authorization || '';
+      const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+      if (!idToken) {
+        sendError(
+          res,
+          'UNAUTHORIZED',
+          'ছবি আপলোড করতে অ্যাডমিন অ্যাকাউন্টে লগইন থাকতে হবে।',
+          401
+        );
+        return;
+      }
+
+      let decoded: VerifiedFirebaseToken;
+      try {
+        decoded = await verifyFirebaseIdToken(idToken);
+      } catch {
+        sendError(
+          res,
+          'UNAUTHORIZED',
+          'আপনার লগইন সেশন শেষ হয়ে গেছে। অনুগ্রহ করে আবার লগইন করুন।',
+          401
+        );
+        return;
+      }
+
+      if (!decoded.email || !decoded.emailVerified) {
+        sendError(
+          res,
+          'UNVERIFIED_ADMIN',
+          'অ্যাডমিন ইমেইল যাচাইকৃত না হলে ছবি আপলোড করা যাবে না।',
+          403
+        );
+        return;
+      }
+
+      const authority = await verifyCatalogUploadAuthority(idToken, decoded.uid, decoded.email);
+      if (!authority.allowed) {
+        sendError(
+          res,
+          'PERMISSION_DENIED',
+          'ছবি আপলোডের জন্য আপনার পর্যাপ্ত প্রশাসনিক অনুমতি নেই।',
+          403
+        );
+        return;
+      }
+
+      const rawFolder = String(
+        req.query.folder || req.headers['x-upload-folder'] || 'products'
+      )
+        .trim()
+        .toLowerCase();
+      if (!isAllowedMediaFolder(rawFolder)) {
+        sendError(res, 'INVALID_FOLDER', 'অবৈধ মিডিয়া ফোল্ডার নির্বাচিত হয়েছে।', 400);
+        return;
+      }
+
+      const rawEntityId = String(
+        req.query.entityId || req.headers['x-entity-id'] || `item-${Date.now()}`
+      );
+      const rawFileName = String(
+        req.query.filename || req.headers['x-file-name'] || 'image.jpg'
+      );
+
+      if (!Buffer.isBuffer(req.body)) {
+        sendError(
+          res,
+          'UNSUPPORTED_MEDIA_TYPE',
+          'অসমর্থিত ফাইল ফরম্যাট। শুধু JPG, PNG অথবা WEBP ছবি আপলোড করা যাবে।',
+          415
+        );
+        return;
+      }
+
+      const bytes = new Uint8Array(req.body.buffer, req.body.byteOffset, req.body.byteLength);
+      const inspection = inspectImageBytes(
+        bytes,
+        typeof req.headers['content-type'] === 'string' ? req.headers['content-type'] : undefined
+      );
+      if (inspection.ok === false) {
+        sendError(res, inspection.code, inspection.message, inspection.status);
+        return;
+      }
+
+      const s3Creds = inspectR2S3Credentials(process.env);
+      if (!s3Creds.configured) {
+        sendError(
+          res,
+          'R2_NOT_CONFIGURED',
+          'প্রিভিউ সার্ভারে Cloudflare R2 S3 টোকেন সেট করা নেই। লাইভ Cloudflare সাইটে (homerecipefoods.workers.dev) R2 বাকেট সরাসরি কাজ করবে, অথবা প্রিভিউতে আপলোড করতে .env/Secrets-এ R2_ACCOUNT_ID, R2_ACCESS_KEY_ID ও R2_SECRET_ACCESS_KEY যোগ করুন।',
+          503
+        );
+        return;
+      }
+
+      const objectKey = buildR2ObjectKey({
+        folder: rawFolder,
+        entityId: rawEntityId,
+        fileName: rawFileName,
+        ext: inspection.ext,
+      });
+
+      const s3Result = await putObjectToR2S3({
+        creds: s3Creds.creds,
+        objectKey,
+        body: bytes,
+        contentType: inspection.contentType,
+      });
+      if (s3Result.ok === false) {
+        sendError(
+          res,
+          'R2_UPLOAD_FAILED',
+          'Cloudflare R2-তে ছবি সংরক্ষণ করা যায়নি। অনুগ্রহ করে R2 বাকেট ও অনুমতি যাচাই করুন।',
+          502
+        );
+        return;
+      }
+
+      const host = req.get('host') || `localhost:${PORT}`;
+      const proto = req.headers['x-forwarded-proto']
+        ? String(req.headers['x-forwarded-proto']).split(',')[0].trim()
+        : req.protocol;
+      const serverOrigin = `${proto}://${host}`;
+      const downloadUrl = buildR2MediaPublicUrl({
+        objectKey,
+        publicBaseUrl: process.env.R2_PUBLIC_URL,
+        workerOrigin: serverOrigin,
+      });
+
+      res.status(201).json({
+        success: true,
+        ok: true,
+        downloadUrl,
+        storagePath: objectKey,
+        fileName: rawFileName,
+        sizeBytes: bytes.byteLength,
+        contentType: inspection.contentType,
+        storageProvider: 'cloudflare-r2',
+      });
+    } catch {
+      sendError(
+        res,
+        'MEDIA_UPLOAD_ERROR',
+        'ছবি আপলোডের সময় সার্ভারে সমস্যা হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।',
+        500
+      );
+    }
+  }
+);
+
+app.use('/api/media/upload', (err: unknown, _req: Request, res: Response, next: NextFunction) => {
+  if (
+    err &&
+    typeof err === 'object' &&
+    'type' in err &&
+    (err as { type?: unknown }).type === 'entity.too.large'
+  ) {
+    sendError(
+      res,
+      'IMAGE_TOO_LARGE',
+      'ছবির আকার অনেক বড়। সর্বোচ্চ ৫ এমবি আকারের ছবি আপলোড করা যাবে।',
+      413
+    );
+    return;
+  }
+  next(err);
+});
 
 app.post('/api/chat/ai', handleAiChatEndpoint);
 app.post('/api/ai-assistant', handleAiChatEndpoint);

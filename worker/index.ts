@@ -12,15 +12,63 @@ import {
   type ServiceAccountConfig,
 } from '../shared/firebaseServiceAccount';
 
+import {
+  ALLOWED_MEDIA_MIME_TYPES,
+  buildR2MediaPublicUrl,
+  buildR2ObjectKey,
+  CATALOG_UPLOAD_PERMISSIONS,
+  CATALOG_UPLOAD_STAFF_ROLES,
+  getObjectFromR2S3,
+  inspectImageBytes,
+  inspectR2S3Credentials,
+  isAllowedMediaFolder,
+  MAX_MEDIA_IMAGE_BYTES,
+  putObjectToR2S3,
+  resolveAllowedApiCorsOrigin,
+  validateR2ReadKey,
+} from '../shared/r2Media';
+
 interface CloudflareAssetsBinding {
   fetch(request: Request): Promise<Response>;
 }
 
+interface R2ObjectBodyBinding {
+  body: ReadableStream | null;
+  size: number;
+  etag?: string;
+  httpEtag?: string;
+  httpMetadata?: {
+    contentType?: string;
+    cacheControl?: string;
+  };
+}
+
+interface R2BucketBinding {
+  get(key: string): Promise<R2ObjectBodyBinding | null>;
+  put(
+    key: string,
+    value: ArrayBuffer | ArrayBufferView | string | ReadableStream | null,
+    options?: {
+      httpMetadata?: {
+        contentType?: string;
+        cacheControl?: string;
+      };
+      customMetadata?: Record<string, string>;
+    }
+  ): Promise<unknown>;
+}
+
 interface Env {
   ASSETS: CloudflareAssetsBinding;
+  MEDIA_BUCKET?: R2BucketBinding;
   GEMINI_API_KEY?: string;
   APP_URL?: string;
   FIREBASE_SERVICE_ACCOUNT_JSON?: string;
+  R2_ACCOUNT_ID?: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
+  R2_BUCKET_NAME?: string;
+  R2_PUBLIC_URL?: string;
   VITE_FIREBASE_PROJECT_ID?: string;
   VITE_FIREBASE_API_KEY?: string;
   VITE_FIREBASE_FIRESTORE_DATABASE_ID?: string;
@@ -85,6 +133,57 @@ const CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Chat-Client-Id',
 };
+
+function buildScopedCorsHeaders(corsOrigin: string | null): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers':
+      'Content-Type, Authorization, X-Chat-Client-Id, X-Upload-Folder, X-Entity-Id, X-File-Name',
+    Vary: 'Origin',
+  };
+  if (corsOrigin) {
+    headers['Access-Control-Allow-Origin'] = corsOrigin;
+  }
+  return headers;
+}
+
+function scopedJsonResponse(
+  body: unknown,
+  status: number,
+  corsOrigin: string | null,
+  extraHeaders?: Record<string, string>
+): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      ...buildScopedCorsHeaders(corsOrigin),
+      ...(extraHeaders || {}),
+    },
+  });
+}
+
+function scopedErrorResponse(
+  errorCode: string,
+  message: string,
+  status: number,
+  corsOrigin: string | null,
+  extra?: Record<string, unknown>
+): Response {
+  return scopedJsonResponse(
+    {
+      success: false,
+      ok: false,
+      error: errorCode,
+      code: errorCode,
+      message,
+      ...(extra || {}),
+    },
+    status,
+    corsOrigin
+  );
+}
 
 function jsonResponse(
   body: unknown,
@@ -437,6 +536,85 @@ async function verifyCallerStaffAuthorityWorker(
       status: 'disabled',
     };
   }
+}
+
+async function verifyCatalogUploadAuthorityWorker(
+  idToken: string,
+  callerUid: string,
+  callerEmail: string,
+  projectId: string,
+  firestoreDatabaseId: string
+): Promise<{ allowed: boolean; role: string }> {
+  if (callerEmail === PRIMARY_SUPER_ADMIN_EMAIL) {
+    return { allowed: true, role: 'super_admin' };
+  }
+
+  try {
+    const rbacUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+      projectId
+    )}/databases/${encodeURIComponent(
+      firestoreDatabaseId
+    )}/documents/rbac_roles/${encodeURIComponent(callerEmail)}`;
+    const rbacResp = await fetch(rbacUrl, {
+      headers: { Authorization: `Bearer ${idToken}` },
+    });
+
+    if (rbacResp.ok) {
+      const docData = (await rbacResp.json()) as {
+        fields?: {
+          role?: { stringValue?: string };
+          status?: { stringValue?: string };
+          permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
+        };
+      };
+      const role = docData.fields?.role?.stringValue || '';
+      const status = docData.fields?.status?.stringValue || '';
+      const permissions = (docData.fields?.permissions?.arrayValue?.values || [])
+        .map((v) => v.stringValue || '')
+        .filter(Boolean);
+      const isActive = status === 'active';
+      const hasCatalogPerm =
+        CATALOG_UPLOAD_STAFF_ROLES.has(role) ||
+        CATALOG_UPLOAD_PERMISSIONS.some((perm) => permissions.includes(perm));
+      return { allowed: isActive && hasCatalogPerm, role: role || 'customer' };
+    }
+
+    if (rbacResp.status === 404 && callerUid) {
+      const adminUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+        projectId
+      )}/databases/${encodeURIComponent(
+        firestoreDatabaseId
+      )}/documents/admins/${encodeURIComponent(callerUid)}`;
+      const adminResp = await fetch(adminUrl, {
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      if (adminResp.ok) {
+        const adminData = (await adminResp.json()) as {
+          fields?: {
+            role?: { stringValue?: string };
+            active?: { booleanValue?: boolean };
+            status?: { stringValue?: string };
+            permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
+          };
+        };
+        const role = adminData.fields?.role?.stringValue || '';
+        const status = adminData.fields?.status?.stringValue || 'active';
+        const active = adminData.fields?.active?.booleanValue === true;
+        const permissions = (adminData.fields?.permissions?.arrayValue?.values || [])
+          .map((v) => v.stringValue || '')
+          .filter(Boolean);
+        const isActive = active && status === 'active';
+        const hasCatalogPerm =
+          CATALOG_UPLOAD_STAFF_ROLES.has(role) ||
+          CATALOG_UPLOAD_PERMISSIONS.some((perm) => permissions.includes(perm));
+        return { allowed: isActive && hasCatalogPerm, role: role || 'customer' };
+      }
+    }
+  } catch {
+    // Deny on verification failure
+  }
+
+  return { allowed: false, role: 'customer' };
 }
 
 async function syncFirebaseStaffCustomClaimsWorker(params: {
@@ -1572,13 +1750,308 @@ async function handleAdminDeleteUser(request: Request, env: Env): Promise<Respon
   }
 }
 
+async function handleMediaUploadWorker(
+  request: Request,
+  env: Env,
+  url: URL,
+  corsOrigin: string | null
+): Promise<Response> {
+  try {
+    const authHeader = request.headers.get('authorization') || '';
+    const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (!idToken) {
+      return scopedErrorResponse(
+        'UNAUTHORIZED',
+        'ছবি আপলোড করতে অ্যাডমিন অ্যাকাউন্টে লগইন থাকতে হবে।',
+        401,
+        corsOrigin
+      );
+    }
+
+    const { projectId, firestoreDatabaseId } = getFirebaseRuntimeConfig(env);
+    let decoded: VerifiedFirebaseToken;
+    try {
+      decoded = await verifyFirebaseIdTokenWorker(idToken, projectId);
+    } catch {
+      return scopedErrorResponse(
+        'UNAUTHORIZED',
+        'আপনার লগইন সেশন শেষ হয়ে গেছে। অনুগ্রহ করে আবার লগইন করুন।',
+        401,
+        corsOrigin
+      );
+    }
+
+    if (!decoded.email || !decoded.emailVerified) {
+      return scopedErrorResponse(
+        'UNVERIFIED_ADMIN',
+        'অ্যাডমিন ইমেইল যাচাইকৃত না হলে ছবি আপলোড করা যাবে না।',
+        403,
+        corsOrigin
+      );
+    }
+
+    const authority = await verifyCatalogUploadAuthorityWorker(
+      idToken,
+      decoded.uid,
+      decoded.email,
+      projectId,
+      firestoreDatabaseId
+    );
+    if (!authority.allowed) {
+      return scopedErrorResponse(
+        'PERMISSION_DENIED',
+        'ছবি আপলোডের জন্য আপনার পর্যাপ্ত প্রশাসনিক অনুমতি নেই।',
+        403,
+        corsOrigin
+      );
+    }
+
+    const rawFolder = (
+      url.searchParams.get('folder') ||
+      request.headers.get('x-upload-folder') ||
+      'products'
+    )
+      .trim()
+      .toLowerCase();
+    if (!isAllowedMediaFolder(rawFolder)) {
+      return scopedErrorResponse(
+        'INVALID_FOLDER',
+        'অবৈধ মিডিয়া ফোল্ডার নির্বাচিত হয়েছে।',
+        400,
+        corsOrigin
+      );
+    }
+
+    const contentLengthHeader = Number(request.headers.get('content-length') || '0');
+    if (Number.isFinite(contentLengthHeader) && contentLengthHeader > MAX_MEDIA_IMAGE_BYTES) {
+      return scopedErrorResponse(
+        'IMAGE_TOO_LARGE',
+        'ছবির আকার অনেক বড়। সর্বোচ্চ ৫ এমবি আকারের ছবি আপলোড করা যাবে।',
+        413,
+        corsOrigin
+      );
+    }
+
+    const rawEntityId =
+      url.searchParams.get('entityId') ||
+      request.headers.get('x-entity-id') ||
+      `item-${Date.now()}`;
+    const rawFileName =
+      url.searchParams.get('filename') ||
+      request.headers.get('x-file-name') ||
+      'image.jpg';
+
+    const arrayBuffer = await request.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+    const inspection = inspectImageBytes(
+      bytes,
+      request.headers.get('content-type') || undefined
+    );
+    if (inspection.ok === false) {
+      return scopedErrorResponse(
+        inspection.code,
+        inspection.message,
+        inspection.status,
+        corsOrigin
+      );
+    }
+
+    const objectKey = buildR2ObjectKey({
+      folder: rawFolder,
+      entityId: rawEntityId,
+      fileName: rawFileName,
+      ext: inspection.ext,
+    });
+
+    const s3Creds = inspectR2S3Credentials(env);
+    if (env.MEDIA_BUCKET) {
+      await env.MEDIA_BUCKET.put(objectKey, bytes, {
+        httpMetadata: {
+          contentType: inspection.contentType,
+          cacheControl: 'public, max-age=31536000, immutable',
+        },
+        customMetadata: {
+          uploadedByEmail: decoded.email,
+          folder: rawFolder,
+        },
+      });
+    } else if (s3Creds.configured) {
+      const s3Result = await putObjectToR2S3({
+        creds: s3Creds.creds,
+        objectKey,
+        body: bytes,
+        contentType: inspection.contentType,
+      });
+      if (s3Result.ok === false) {
+        return scopedErrorResponse(
+          'R2_UPLOAD_FAILED',
+          'Cloudflare R2-তে ছবি সংরক্ষণ করা যায়নি। অনুগ্রহ করে R2 বাকেট ও অনুমতি যাচাই করুন।',
+          502,
+          corsOrigin
+        );
+      }
+    } else {
+      return scopedErrorResponse(
+        'R2_NOT_CONFIGURED',
+        'Cloudflare R2 বাকেট (homerecipefoods-media) এখনো Worker-এ যুক্ত হয়নি।',
+        503,
+        corsOrigin
+      );
+    }
+
+    const workerOrigin = url.origin.startsWith('http://') && !url.hostname.includes('localhost')
+      ? url.origin.replace(/^http:\/\//i, 'https://')
+      : url.origin;
+    const downloadUrl = buildR2MediaPublicUrl({
+      objectKey,
+      publicBaseUrl: env.R2_PUBLIC_URL,
+      workerOrigin,
+    });
+
+    return scopedJsonResponse(
+      {
+        success: true,
+        ok: true,
+        downloadUrl,
+        storagePath: objectKey,
+        fileName: rawFileName,
+        sizeBytes: bytes.byteLength,
+        contentType: inspection.contentType,
+        storageProvider: 'cloudflare-r2',
+      },
+      201,
+      corsOrigin
+    );
+  } catch {
+    return scopedErrorResponse(
+      'MEDIA_UPLOAD_ERROR',
+      'ছবি আপলোডের সময় সার্ভারে সমস্যা হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।',
+      500,
+      corsOrigin
+    );
+  }
+}
+
+async function handleMediaFileGetWorker(
+  request: Request,
+  env: Env,
+  rawKeyPath: string
+): Promise<Response> {
+  const objectKey = validateR2ReadKey(rawKeyPath);
+  if (!objectKey) {
+    return new Response('Not found', { status: 404 });
+  }
+
+  if (env.MEDIA_BUCKET) {
+    const obj = await env.MEDIA_BUCKET.get(objectKey);
+    if (!obj || !obj.body) {
+      return new Response('Image not found', { status: 404 });
+    }
+
+    const etag = obj.httpEtag || (obj.etag ? `"${obj.etag}"` : '');
+    const ifNoneMatch = request.headers.get('if-none-match');
+    if (etag && ifNoneMatch && ifNoneMatch === etag) {
+      return new Response(null, {
+        status: 304,
+        headers: {
+          ETag: etag,
+          'Cache-Control': 'public, max-age=31536000, immutable',
+        },
+      });
+    }
+
+    const rawMime = (obj.httpMetadata?.contentType || '').toLowerCase();
+    const safeMime = (ALLOWED_MEDIA_MIME_TYPES as readonly string[]).includes(rawMime)
+      ? rawMime
+      : objectKey.endsWith('.png')
+      ? 'image/png'
+      : objectKey.endsWith('.webp')
+      ? 'image/webp'
+      : 'image/jpeg';
+
+    const headers: Record<string, string> = {
+      'Content-Type': safeMime,
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff',
+    };
+    if (etag) {
+      headers.ETag = etag;
+    }
+
+    return new Response(obj.body, { status: 200, headers });
+  }
+
+  const s3Creds = inspectR2S3Credentials(env);
+  if (s3Creds.configured) {
+    const s3Resp = await getObjectFromR2S3({
+      creds: s3Creds.creds,
+      objectKey,
+    });
+    if (!s3Resp.ok || !s3Resp.body) {
+      return new Response('Image not found', { status: s3Resp.status === 404 ? 404 : 502 });
+    }
+    const contentType = s3Resp.headers.get('content-type') || 'image/jpeg';
+    return new Response(s3Resp.body, {
+      status: 200,
+      headers: {
+        'Content-Type': contentType,
+        'Cache-Control': 'public, max-age=31536000, immutable',
+        'X-Content-Type-Options': 'nosniff',
+      },
+    });
+  }
+
+  return new Response('Media bucket not configured', { status: 503 });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith('/api/')) {
+      const corsOrigin = resolveAllowedApiCorsOrigin(
+        request.headers.get('origin'),
+        url.origin,
+        env.APP_URL
+      );
+
+      if (url.pathname.startsWith('/api/media/file/') && request.method === 'GET') {
+        const rawKey = url.pathname.slice('/api/media/file/'.length);
+        return handleMediaFileGetWorker(request, env, rawKey);
+      }
+
+      if (url.pathname === '/api/media/upload') {
+        if (request.method === 'OPTIONS') {
+          return new Response(null, {
+            status: 204,
+            headers: buildScopedCorsHeaders(corsOrigin),
+          });
+        }
+        if (request.method === 'POST') {
+          return handleMediaUploadWorker(request, env, url, corsOrigin);
+        }
+      }
+
+      if (url.pathname === '/api/media/health' && request.method === 'GET') {
+        const s3Configured = inspectR2S3Credentials(env).configured;
+        return scopedJsonResponse(
+          {
+            success: true,
+            ok: Boolean(env.MEDIA_BUCKET || s3Configured),
+            provider: 'cloudflare-r2',
+            bindingActive: Boolean(env.MEDIA_BUCKET),
+            s3FallbackActive: s3Configured,
+          },
+          200,
+          corsOrigin
+        );
+      }
+
       if (request.method === 'OPTIONS') {
-        return new Response(null, { status: 204, headers: CORS_HEADERS });
+        return new Response(null, {
+          status: 204,
+          headers: buildScopedCorsHeaders(corsOrigin),
+        });
       }
 
       if (url.pathname === '/api/health' && request.method === 'GET') {
@@ -1588,6 +2061,7 @@ export default {
           brand: 'Home Recipe Foods',
           runtime: 'cloudflare-worker',
           firebaseProjectId: getFirebaseRuntimeConfig(env).projectId,
+          r2MediaBound: Boolean(env.MEDIA_BUCKET),
         });
       }
 
