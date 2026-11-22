@@ -614,13 +614,16 @@ async function verifyCatalogUploadAuthorityWorker(
       };
       const role = docData.fields?.role?.stringValue || '';
       const status = docData.fields?.status?.stringValue || '';
+      const hasExplicitPermissions = Boolean(docData.fields && 'permissions' in docData.fields);
       const permissions = (docData.fields?.permissions?.arrayValue?.values || [])
         .map((v) => v.stringValue || '')
         .filter(Boolean);
       const isActive = status === 'active';
       const hasCatalogPerm =
-        CATALOG_UPLOAD_STAFF_ROLES.has(role) ||
-        CATALOG_UPLOAD_PERMISSIONS.some((perm) => permissions.includes(perm));
+        role === 'super_admin' ||
+        (hasExplicitPermissions
+          ? CATALOG_UPLOAD_PERMISSIONS.some((perm) => permissions.includes(perm))
+          : CATALOG_UPLOAD_STAFF_ROLES.has(role));
       return { allowed: isActive && hasCatalogPerm, role: role || 'customer' };
     }
 
@@ -645,13 +648,16 @@ async function verifyCatalogUploadAuthorityWorker(
         const role = adminData.fields?.role?.stringValue || '';
         const status = adminData.fields?.status?.stringValue || 'active';
         const active = adminData.fields?.active?.booleanValue === true;
+        const hasExplicitPermissions = Boolean(adminData.fields && 'permissions' in adminData.fields);
         const permissions = (adminData.fields?.permissions?.arrayValue?.values || [])
           .map((v) => v.stringValue || '')
           .filter(Boolean);
         const isActive = active && status === 'active';
         const hasCatalogPerm =
-          CATALOG_UPLOAD_STAFF_ROLES.has(role) ||
-          CATALOG_UPLOAD_PERMISSIONS.some((perm) => permissions.includes(perm));
+          role === 'super_admin' ||
+          (hasExplicitPermissions
+            ? CATALOG_UPLOAD_PERMISSIONS.some((perm) => permissions.includes(perm))
+            : CATALOG_UPLOAD_STAFF_ROLES.has(role));
         return { allowed: isActive && hasCatalogPerm, role: role || 'customer' };
       }
     }

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   Archive,
@@ -29,7 +29,7 @@ import {
   setDoc,
   updateDoc,
 } from 'firebase/firestore';
-import { useStore } from '../../context/StoreContext';
+import { PRIMARY_SUPER_ADMIN_EMAIL, useStore } from '../../context/StoreContext';
 import {
   CHATTOGRAM_OUTLETS,
   CONFIRMED_DEMO_SHOWROOM_IDS,
@@ -44,18 +44,23 @@ import {
 } from '../../lib/bilingual';
 import { OperationType, auth, handleFirestoreError, requireDb } from '../../lib/firebase';
 import {
+  deleteCatalogImageFromStorage,
   isForbiddenInlineImageUrl,
   uploadCatalogImageToStorage,
   validateCatalogImageFile,
 } from '../../lib/productStorage';
 import { formatBdtPrice, toSlug } from '../../lib/utils';
-import type {
-  Category,
-  Occasion,
-  PermissionKey,
-  Product,
-  ProductAvailability,
-  Showroom,
+import {
+  DEFAULT_ROLE_PERMISSIONS,
+  type AdminRecord,
+  type Category,
+  type Occasion,
+  type PermissionKey,
+  type Product,
+  type ProductAvailability,
+  type RbacRoleEntry,
+  type Showroom,
+  type StaffRole,
 } from '../../types';
 
 const REQUIRED_PRODUCT_SCHEMA_KEYS = [
@@ -160,6 +165,19 @@ interface VerifiedWriteSession {
   uid: string;
   email: string;
   emailVerified: boolean;
+  claimsRole: string | null;
+  hrfStaffClaim: boolean;
+  rbacSource: 'primary_super_admin' | 'rbac_roles' | 'admins' | 'client_context';
+  rbacRole: string | null;
+  rbacStatus: string | null;
+}
+
+function hasRolePermissionFallback(role: string | undefined, perm: PermissionKey): boolean {
+  if (role === 'super_admin') return true;
+  if (role === 'admin' || role === 'manager' || role === 'support_agent') {
+    return (DEFAULT_ROLE_PERMISSIONS[role as StaffRole] ?? []).includes(perm);
+  }
+  return false;
 }
 
 async function ensureVerifiedAdminWriteSession(params: {
@@ -171,6 +189,16 @@ async function ensureVerifiedAdminWriteSession(params: {
     throw new CatalogAuthError(
       'auth/unauthenticated',
       'আপনার লগইন সেশন পাওয়া যায়নি বা শেষ হয়ে গেছে। অনুগ্রহ করে পুনরায় লগইন করুন।'
+    );
+  }
+
+  if (
+    currentUser.providerData.length > 0 &&
+    !currentUser.providerData.some((p) => p.providerId === 'password')
+  ) {
+    throw new CatalogAuthError(
+      'auth/unauthenticated',
+      'অ্যাডমিন পরিবর্তনের জন্য ইমেইল ও পাসওয়ার্ড দিয়ে লগইন থাকা প্রয়োজন।'
     );
   }
 
@@ -190,29 +218,113 @@ async function ensureVerifiedAdminWriteSession(params: {
     );
   }
 
+  let claimsRole: string | null = null;
+  let hrfStaffClaim = false;
   try {
-    const tokenResult = await refreshedUser.getIdTokenResult();
+    let tokenResult = await refreshedUser.getIdTokenResult();
     if (tokenResult.claims.email_verified !== true) {
       await refreshedUser.getIdToken(true);
+      tokenResult = await refreshedUser.getIdTokenResult();
     }
+    claimsRole = typeof tokenResult.claims.role === 'string' ? tokenResult.claims.role : null;
+    hrfStaffClaim = tokenResult.claims.hrf_staff === true;
   } catch {
     throw new CatalogAuthError(
       'auth/token-refresh-failed',
-      'আপনার লগইন টোকেন রিফ্রেশ করা যায়নি। অনুগ্রহ করে পুনরায় লগইন করুন।'
+      'আপনার লগইন টোকেন যাচাই/রিফ্রেশ করা যায়নি। অনুগ্রহ করে সাইন আউট করে পুনরায় লগইন করুন।'
     );
   }
 
-  if (!params.hasPermission(params.requiredPermission)) {
+  const emailLower = (refreshedUser.email || currentUser.email).trim().toLowerCase();
+  const isPrimarySuperAdmin =
+    emailLower === PRIMARY_SUPER_ADMIN_EMAIL && refreshedUser.emailVerified;
+
+  let rbacSource: VerifiedWriteSession['rbacSource'] = isPrimarySuperAdmin
+    ? 'primary_super_admin'
+    : 'client_context';
+  let rbacRole: string | null = isPrimarySuperAdmin ? 'super_admin' : claimsRole;
+  let rbacStatus: string | null = isPrimarySuperAdmin ? 'active' : null;
+  let serverRecordVerified = isPrimarySuperAdmin;
+
+  if (!isPrimarySuperAdmin) {
+    const firestore = requireDb();
+    try {
+      const rbacSnap = await getDoc(doc(firestore, 'rbac_roles', emailLower));
+      if (rbacSnap.exists()) {
+        const rbacData = rbacSnap.data() as RbacRoleEntry;
+        rbacSource = 'rbac_roles';
+        rbacRole = rbacData.role || null;
+        rbacStatus = rbacData.status || 'disabled';
+        if (rbacData.status !== 'active') {
+          throw new CatalogAuthError(
+            'rbac/account-inactive',
+            'আপনার অ্যাডমিন/স্টাফ অ্যাকাউন্টটি সক্রিয় নয় বা সাসপেন্ড করা হয়েছে।'
+          );
+        }
+        const allowedByRbac =
+          rbacData.role === 'super_admin' ||
+          (Array.isArray(rbacData.permissions)
+            ? rbacData.permissions.includes(params.requiredPermission)
+            : hasRolePermissionFallback(rbacData.role, params.requiredPermission));
+        if (!allowedByRbac) {
+          throw new CatalogAuthError(
+            'rbac/missing-permission',
+            `আপনার "${rbacData.role}" রোলে "${params.requiredPermission}" অনুমতি নেই।`
+          );
+        }
+        serverRecordVerified = true;
+      } else {
+        const adminSnap = await getDoc(doc(firestore, 'admins', refreshedUser.uid));
+        if (adminSnap.exists()) {
+          const adminData = adminSnap.data() as AdminRecord;
+          rbacSource = 'admins';
+          rbacRole = adminData.role || null;
+          const adminStatus = adminData.status || (adminData.active ? 'active' : 'disabled');
+          rbacStatus = adminStatus;
+          if (!adminData.active || adminStatus !== 'active') {
+            throw new CatalogAuthError(
+              'rbac/account-inactive',
+              'আপনার অ্যাডমিন অ্যাকাউন্টটি নিষ্ক্রিয় অবস্থায় রয়েছে।'
+            );
+          }
+          const allowedByAdmin =
+            adminData.role === 'super_admin' ||
+            (Array.isArray(adminData.permissions)
+              ? adminData.permissions.includes(params.requiredPermission)
+              : hasRolePermissionFallback(adminData.role, params.requiredPermission));
+          if (!allowedByAdmin) {
+            throw new CatalogAuthError(
+              'rbac/missing-permission',
+              `আপনার "${adminData.role}" অ্যাকাউন্টে "${params.requiredPermission}" অনুমতি নেই।`
+            );
+          }
+          serverRecordVerified = true;
+        }
+      }
+    } catch (rbacErr) {
+      if (rbacErr instanceof CatalogAuthError) {
+        throw rbacErr;
+      }
+      // If reading rbac_roles/admins itself fails or is unavailable offline, fall through to client permission check
+    }
+  }
+
+  if (!serverRecordVerified || !params.hasPermission(params.requiredPermission)) {
     throw new CatalogAuthError(
       'rbac/missing-permission',
-      `এই কাজের জন্য "${params.requiredPermission}" অনুমতি প্রয়োজন। অনুগ্রহ করে সুপার অ্যাডমিনের সাথে যোগাযোগ করুন।`
+      `এই কাজের জন্য "${params.requiredPermission}" অ্যাডমিন অনুমতি প্রয়োজন। অনুগ্রহ করে সুপার অ্যাডমিনের সাথে যোগাযোগ করুন।`
     );
   }
 
   return {
     uid: refreshedUser.uid,
-    email: (refreshedUser.email || currentUser.email).trim().toLowerCase(),
+    email: emailLower,
     emailVerified: refreshedUser.emailVerified,
+    claimsRole,
+    hrfStaffClaim,
+    rbacSource,
+    rbacRole,
+    rbacStatus,
   };
 }
 
@@ -484,55 +596,98 @@ function mapCatalogSaveError(
     operation?: string;
     staffRole?: string | null;
     existingIssues?: string[];
+    authSession?: VerifiedWriteSession | null;
   }
 ): string {
   const rawCode =
     err && typeof err === 'object' && 'code' in err
-      ? String((err as { code?: unknown }).code || '').toLowerCase()
+      ? String((err as { code?: unknown }).code || '').trim().toLowerCase()
       : '';
   const rawMessage = err instanceof Error ? err.message : String(err);
   const lowerMessage = rawMessage.toLowerCase();
   const activeUser = auth?.currentUser;
 
-  console.error(`[CatalogSave:${context}]`, {
-    code: rawCode || 'unknown',
-    message: rawMessage,
-    uid: activeUser?.uid ?? null,
-    email: activeUser?.email ?? null,
-    emailVerified: activeUser?.emailVerified ?? null,
-    staffRole: diag?.staffRole ?? null,
-    path: diag?.path ?? null,
-    operation: diag?.operation ?? null,
-    existingIssues: diag?.existingIssues ?? [],
-  });
+  if (import.meta.env.DEV) {
+    console.error(`[CatalogSave:${context}]`, {
+      code: rawCode || 'unknown',
+      message: rawMessage,
+      uid: diag?.authSession?.uid ?? activeUser?.uid ?? null,
+      email: diag?.authSession?.email ?? activeUser?.email ?? null,
+      emailVerified: diag?.authSession?.emailVerified ?? activeUser?.emailVerified ?? null,
+      claimsRole: diag?.authSession?.claimsRole ?? null,
+      hrfStaffClaim: diag?.authSession?.hrfStaffClaim ?? null,
+      rbacSource: diag?.authSession?.rbacSource ?? null,
+      rbacRole: diag?.authSession?.rbacRole ?? null,
+      rbacStatus: diag?.authSession?.rbacStatus ?? null,
+      staffRole: diag?.staffRole ?? null,
+      path: diag?.path ?? null,
+      operation: diag?.operation ?? null,
+      existingIssues: diag?.existingIssues ?? [],
+    });
+  }
 
-  if (rawCode === 'auth/unauthenticated' || rawCode.includes('unauthenticated')) {
-    return 'আপনার লগইন সেশন শেষ হয়ে গেছে। অনুগ্রহ করে আবার লগইন করুন।';
+  if (
+    rawCode === 'auth/unauthenticated' ||
+    rawCode === 'unauthenticated' ||
+    rawCode.endsWith('/unauthenticated') ||
+    lowerMessage.includes('unauthenticated')
+  ) {
+    return 'আপনার লগইন সেশন পাওয়া যায়নি বা শেষ হয়ে গেছে (unauthenticated)। অনুগ্রহ করে পুনরায় লগইন করুন।';
   }
   if (rawCode === 'auth/email-unverified') {
-    return 'আপনার অ্যাডমিন ইমেইল এখনো ভেরিফাইড নয়। ইমেইল ভেরিফাই করে পুনরায় চেষ্টা করুন।';
+    return 'আপনার অ্যাডমিন ইমেইল এখনো ভেরিফাইড নয় (auth/email-unverified)। ইমেইল ভেরিফাই করে পুনরায় চেষ্টা করুন।';
   }
   if (rawCode === 'auth/token-refresh-failed') {
-    return 'লগইন টোকেন যাচাই করা যায়নি। অনুগ্রহ করে সাইন আউট করে পুনরায় লগইন করুন।';
+    return 'লগইন টোকেন যাচাই করা যায়নি (auth/token-refresh-failed)। অনুগ্রহ করে সাইন আউট করে পুনরায় লগইন করুন।';
+  }
+  if (rawCode === 'rbac/account-inactive') {
+    return 'আপনার অ্যাডমিন অ্যাকাউন্টটি নিষ্ক্রিয় বা সাসপেন্ড অবস্থায় আছে (rbac/account-inactive)।';
   }
   if (rawCode === 'rbac/missing-permission') {
-    return 'আপনার অ্যাকাউন্টে এই ক্যাটালগ পরিবর্তনের অনুমতি নেই। অনুগ্রহ করে সুপার অ্যাডমিনের সাথে যোগাযোগ করুন।';
-  }
-  if (rawCode.includes('permission-denied') || lowerMessage.includes('missing or insufficient permissions')) {
-    return 'সংরক্ষণের অনুমতি পাওয়া যায়নি। অ্যাডমিন রোল/পারমিশন অথবা Firestore-এর ফিল্ড/নিরাপত্তা নিয়ম যাচাই করে আবার চেষ্টা করুন।';
+    return 'আপনার অ্যাকাউন্টে এই ক্যাটালগ পরিবর্তনের অনুমতি নেই (rbac/missing-permission)। অনুগ্রহ করে সুপার অ্যাডমিনের সাথে যোগাযোগ করুন।';
   }
   if (
-    rawCode.includes('unavailable') ||
+    rawCode === 'permission-denied' ||
+    rawCode.endsWith('/permission-denied') ||
+    lowerMessage.includes('missing or insufficient permissions')
+  ) {
+    return 'Firestore সংরক্ষণের অনুমতি দেয়নি (permission-denied)। অ্যাডমিন অ্যাকাউন্ট যাচাই, Firestore Security Rules অথবা পণ্যের আবশ্যকীয় ফিল্ড যাচাই করে আবার চেষ্টা করুন।';
+  }
+  if (rawCode === 'failed-precondition' || rawCode.endsWith('/failed-precondition')) {
+    return 'Firestore-এর পূর্বশর্ত পূরণ হয়নি (failed-precondition)। অনুগ্রহ করে ডাটাবেসের অবস্থা বা ইনডেক্স যাচাই করুন।';
+  }
+  if (rawCode === 'invalid-argument' || rawCode.endsWith('/invalid-argument')) {
+    return 'প্রদত্ত তথ্যের ফরম্যাট বা ধরন সঠিক নয় (invalid-argument)। অনুগ্রহ করে ঘরগুলো যাচাই করে আবার চেষ্টা করুন।';
+  }
+  if (rawCode === 'not-found' || rawCode.endsWith('/not-found')) {
+    return 'সংশ্লিষ্ট ডকুমেন্টটি Firestore-এ পাওয়া যায়নি (not-found)। পৃষ্ঠা রিলোড করে আবার চেষ্টা করুন।';
+  }
+  if (rawCode === 'aborted' || rawCode.endsWith('/aborted')) {
+    return 'ডাটাবেস আপডেট কনফ্লিক্টের কারণে বাতিল হয়েছে (aborted)। অনুগ্রহ করে আবার চেষ্টা করুন।';
+  }
+  if (rawCode === 'resource-exhausted' || rawCode.endsWith('/resource-exhausted')) {
+    return 'Firestore কোটা বা অনুরোধ সীমা অতিক্রম করেছে (resource-exhausted)। কিছুক্ষণ পর আবার চেষ্টা করুন।';
+  }
+  if (rawCode === 'deadline-exceeded' || rawCode.endsWith('/deadline-exceeded')) {
+    return 'সার্ভারে সংরক্ষণ করতে অতিরিক্ত সময় লেগেছে (deadline-exceeded)। অনুগ্রহ করে আবার চেষ্টা করুন।';
+  }
+  if (
+    rawCode === 'unavailable' ||
+    rawCode.endsWith('/unavailable') ||
     rawCode.includes('network') ||
     lowerMessage.includes('offline')
   ) {
-    return 'ইন্টারনেট সংযোগের কারণে সংরক্ষণ করা যায়নি। অনুগ্রহ করে আবার চেষ্টা করুন।';
+    return 'ইন্টারনেট বা সার্ভার সংযোগের কারণে সংরক্ষণ করা যায়নি (unavailable)। অনুগ্রহ করে আবার চেষ্টা করুন।';
   }
-  if (rawCode.includes('invalid-argument')) {
-    return 'প্রদত্ত তথ্যের ফরম্যাট সঠিক নয়। অনুগ্রহ করে ঘরগুলো যাচাই করে আবার চেষ্টা করুন।';
+  if (err instanceof Error && rawCode === '' && rawMessage) {
+    return rawMessage;
   }
-  return 'সংরক্ষণে সমস্যা হয়েছে। অনুগ্রহ করে তথ্যগুলো যাচাই করে আবার চেষ্টা করুন।';
+  return `সংরক্ষণে ত্রুটি হয়েছে (${rawCode || 'unknown'})। অনুগ্রহ করে তথ্যগুলো যাচাই করে আবার চেষ্টা করুন।`;
 }
+
+type EditorImageSlot =
+  | { kind: 'existing'; id: string; url: string }
+  | { kind: 'pending'; id: string; file: File; previewUrl: string };
 
 // ========================
 // 1. PRODUCT MANAGEMENT
@@ -555,6 +710,8 @@ export function AdminProductsPanel() {
   const canEdit = hasPermission('products_edit');
   const canDelete = hasPermission('products_delete');
   const [editing, setEditing] = useState<Product | null>(null);
+  const [editorImageSlots, setEditorImageSlots] = useState<EditorImageSlot[]>([]);
+  const pendingPreviewUrlsRef = useRef<Set<string>>(new Set());
   const [originalSnapshot, setOriginalSnapshot] = useState<string>('');
   const [isNew, setIsNew] = useState(false);
   const [search, setSearch] = useState('');
@@ -576,6 +733,19 @@ export function AdminProductsPanel() {
     type: 'success' | 'error';
     message: string;
   } | null>(null);
+
+  const revokeAllPendingPreviews = () => {
+    for (const url of pendingPreviewUrlsRef.current) {
+      URL.revokeObjectURL(url);
+    }
+    pendingPreviewUrlsRef.current.clear();
+  };
+
+  useEffect(() => {
+    return () => {
+      revokeAllPendingPreviews();
+    };
+  }, []);
 
   const serializeNonImageState = (
     p: Product,
@@ -663,7 +833,18 @@ export function AdminProductsPanel() {
   const [ingredientsText, setIngredientsText] = useState('');
   const [sizesText, setSizesText] = useState('');
 
+  const closeEditor = () => {
+    revokeAllPendingPreviews();
+    setEditorImageSlots([]);
+    setEditing(null);
+    setEditorUploadProgress(null);
+    setEditorUploadLabel('');
+    setEditorUploadPreviewUrl(null);
+    setEditorUploadError(null);
+  };
+
   const openEditor = (prod: Product | null) => {
+    revokeAllPendingPreviews();
     if (prod) {
       const t = getProductText(prod, allCategories);
       const ing = (Array.isArray(prod.ingredients) ? prod.ingredients : []).join(', ');
@@ -698,6 +879,13 @@ export function AdminProductsPanel() {
       };
       setIsNew(false);
       setEditing(prepared);
+      setEditorImageSlots(
+        normalizedImages.slice(0, 6).map((url, idx) => ({
+          kind: 'existing',
+          id: `existing-${idx}-${url.slice(0, 16)}`,
+          url,
+        }))
+      );
       setIngredientsText(ing);
       setSizesText(sz);
       setOriginalSnapshot(serializeNonImageState(prepared, ing, sz));
@@ -705,25 +893,25 @@ export function AdminProductsPanel() {
       const fresh = emptyProduct();
       setIsNew(true);
       setEditing(fresh);
+      setEditorImageSlots([]);
       setIngredientsText('');
       setSizesText('Regular');
       setOriginalSnapshot('');
     }
     setEditorUploadProgress(null);
     setEditorUploadLabel('');
-    setEditorUploadPreviewUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return null;
-    });
+    setEditorUploadPreviewUrl(null);
     setEditorUploadError(null);
     setFeedback(null);
   };
 
-  const uploadProductFilesToStorage = async (files: File[]) => {
+  const queueProductImageFiles = (files: File[]) => {
     if (!editing || files.length === 0) return;
 
-    const currentImages = sanitizeStoredImageUrls(editing.images);
-    const remainingSlots = Math.max(0, 6 - currentImages.length);
+    const nonInlineSlotsCount = editorImageSlots.filter(
+      (slot) => slot.kind === 'pending' || !isForbiddenInlineImageUrl(slot.url)
+    ).length;
+    const remainingSlots = Math.max(0, 6 - nonInlineSlotsCount);
     if (remainingSlots <= 0) {
       setEditorUploadError('একটি পণ্যে সর্বোচ্চ ৬টি ছবি রাখা যাবে। নতুন ছবি যোগ করতে একটি ছবি সরান।');
       return;
@@ -740,78 +928,42 @@ export function AdminProductsPanel() {
 
     setEditorUploadError(null);
 
-    let accumulatedImages = [...currentImages];
-    let activePreviewUrl: string | null = null;
-    let uploadedCount = 0;
+    const newPendingSlots: EditorImageSlot[] = queue.map((file, idx) => {
+      const previewUrl = URL.createObjectURL(file);
+      pendingPreviewUrlsRef.current.add(previewUrl);
+      return {
+        kind: 'pending',
+        id: `pending-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 7)}`,
+        file,
+        previewUrl,
+      };
+    });
 
-    try {
-      for (let i = 0; i < queue.length; i += 1) {
-        const file = queue[i];
-        if (activePreviewUrl) {
-          URL.revokeObjectURL(activePreviewUrl);
-          activePreviewUrl = null;
-        }
-        activePreviewUrl = URL.createObjectURL(file);
-        setEditorUploadPreviewUrl(activePreviewUrl);
-        setEditorUploadLabel(
-          queue.length > 1 ? `${file.name} (${i + 1}/${queue.length})` : file.name
-        );
-        setEditorUploadProgress(0);
+    // Drop legacy forbidden inline URLs once the admin provides valid replacement image(s)
+    const cleanExistingAndPending = editorImageSlots.filter(
+      (slot) => slot.kind === 'pending' || !isForbiddenInlineImageUrl(slot.url)
+    );
+    const nextSlots = [...newPendingSlots.reverse(), ...cleanExistingAndPending].slice(0, 6);
+    setEditorImageSlots(nextSlots);
 
-        const result = await uploadCatalogImageToStorage({
-          folder: 'products',
-          entityId: editing.id,
-          file,
-          onProgress: (pct) => setEditorUploadProgress(pct),
-        });
-
-        if (!result.downloadUrl || isForbiddenInlineImageUrl(result.downloadUrl)) {
-          throw new Error('ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে পরে আবার চেষ্টা করুন।');
-        }
-
-        accumulatedImages = [
-          result.downloadUrl,
-          ...accumulatedImages.filter((u) => u !== result.downloadUrl),
-        ].slice(0, 6);
-        uploadedCount += 1;
-
-        setEditing((prev) =>
-          prev
-            ? {
-                ...prev,
-                image: accumulatedImages[0] ?? '',
-                images: accumulatedImages,
-              }
-            : null
-        );
-      }
-
-      if (uploadedCount > 0) {
-        setFeedback({
-          type: 'success',
-          message: 'ছবি সফলভাবে যুক্ত হয়েছে। পণ্যে স্থায়ী করতে "সংরক্ষণ করুন" বাটনে ক্লিক করুন।',
-        });
-      }
-    } catch (err) {
-      const msg =
-        err instanceof Error && err.message
-          ? err.message
-          : 'ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে আবার চেষ্টা করুন।';
-      setEditorUploadError(msg);
-    } finally {
-      if (activePreviewUrl) {
-        URL.revokeObjectURL(activePreviewUrl);
-      }
-      setEditorUploadPreviewUrl(null);
-      setEditorUploadProgress(null);
-      setEditorUploadLabel('');
-    }
+    const keptExisting = nextSlots
+      .filter((s): s is Extract<EditorImageSlot, { kind: 'existing' }> => s.kind === 'existing')
+      .map((s) => s.url);
+    setEditing((prev) =>
+      prev
+        ? {
+            ...prev,
+            image: keptExisting[0] ?? '',
+            images: keptExisting,
+          }
+        : null
+    );
   };
 
-  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files ? Array.from(e.target.files) : [];
     e.target.value = '';
-    await uploadProductFilesToStorage(fileList);
+    queueProductImageFiles(fileList);
   };
 
   const buildNormalizedProductPayload = (params: {
@@ -829,24 +981,24 @@ export function AdminProductsPanel() {
       /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
         ? existingData.id
         : source.id;
-    const nameBn = (source.name || source.nameBn || source.nameEn || 'পণ্য').trim().slice(0, 160);
-    const nameEn = (source.nameEn || source.name_en || nameBn).trim().slice(0, 160);
+    const nameBn = String(source.name || source.nameBn || source.nameEn || 'পণ্য').trim().slice(0, 160) || 'পণ্য';
+    const nameEn = String(source.nameEn || source.name_en || nameBn).trim().slice(0, 160) || nameBn;
     const resolvedCategorySlug = toSlug(
-      (source.category || allCategories[0]?.slug || 'custom-cake').trim()
+      String(source.category || allCategories[0]?.slug || 'custom-cake').trim()
     );
     const catObj = allCategories.find((c) => c.slug === resolvedCategorySlug);
     const catText = catObj ? getCategoryText(catObj) : null;
-    const slug = toSlug((source.slug || '').trim() || nameEn || nameBn);
-    const resolvedUnit = ((source.unit ?? source.priceUnit) || 'Piece').trim().slice(0, 60) || 'Piece';
-    const shortDescEn = (source.shortDescriptionEn ?? source.short_description_en ?? '')
+    const slug = toSlug(String(source.slug || '').trim() || nameEn || nameBn);
+    const resolvedUnit = String((source.unit ?? source.priceUnit) || 'Piece').trim().slice(0, 60) || 'Piece';
+    const shortDescEn = String(source.shortDescriptionEn ?? source.short_description_en ?? '')
       .trim()
       .slice(0, 300);
-    const shortDescBn = (source.shortDescription.trim() || shortDescEn || nameBn).slice(0, 300);
-    const fullDescEn = (source.descriptionEn ?? source.description_en ?? shortDescEn)
+    const shortDescBn = (String(source.shortDescription || '').trim() || shortDescEn || nameBn).slice(0, 300);
+    const fullDescEn = String(source.descriptionEn ?? source.description_en ?? shortDescEn)
       .trim()
       .slice(0, 4000);
     const fullDescBn = (
-      source.description.trim() ||
+      String(source.description || '').trim() ||
       shortDescBn ||
       fullDescEn ||
       nameBn
@@ -874,16 +1026,16 @@ export function AdminProductsPanel() {
       slug,
       category: resolvedCategorySlug,
       categoryName: (
-        source.categoryName ||
+        String(source.categoryName || '').trim() ||
         catText?.nameBn ||
         resolvedCategorySlug
       )
         .trim()
         .slice(0, 120),
-      categoryNameEn: (source.categoryNameEn || catText?.nameEn || '')
+      categoryNameEn: String(source.categoryNameEn || catText?.nameEn || '')
         .trim()
         .slice(0, 120),
-      productType: (source.productType.trim() || 'Bakery & Sweets').slice(0, 120),
+      productType: (String(source.productType || '').trim() || 'Bakery & Sweets').slice(0, 120),
       price: numericPrice,
       priceUnit: resolvedUnit,
       unit: resolvedUnit,
@@ -899,14 +1051,14 @@ export function AdminProductsPanel() {
       imageUrl: primaryImg,
       images: cleanImages,
       ingredients: ingredientsList
-        .map((s) => s.trim().slice(0, 120))
+        .map((s) => String(s).trim().slice(0, 120))
         .filter(Boolean)
         .slice(0, 25),
       sizes: sizesList
-        .map((s) => s.trim().slice(0, 80))
+        .map((s) => String(s).trim().slice(0, 80))
         .filter(Boolean)
         .slice(0, 10),
-      weight: (source.weight || '').trim().slice(0, 80),
+      weight: String(source.weight || '').trim().slice(0, 80),
       occasions: (Array.isArray(source.occasions) ? source.occasions : [])
         .map((o) => String(o).trim().slice(0, 80))
         .filter(Boolean)
@@ -916,7 +1068,7 @@ export function AdminProductsPanel() {
         .filter((sid) => Boolean(sid) && !CONFIRMED_DEMO_SHOWROOM_IDS.has(sid))
         .slice(0, 20),
       availability: safeAvailability,
-      importantNotes: (source.importantNotes || '').trim().slice(0, 800),
+      importantNotes: String(source.importantNotes || '').trim().slice(0, 800),
       featured: Boolean(source.featured),
       popular: Boolean(source.popular),
       visible: source.visible !== false,
@@ -1016,16 +1168,44 @@ export function AdminProductsPanel() {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file || !canEdit) return;
+
+    const validationError = validateCatalogImageFile(file);
+    if (validationError) {
+      setFeedback({ type: 'error', message: validationError });
+      return;
+    }
+
     setUploadingRowId(prod.id);
     setRowUploadProgress(0);
     setFeedback(null);
 
-    let uploadedUrl = '';
+    let authSession: VerifiedWriteSession | null = null;
+    let uploadedResult: { downloadUrl: string; storagePath: string } | null = null;
+    let existingIssues: string[] = [];
+    let operationLabel = 'UPDATE';
+
     try {
-      await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'products_edit',
       });
+
+      const firestore = requireDb();
+      const productRef = doc(firestore, 'products', prod.id);
+      const existingSnap = await getDoc(productRef);
+      const existingData = existingSnap.exists()
+        ? (existingSnap.data() as Record<string, unknown>)
+        : undefined;
+      existingIssues = existingData ? inspectExistingProductIssues(existingData) : [];
+      operationLabel = existingSnap.exists() ? 'UPDATE' : 'CREATE';
+
+      if (!existingSnap.exists()) {
+        authSession = await ensureVerifiedAdminWriteSession({
+          hasPermission,
+          requiredPermission: 'products_add',
+        });
+      }
+
       const uploaded = await uploadCatalogImageToStorage({
         folder: 'products',
         entityId: prod.id,
@@ -1035,50 +1215,23 @@ export function AdminProductsPanel() {
       if (!uploaded.downloadUrl || isForbiddenInlineImageUrl(uploaded.downloadUrl)) {
         throw new Error('ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে পরে আবার চেষ্টা করুন।');
       }
-      uploadedUrl = uploaded.downloadUrl;
-    } catch (uploadErr) {
-      const msg =
-        uploadErr instanceof CatalogAuthError
-          ? mapCatalogSaveError(uploadErr, 'quick_image_auth', {
-              path: `products/${prod.id}`,
-              operation: 'AUTH_CHECK',
-              staffRole,
-            })
-          : uploadErr instanceof Error && uploadErr.message
-          ? uploadErr.message
-          : 'ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে আবার চেষ্টা করুন।';
-      setFeedback({ type: 'error', message: msg });
-      setUploadingRowId(null);
-      setRowUploadProgress(null);
-      return;
-    }
-
-    let existingIssues: string[] = [];
-    try {
-      await ensureVerifiedAdminWriteSession({
-        hasPermission,
-        requiredPermission: 'products_edit',
-      });
-      const firestore = requireDb();
-      const productRef = doc(firestore, 'products', prod.id);
-      const existingSnap = await getDoc(productRef);
-      const existingData = existingSnap.exists()
-        ? (existingSnap.data() as Record<string, unknown>)
-        : undefined;
-      existingIssues = existingData ? inspectExistingProductIssues(existingData) : [];
+      uploadedResult = {
+        downloadUrl: uploaded.downloadUrl,
+        storagePath: uploaded.storagePath,
+      };
 
       const existingImages = sanitizeStoredImageUrls(
         Array.isArray(existingData?.images) ? existingData.images : prod.images
       );
       const nextImages = [
-        uploadedUrl,
-        ...existingImages.filter((u) => u !== uploadedUrl),
+        uploadedResult.downloadUrl,
+        ...existingImages.filter((u) => u !== uploadedResult!.downloadUrl),
       ].slice(0, 6);
 
       if (existingSnap.exists() && isExistingProductDocRuleReady(existingData)) {
         await updateDoc(productRef, {
-          image: uploadedUrl,
-          imageUrl: uploadedUrl,
+          image: uploadedResult.downloadUrl,
+          imageUrl: uploadedResult.downloadUrl,
           images: nextImages,
           updatedAt: serverTimestamp(),
         });
@@ -1087,8 +1240,8 @@ export function AdminProductsPanel() {
           ...prod,
           ...(existingData ? (existingData as Partial<Product>) : {}),
           id: prod.id,
-          image: uploadedUrl,
-          imageUrl: uploadedUrl,
+          image: uploadedResult.downloadUrl,
+          imageUrl: uploadedResult.downloadUrl,
           images: nextImages,
         };
         const ingList = Array.isArray(mergedSource.ingredients) ? mergedSource.ingredients : [];
@@ -1118,31 +1271,50 @@ export function AdminProductsPanel() {
         }
       }
 
-      await logAdminActivity(
-        'image_upload',
-        'products',
-        prod.id,
-        prod.nameEn || prod.name,
-        `Uploaded product photo for ${prod.nameBn || prod.name}`
-      );
+      uploadedResult = null; // Persisted in Firestore; do not roll back
+
+      try {
+        await logAdminActivity(
+          'image_upload',
+          'products',
+          prod.id,
+          prod.nameEn || prod.name,
+          `Uploaded product photo for ${prod.nameBn || prod.name}`
+        );
+      } catch {
+        // Non-blocking audit log
+      }
       setFeedback({
         type: 'success',
         message: `"${prod.nameBn || prod.name}"-এর ছবি সফলভাবে সংরক্ষণ হয়েছে।`,
       });
     } catch (err) {
+      if (uploadedResult) {
+        try {
+          await deleteCatalogImageFromStorage({
+            storagePath: uploadedResult.storagePath,
+            downloadUrl: uploadedResult.downloadUrl,
+          });
+        } catch {
+          // Best-effort cleanup of uncommitted R2 image
+        }
+      }
       setFeedback({
         type: 'error',
         message: mapCatalogSaveError(err, 'quick_image_save', {
           path: `products/${prod.id}`,
-          operation: 'UPDATE',
+          operation: operationLabel,
           staffRole,
           existingIssues,
+          authSession,
         }),
       });
-      try {
-        handleFirestoreError(err, OperationType.WRITE, `products/${prod.id}`);
-      } catch {
-        // Logged for console diagnostics
+      if (import.meta.env.DEV) {
+        try {
+          handleFirestoreError(err, OperationType.WRITE, `products/${prod.id}`);
+        } catch {
+          // Logged for console diagnostics
+        }
       }
     } finally {
       setUploadingRowId(null);
@@ -1152,8 +1324,9 @@ export function AdminProductsPanel() {
 
   const handleMasterImportClick = async () => {
     setFeedback(null);
+    let authSession: VerifiedWriteSession | null = null;
     try {
-      await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'products_add',
       });
@@ -1165,18 +1338,21 @@ export function AdminProductsPanel() {
     } catch (err) {
       setFeedback({
         type: 'error',
-        message:
-          err instanceof CatalogAuthError
-            ? mapCatalogSaveError(err, 'master_import', { staffRole })
-            : 'মাস্টার প্রোডাক্ট তালিকা ইমপোর্ট করতে সমস্যা হয়েছে।',
+        message: mapCatalogSaveError(err, 'master_import', {
+          path: 'products/master_import',
+          operation: 'WRITE',
+          staffRole,
+          authSession,
+        }),
       });
     }
   };
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editing) return;
+    if (!editing || saving) return;
 
+    // 1. Product data validation BEFORE any R2 upload or Firestore write
     const nameBn = editing.name.trim();
     const nameEn = editing.nameEn.trim();
     if (!nameBn) {
@@ -1187,34 +1363,60 @@ export function AdminProductsPanel() {
       setFeedback({ type: 'error', message: 'অনুগ্রহ করে পণ্যটির English Name লিখুন।' });
       return;
     }
-    if (editorUploadProgress !== null) {
+    const rawPrice = Number(editing.price);
+    if (!Number.isFinite(rawPrice) || rawPrice < 0 || rawPrice > 1000000) {
       setFeedback({
         type: 'error',
-        message: 'ছবি আপলোড সম্পন্ন হওয়া পর্যন্ত অনুগ্রহ করে অপেক্ষা করুন।',
+        message: 'অনুগ্রহ করে ০ থেকে ১০,০০,০০০-এর মধ্যে বৈধ মূল্য (BDT) লিখুন।',
       });
       return;
     }
-    if (editing.images.some((u) => isForbiddenInlineImageUrl(u)) || isForbiddenInlineImageUrl(editing.image)) {
+    if (
+      editing.old_price !== undefined &&
+      (!Number.isFinite(Number(editing.old_price)) ||
+        Number(editing.old_price) < 0 ||
+        Number(editing.old_price) > 1000000)
+    ) {
       setFeedback({
         type: 'error',
-        message: 'অবৈধ ছবির ফরম্যাট পাওয়া গেছে। অনুগ্রহ করে ছবিটি পুনরায় আপলোড করুন।',
+        message: 'Old Price অবশ্যই ০ থেকে ১০,০০,০০০-এর মধ্যে হতে হবে।',
+      });
+      return;
+    }
+
+    const pendingSlots = editorImageSlots.filter(
+      (s): s is Extract<EditorImageSlot, { kind: 'pending' }> => s.kind === 'pending'
+    );
+    const hasLegacyInlineExistingOnly =
+      pendingSlots.length === 0 &&
+      editorImageSlots.some(
+        (s) => s.kind === 'existing' && isForbiddenInlineImageUrl(s.url)
+      );
+    if (hasLegacyInlineExistingOnly) {
+      setFeedback({
+        type: 'error',
+        message:
+          'এই পণ্যটিতে পুরোনো ইনলাইন (base64) ছবি রয়েছে। অনুগ্রহ করে ছবিটি সরিয়ে নতুন JPG/PNG/WEBP ছবি নির্বাচন করুন অথবা ছবিটি তালিকা থেকে রিমুভ করে সংরক্ষণ করুন।',
       });
       return;
     }
 
     setSaving(true);
     setFeedback(null);
+    setEditorUploadError(null);
 
-    const nextImages = sanitizeStoredImageUrls(editing.images);
-    const primaryImage = nextImages[0] ?? '';
+    let authSession: VerifiedWriteSession | null = null;
     let existingIssues: string[] = [];
     let operationLabel = isNew ? 'CREATE' : 'UPDATE';
+    const uploadedR2Results: Array<{ slotId: string; downloadUrl: string; storagePath: string }> = [];
 
     try {
-      await ensureVerifiedAdminWriteSession({
+      // 2. Firebase Auth + Admin authorization verification
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: isNew ? 'products_add' : 'products_edit',
       });
+
       const firestore = requireDb();
       const productRef = doc(firestore, 'products', editing.id);
       const existingSnap = await getDoc(productRef);
@@ -1224,6 +1426,59 @@ export function AdminProductsPanel() {
       existingIssues = existingData ? inspectExistingProductIssues(existingData) : [];
       operationLabel = existingSnap.exists() ? 'UPDATE' : 'CREATE';
 
+      if (!existingSnap.exists()) {
+        authSession = await ensureVerifiedAdminWriteSession({
+          hasPermission,
+          requiredPermission: 'products_add',
+        });
+      }
+
+      // 3. R2 image upload (ONLY if new pending image(s) were selected)
+      if (pendingSlots.length > 0) {
+        for (let i = 0; i < pendingSlots.length; i += 1) {
+          const slot = pendingSlots[i];
+          setEditorUploadPreviewUrl(slot.previewUrl);
+          setEditorUploadLabel(
+            pendingSlots.length > 1
+              ? `${slot.file.name} (${i + 1}/${pendingSlots.length})`
+              : slot.file.name
+          );
+          setEditorUploadProgress(0);
+
+          const res = await uploadCatalogImageToStorage({
+            folder: 'products',
+            entityId: editing.id,
+            file: slot.file,
+            onProgress: (pct) => setEditorUploadProgress(pct),
+          });
+          if (!res.downloadUrl || isForbiddenInlineImageUrl(res.downloadUrl)) {
+            throw new Error('ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে পরে আবার চেষ্টা করুন।');
+          }
+          uploadedR2Results.push({
+            slotId: slot.id,
+            downloadUrl: res.downloadUrl,
+            storagePath: res.storagePath,
+          });
+        }
+      }
+
+      // 4. Build final image list (preserve existing URLs unchanged when no new image is given)
+      const uploadedUrlBySlot = new Map(
+        uploadedR2Results.map((item) => [item.slotId, item.downloadUrl])
+      );
+      const rawOrderedUrls: string[] = [];
+      for (const slot of editorImageSlots) {
+        if (slot.kind === 'pending') {
+          const uploadedUrl = uploadedUrlBySlot.get(slot.id);
+          if (uploadedUrl) rawOrderedUrls.push(uploadedUrl);
+        } else if (!isForbiddenInlineImageUrl(slot.url)) {
+          rawOrderedUrls.push(slot.url);
+        }
+      }
+      const nextImages = sanitizeStoredImageUrls(rawOrderedUrls);
+      const primaryImage = nextImages[0] ?? '';
+
+      // 5. Firestore Product create/update
       // Safe image-only fast update ONLY when existing Firestore doc already satisfies complete schema
       if (
         !isNew &&
@@ -1238,69 +1493,82 @@ export function AdminProductsPanel() {
           images: nextImages,
           updatedAt: serverTimestamp(),
         });
+      } else {
+        const ingredients = ingredientsText
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const sizes = sizesText
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+
+        if (!existingSnap.exists()) {
+          const payload = buildNormalizedProductPayload({
+            source: {
+              ...editing,
+              image: primaryImage,
+              imageUrl: primaryImage,
+              images: nextImages,
+            },
+            ingredientsList: ingredients,
+            sizesList: sizes,
+            cleanImages: nextImages,
+            forFullSet: true,
+          });
+          await setDoc(productRef, {
+            ...payload,
+            createdAt: serverTimestamp(),
+          });
+        } else {
+          await writeExistingProductWithCleanup({
+            productRef,
+            existingData,
+            source: {
+              ...editing,
+              image: primaryImage,
+              imageUrl: primaryImage,
+              images: nextImages,
+            },
+            ingredientsList: ingredients,
+            sizesList: sizes,
+            cleanImages: nextImages,
+          });
+        }
+      }
+
+      // Commit succeeded in Firestore; do NOT roll back uploaded R2 images
+      const committedOperation = !existingSnap.exists() ? 'create' : 'update';
+      uploadedR2Results.length = 0;
+
+      try {
         await logAdminActivity(
-          'image_update',
+          committedOperation,
           'products',
           editing.id,
           nameEn,
-          `Updated product photo for ${nameBn}`
+          `${committedOperation === 'create' ? 'Created' : 'Updated'} product ${nameBn}`
         );
-        setEditing(null);
-        setFeedback({ type: 'success', message: 'পণ্যের ছবি সফলভাবে সংরক্ষণ হয়েছে।' });
-        return;
+      } catch {
+        // Non-blocking audit log
       }
 
-      const ingredients = ingredientsText
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const sizes = sizesText
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-
-      if (!existingSnap.exists()) {
-        await ensureVerifiedAdminWriteSession({
-          hasPermission,
-          requiredPermission: 'products_add',
-        });
-        const payload = buildNormalizedProductPayload({
-          source: {
-            ...editing,
-            image: primaryImage,
-            imageUrl: primaryImage,
-            images: nextImages,
-          },
-          ingredientsList: ingredients,
-          sizesList: sizes,
-          cleanImages: nextImages,
-          forFullSet: true,
-        });
-        await setDoc(productRef, {
-          ...payload,
-          createdAt: serverTimestamp(),
-        });
-        await logAdminActivity('create', 'products', editing.id, nameEn, `Created product ${nameBn}`);
-      } else {
-        await writeExistingProductWithCleanup({
-          productRef,
-          existingData,
-          source: {
-            ...editing,
-            image: primaryImage,
-            imageUrl: primaryImage,
-            images: nextImages,
-          },
-          ingredientsList: ingredients,
-          sizesList: sizes,
-          cleanImages: nextImages,
-        });
-        await logAdminActivity('update', 'products', editing.id, nameEn, `Updated product ${nameBn}`);
-      }
-
-      setEditing(null);
+      // 6. Save Success only after real Firestore write completes
+      closeEditor();
       setFeedback({ type: 'success', message: 'পণ্য সফলভাবে সংরক্ষণ হয়েছে।' });
     } catch (err) {
+      // Clean up any newly uploaded R2 objects from this failed save attempt
+      if (uploadedR2Results.length > 0) {
+        await Promise.allSettled(
+          uploadedR2Results.map((item) =>
+            deleteCatalogImageFromStorage({
+              storagePath: item.storagePath,
+              downloadUrl: item.downloadUrl,
+            })
+          )
+        );
+      }
+
       setFeedback({
         type: 'error',
         message: mapCatalogSaveError(err, 'product_save', {
@@ -1308,14 +1576,20 @@ export function AdminProductsPanel() {
           operation: operationLabel,
           staffRole,
           existingIssues,
+          authSession,
         }),
       });
-      try {
-        handleFirestoreError(err, OperationType.WRITE, `products/${editing.id}`);
-      } catch {
-        // Logged for console diagnostics
+      if (import.meta.env.DEV) {
+        try {
+          handleFirestoreError(err, OperationType.WRITE, `products/${editing.id}`);
+        } catch {
+          // Logged for console diagnostics
+        }
       }
     } finally {
+      setEditorUploadProgress(null);
+      setEditorUploadLabel('');
+      setEditorUploadPreviewUrl(null);
       setSaving(false);
     }
   };
@@ -1471,7 +1745,7 @@ export function AdminProductsPanel() {
       await deleteDoc(doc(firestore, 'products', target.id));
       await logAdminActivity('delete', 'products', target.id, target.nameEn || target.name);
       if (editing?.id === target.id) {
-        setEditing(null);
+        closeEditor();
       }
       setPendingDeleteProduct(null);
       setFeedback({ type: 'success', message: 'পণ্যটি স্থায়ীভাবে ডিলিট করা হয়েছে।' });
@@ -1689,7 +1963,7 @@ export function AdminProductsPanel() {
             </h3>
             <button
               type="button"
-              onClick={() => setEditing(null)}
+              onClick={closeEditor}
               className="cursor-pointer rounded-lg p-1.5 text-[#78716C] hover:bg-[#F5F4F0]"
             >
               <X className="h-4 w-4" />
@@ -1730,11 +2004,11 @@ export function AdminProductsPanel() {
                   <span className="block text-[10px] text-[#78716C]">Image Status</span>
                   <span
                     className={`font-semibold ${
-                      editing.images.length > 0 ? 'text-emerald-700' : 'text-amber-700'
+                      editorImageSlots.length > 0 ? 'text-emerald-700' : 'text-amber-700'
                     }`}
                   >
-                    {editing.images.length > 0
-                      ? `${editing.images.length}টি ছবি যুক্ত`
+                    {editorImageSlots.length > 0
+                      ? `${editorImageSlots.length}টি ছবি যুক্ত`
                       : 'ছবি আপলোড বাকি'}
                   </span>
                 </div>
@@ -2110,13 +2384,13 @@ export function AdminProductsPanel() {
             <div className="sm:col-span-2 lg:col-span-3 rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <p className="text-xs font-bold text-[#1C1917]">পণ্যের ছবি</p>
+                  <p className="text-xs font-bold text-[#1C1917]">পণ্যের ছবি (Cloudflare R2)</p>
                   <p className="text-[11px] text-[#57534E]">
-                    JPG, PNG বা WEBP ফরম্যাট · সর্বোচ্চ ৫ এমবি (সর্বোচ্চ ৬টি ছবি)। প্রথম ছবিটি প্রধান ছবি হিসেবে প্রদর্শিত হবে।
+                    JPG, JPEG, PNG বা WEBP ফরম্যাট · সর্বোচ্চ ৫ এমবি (সর্বোচ্চ ৬টি ছবি)। সংরক্ষণ বাটনে চাপ দিলে ছবি Cloudflare R2-তে আপলোড হয়ে ডাটাবেসে সেভ হবে।
                   </p>
                 </div>
                 <span className="font-mono text-[11px] font-semibold text-[#57534E]">
-                  {editing.images.length}/6 ছবি
+                  {editorImageSlots.length}/6 ছবি
                 </span>
               </div>
 
@@ -2132,7 +2406,7 @@ export function AdminProductsPanel() {
                   {editorUploadPreviewUrl && (
                     <img
                       src={editorUploadPreviewUrl}
-                      alt="Selected preview"
+                      alt="Uploading preview"
                       className="h-12 w-16 shrink-0 rounded-md border border-[#E7E5E4] object-cover"
                     />
                   )}
@@ -2143,7 +2417,7 @@ export function AdminProductsPanel() {
                         <span className="truncate">
                           {editorUploadProgress === 0
                             ? `প্রস্তুত হচ্ছে: ${editorUploadLabel}`
-                            : `আপলোড হচ্ছে: ${editorUploadLabel}`}
+                            : `R2-তে আপলোড হচ্ছে: ${editorUploadLabel}`}
                         </span>
                       </span>
                       <span className="font-mono tabular-nums text-[#DC1F26]">
@@ -2161,79 +2435,103 @@ export function AdminProductsPanel() {
               )}
 
               <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-                {editorUploadPreviewUrl && editorUploadProgress !== null && (
-                  <div className="relative flex flex-col overflow-hidden rounded-lg border border-dashed border-[#DC1F26] bg-white">
-                    <div className="relative aspect-[4/3] w-full bg-[#F5F4F0]">
-                      <img
-                        src={editorUploadPreviewUrl}
-                        alt="Uploading preview"
-                        className="h-full w-full object-cover opacity-75"
-                      />
-                      <span className="absolute inset-x-1.5 bottom-1.5 rounded bg-black/75 px-1.5 py-0.5 text-center font-mono text-[10px] font-bold text-white">
-                        {editorUploadProgress === 0
-                          ? 'প্রস্তুত হচ্ছে...'
-                          : `${editorUploadProgress}%`}
-                      </span>
-                    </div>
-                  </div>
-                )}
-                {editing.images.map((img, i) => (
-                  <div
-                    key={`${img.slice(0, 32)}-${i}`}
-                    className={`group relative flex flex-col overflow-hidden rounded-lg border bg-white ${
-                      i === 0 ? 'border-[#DC1F26]' : 'border-[#D6D3D1]'
-                    }`}
-                  >
-                    <div className="relative aspect-[4/3] w-full bg-[#F5F4F0]">
-                      <img
-                        src={resolveAssetUrl(img)}
-                        alt={`Product preview ${i + 1}`}
-                        className="h-full w-full object-cover"
-                      />
-                      {i === 0 && (
-                        <span className="absolute left-1.5 top-1.5 rounded bg-[#1C1917]/85 px-1.5 py-0.5 text-[9px] font-bold text-[#FACC15]">
-                          প্রধান ছবি
-                        </span>
+                {editorImageSlots.map((slot, i) => {
+                  const previewSrc =
+                    slot.kind === 'pending' ? slot.previewUrl : resolveAssetUrl(slot.url);
+                  const isLegacyInline =
+                    slot.kind === 'existing' && isForbiddenInlineImageUrl(slot.url);
+                  return (
+                    <div
+                      key={slot.id}
+                      className={`group relative flex flex-col overflow-hidden rounded-lg border bg-white ${
+                        isLegacyInline
+                          ? 'border-amber-500'
+                          : i === 0
+                          ? 'border-[#DC1F26]'
+                          : 'border-[#D6D3D1]'
+                      }`}
+                    >
+                      <div className="relative aspect-[4/3] w-full bg-[#F5F4F0]">
+                        <img
+                          src={previewSrc}
+                          alt={`Product preview ${i + 1}`}
+                          className="h-full w-full object-cover"
+                        />
+                        {i === 0 && (
+                          <span className="absolute left-1.5 top-1.5 rounded bg-[#1C1917]/85 px-1.5 py-0.5 text-[9px] font-bold text-[#FACC15]">
+                            প্রধান ছবি
+                          </span>
+                        )}
+                        {slot.kind === 'pending' && (
+                          <span className="absolute inset-x-1.5 bottom-1.5 rounded bg-[#DC1F26]/90 px-1.5 py-0.5 text-center text-[9px] font-bold text-white">
+                            সেভ করলে আপলোড হবে
+                          </span>
+                        )}
+                        {isLegacyInline && (
+                          <span className="absolute inset-x-1.5 bottom-1.5 rounded bg-amber-600/95 px-1.5 py-0.5 text-center text-[9px] font-bold text-white">
+                            পুরোনো ইনলাইন ছবি — বদলান
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          disabled={saving}
+                          title="তালিকা থেকে সরান"
+                          onClick={() => {
+                            if (slot.kind === 'pending') {
+                              URL.revokeObjectURL(slot.previewUrl);
+                              pendingPreviewUrlsRef.current.delete(slot.previewUrl);
+                            }
+                            const nextSlots = editorImageSlots.filter((_, idx) => idx !== i);
+                            setEditorImageSlots(nextSlots);
+                            const keptUrls = nextSlots
+                              .filter(
+                                (s): s is Extract<EditorImageSlot, { kind: 'existing' }> =>
+                                  s.kind === 'existing'
+                              )
+                              .map((s) => s.url);
+                            setEditing({
+                              ...editing,
+                              image: keptUrls[0] ?? '',
+                              images: keptUrls,
+                            });
+                          }}
+                          className="absolute right-1.5 top-1.5 cursor-pointer rounded-full bg-black/75 p-1 text-white transition-colors hover:bg-[#DC1F26] disabled:opacity-40"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
+                      {i > 0 && (
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={() => {
+                            const reordered = [
+                              slot,
+                              ...editorImageSlots.filter((_, idx) => idx !== i),
+                            ];
+                            setEditorImageSlots(reordered);
+                            const keptUrls = reordered
+                              .filter(
+                                (s): s is Extract<EditorImageSlot, { kind: 'existing' }> =>
+                                  s.kind === 'existing'
+                              )
+                              .map((s) => s.url);
+                            setEditing({
+                              ...editing,
+                              image: keptUrls[0] ?? '',
+                              images: keptUrls,
+                            });
+                          }}
+                          className="cursor-pointer border-t border-[#F5F4F0] bg-white px-2 py-1 text-[10px] font-semibold text-[#57534E] hover:bg-[#FAFAF8] hover:text-[#DC1F26] disabled:opacity-40"
+                        >
+                          প্রধান করুন
+                        </button>
                       )}
-                      <button
-                        type="button"
-                        title="তালিকা থেকে সরান"
-                        onClick={() => {
-                          const updated = editing.images.filter((_, idx) => idx !== i);
-                          setEditing({
-                            ...editing,
-                            image: updated[0] ?? '',
-                            images: updated,
-                          });
-                        }}
-                        className="absolute right-1.5 top-1.5 cursor-pointer rounded-full bg-black/75 p-1 text-white transition-colors hover:bg-[#DC1F26]"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
                     </div>
-                    {i > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const reordered = [
-                            img,
-                            ...editing.images.filter((_, idx) => idx !== i),
-                          ];
-                          setEditing({
-                            ...editing,
-                            image: reordered[0] ?? '',
-                            images: reordered,
-                          });
-                        }}
-                        className="cursor-pointer border-t border-[#F5F4F0] bg-white px-2 py-1 text-[10px] font-semibold text-[#57534E] hover:bg-[#FAFAF8] hover:text-[#DC1F26]"
-                      >
-                        প্রধান করুন
-                      </button>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
 
-                {editing.images.length < 6 && (
+                {editorImageSlots.length < 6 && (
                   <label
                     onDragOver={(ev) => {
                       ev.preventDefault();
@@ -2243,10 +2541,11 @@ export function AdminProductsPanel() {
                     onDrop={(ev) => {
                       ev.preventDefault();
                       setDragActive(false);
+                      if (saving) return;
                       const dropped = ev.dataTransfer.files
                         ? Array.from(ev.dataTransfer.files)
                         : [];
-                      void uploadProductFilesToStorage(dropped);
+                      queueProductImageFiles(dropped);
                     }}
                     className={`flex aspect-[4/3] cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border-2 border-dashed px-3 text-center text-[11px] font-semibold transition-colors ${
                       dragActive
@@ -2266,7 +2565,7 @@ export function AdminProductsPanel() {
                       type="file"
                       multiple
                       accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
-                      disabled={editorUploadProgress !== null}
+                      disabled={saving || editorUploadProgress !== null}
                       onChange={handleImageUpload}
                       className="hidden"
                     />
@@ -2307,8 +2606,9 @@ export function AdminProductsPanel() {
           <div className="mt-5 flex justify-end gap-3 border-t border-[#F5F4F0] pt-4">
             <button
               type="button"
-              onClick={() => setEditing(null)}
-              className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold text-[#44403C]"
+              disabled={saving}
+              onClick={closeEditor}
+              className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold text-[#44403C] disabled:opacity-50"
             >
               বাতিল
             </button>
