@@ -165,6 +165,8 @@ interface VerifiedWriteSession {
   uid: string;
   email: string;
   emailVerified: boolean;
+  tokenEmailVerified: boolean;
+  tokenEmail: string;
   claimsRole: string | null;
   hrfStaffClaim: boolean;
   rbacSource: 'primary_super_admin' | 'rbac_roles' | 'admins' | 'client_context';
@@ -218,14 +220,23 @@ async function ensureVerifiedAdminWriteSession(params: {
     );
   }
 
+  const emailLower = (refreshedUser.email || currentUser.email).trim().toLowerCase();
   let claimsRole: string | null = null;
   let hrfStaffClaim = false;
+  let tokenEmailVerified = false;
+  let tokenEmail = '';
+
   try {
     let tokenResult = await refreshedUser.getIdTokenResult();
     if (tokenResult.claims.email_verified !== true) {
       await refreshedUser.getIdToken(true);
       tokenResult = await refreshedUser.getIdTokenResult();
     }
+    tokenEmailVerified = tokenResult.claims.email_verified === true;
+    tokenEmail =
+      typeof tokenResult.claims.email === 'string'
+        ? tokenResult.claims.email.trim().toLowerCase()
+        : '';
     claimsRole = typeof tokenResult.claims.role === 'string' ? tokenResult.claims.role : null;
     hrfStaffClaim = tokenResult.claims.hrf_staff === true;
   } catch {
@@ -235,9 +246,24 @@ async function ensureVerifiedAdminWriteSession(params: {
     );
   }
 
-  const emailLower = (refreshedUser.email || currentUser.email).trim().toLowerCase();
+  if (!tokenEmailVerified) {
+    throw new CatalogAuthError(
+      'auth/email-unverified',
+      'Firebase Auth টোকেনে ইমেইল ভেরিফিকেশন এখনো আপডেট হয়নি (email_verified=false)। অনুগ্রহ করে সাইন আউট করে পুনরায় লগইন করুন।'
+    );
+  }
+
+  if (!tokenEmail || tokenEmail !== emailLower) {
+    throw new CatalogAuthError(
+      'auth/token-claim-mismatch',
+      'অ্যাডমিন টোকেনের ইমেইল ও বর্তমান সেশনের ইমেইল মেলেনি। অনুগ্রহ করে পুনরায় লগইন করুন।'
+    );
+  }
+
   const isPrimarySuperAdmin =
-    emailLower === PRIMARY_SUPER_ADMIN_EMAIL && refreshedUser.emailVerified;
+    emailLower === PRIMARY_SUPER_ADMIN_EMAIL &&
+    refreshedUser.emailVerified &&
+    tokenEmailVerified;
 
   let rbacSource: VerifiedWriteSession['rbacSource'] = isPrimarySuperAdmin
     ? 'primary_super_admin'
@@ -320,6 +346,8 @@ async function ensureVerifiedAdminWriteSession(params: {
     uid: refreshedUser.uid,
     email: emailLower,
     emailVerified: refreshedUser.emailVerified,
+    tokenEmailVerified,
+    tokenEmail,
     claimsRole,
     hrfStaffClaim,
     rbacSource,
@@ -588,6 +616,92 @@ function isExistingCategoryDocRuleReady(data: Record<string, unknown> | undefine
   return true;
 }
 
+function isFirestoreSentinel(val: unknown): boolean {
+  return Boolean(
+    val &&
+      typeof val === 'object' &&
+      !Array.isArray(val) &&
+      !('toMillis' in val) &&
+      ('_methodName' in val || 'isEqual' in val)
+  );
+}
+
+function validateProductWriteForRules(params: {
+  docId: string;
+  payload: Record<string, unknown>;
+  existingData?: Record<string, unknown>;
+  isCreate: boolean;
+  isFullReplace?: boolean;
+}): string[] {
+  const { docId, payload, existingData, isCreate, isFullReplace } = params;
+  const issues: string[] = [];
+
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(docId)) {
+    issues.push(`invalid_doc_id(${docId})`);
+  }
+
+  const merged: Record<string, unknown> =
+    isCreate || isFullReplace
+      ? { ...payload }
+      : { ...(existingData || {}), ...payload };
+
+  for (const key of Object.keys(payload)) {
+    if (isFirestoreSentinel(payload[key])) {
+      // Simulate serverTimestamp() or deleteField()
+      if (key === 'updatedAt' || key === 'createdAt') {
+        merged[key] = { toMillis: () => Date.now() };
+      } else {
+        delete merged[key];
+      }
+    }
+  }
+
+  if (isCreate && !('createdAt' in merged)) {
+    issues.push('missing_createdAt');
+  }
+  if (!('updatedAt' in merged)) {
+    issues.push('missing_updatedAt');
+  }
+
+  if (!isCreate && existingData) {
+    const existingValidId =
+      typeof existingData.id === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
+        ? existingData.id
+        : docId;
+    if (merged.id !== existingValidId) {
+      issues.push(`id_mismatch(expected=${existingValidId},got=${String(merged.id)})`);
+    }
+  } else if (merged.id !== docId) {
+    issues.push(`create_id_mismatch(docId=${docId},id=${String(merged.id)})`);
+  }
+
+  const schemaIssues = inspectExistingProductIssues(merged);
+  issues.push(...schemaIssues);
+  return issues;
+}
+
+function assertValidProductWritePreflight(
+  params: {
+    docId: string;
+    payload: Record<string, unknown>;
+    existingData?: Record<string, unknown>;
+    isCreate: boolean;
+    isFullReplace?: boolean;
+  },
+  preflightIssuesOut?: string[]
+): void {
+  const issues = validateProductWriteForRules(params);
+  if (issues.length > 0) {
+    if (preflightIssuesOut) {
+      preflightIssuesOut.splice(0, preflightIssuesOut.length, ...issues);
+    }
+    throw new CatalogAuthError(
+      'validation/preflight-failed',
+      `পণ্যের কিছু ফিল্ড Firestore Security Rules-এর সাথে মিলছে না (${issues.slice(0, 4).join(', ')})। অনুগ্রহ করে ঘরগুলো যাচাই করে আবার চেষ্টা করুন।`
+    );
+  }
+}
+
 function mapCatalogSaveError(
   err: unknown,
   context: string,
@@ -596,6 +710,7 @@ function mapCatalogSaveError(
     operation?: string;
     staffRole?: string | null;
     existingIssues?: string[];
+    preflightIssues?: string[];
     authSession?: VerifiedWriteSession | null;
   }
 ): string {
@@ -607,24 +722,26 @@ function mapCatalogSaveError(
   const lowerMessage = rawMessage.toLowerCase();
   const activeUser = auth?.currentUser;
 
-  if (import.meta.env.DEV) {
-    console.error(`[CatalogSave:${context}]`, {
-      code: rawCode || 'unknown',
-      message: rawMessage,
-      uid: diag?.authSession?.uid ?? activeUser?.uid ?? null,
-      email: diag?.authSession?.email ?? activeUser?.email ?? null,
-      emailVerified: diag?.authSession?.emailVerified ?? activeUser?.emailVerified ?? null,
-      claimsRole: diag?.authSession?.claimsRole ?? null,
-      hrfStaffClaim: diag?.authSession?.hrfStaffClaim ?? null,
-      rbacSource: diag?.authSession?.rbacSource ?? null,
-      rbacRole: diag?.authSession?.rbacRole ?? null,
-      rbacStatus: diag?.authSession?.rbacStatus ?? null,
-      staffRole: diag?.staffRole ?? null,
-      path: diag?.path ?? null,
-      operation: diag?.operation ?? null,
-      existingIssues: diag?.existingIssues ?? [],
-    });
-  }
+  const safeDiag = {
+    code: rawCode || 'unknown',
+    message: rawMessage,
+    uid: diag?.authSession?.uid ?? activeUser?.uid ?? null,
+    email: diag?.authSession?.email ?? activeUser?.email ?? null,
+    emailVerified: diag?.authSession?.emailVerified ?? activeUser?.emailVerified ?? null,
+    tokenEmailVerified: diag?.authSession?.tokenEmailVerified ?? null,
+    claimsRole: diag?.authSession?.claimsRole ?? null,
+    hrfStaffClaim: diag?.authSession?.hrfStaffClaim ?? null,
+    rbacSource: diag?.authSession?.rbacSource ?? null,
+    rbacRole: diag?.authSession?.rbacRole ?? null,
+    rbacStatus: diag?.authSession?.rbacStatus ?? null,
+    staffRole: diag?.staffRole ?? null,
+    path: diag?.path ?? null,
+    operation: diag?.operation ?? null,
+    existingIssues: diag?.existingIssues ?? [],
+    preflightIssues: diag?.preflightIssues ?? [],
+  };
+
+  console.error(`[CatalogSave:${context}]`, safeDiag);
 
   if (
     rawCode === 'auth/unauthenticated' ||
@@ -635,7 +752,14 @@ function mapCatalogSaveError(
     return 'আপনার লগইন সেশন পাওয়া যায়নি বা শেষ হয়ে গেছে (unauthenticated)। অনুগ্রহ করে পুনরায় লগইন করুন।';
   }
   if (rawCode === 'auth/email-unverified') {
-    return 'আপনার অ্যাডমিন ইমেইল এখনো ভেরিফাইড নয় (auth/email-unverified)। ইমেইল ভেরিফাই করে পুনরায় চেষ্টা করুন।';
+    return err instanceof Error && err.message
+      ? err.message
+      : 'আপনার অ্যাডমিন ইমেইল এখনো ভেরিফাইড নয় (auth/email-unverified)। ইমেইল ভেরিফাই করে পুনরায় চেষ্টা করুন।';
+  }
+  if (rawCode === 'auth/token-claim-mismatch') {
+    return err instanceof Error && err.message
+      ? err.message
+      : 'অ্যাডমিন টোকেন ও সেশনের ইমেইল মেলেনি। অনুগ্রহ করে সাইন আউট করে পুনরায় লগইন করুন।';
   }
   if (rawCode === 'auth/token-refresh-failed') {
     return 'লগইন টোকেন যাচাই করা যায়নি (auth/token-refresh-failed)। অনুগ্রহ করে সাইন আউট করে পুনরায় লগইন করুন।';
@@ -646,12 +770,30 @@ function mapCatalogSaveError(
   if (rawCode === 'rbac/missing-permission') {
     return 'আপনার অ্যাকাউন্টে এই ক্যাটালগ পরিবর্তনের অনুমতি নেই (rbac/missing-permission)। অনুগ্রহ করে সুপার অ্যাডমিনের সাথে যোগাযোগ করুন।';
   }
+  if (rawCode === 'validation/preflight-failed') {
+    return err instanceof Error && err.message
+      ? err.message
+      : 'পণ্যের কিছু আবশ্যকীয় তথ্য Firestore নিয়মের সাথে মিলছে না। অনুগ্রহ করে ঘরগুলো যাচাই করুন।';
+  }
   if (
     rawCode === 'permission-denied' ||
     rawCode.endsWith('/permission-denied') ||
     lowerMessage.includes('missing or insufficient permissions')
   ) {
-    return 'Firestore সংরক্ষণের অনুমতি দেয়নি (permission-denied)। অ্যাডমিন অ্যাকাউন্ট যাচাই, Firestore Security Rules অথবা পণ্যের আবশ্যকীয় ফিল্ড যাচাই করে আবার চেষ্টা করুন।';
+    const diagParts = [
+      safeDiag.operation && safeDiag.path ? `${safeDiag.operation} ${safeDiag.path}` : null,
+      safeDiag.email ? `user:${safeDiag.email}` : null,
+      `verified:${String(safeDiag.emailVerified)}/${String(safeDiag.tokenEmailVerified)}`,
+      safeDiag.rbacSource ? `rbac:${safeDiag.rbacSource}` : null,
+      safeDiag.preflightIssues.length > 0
+        ? `preflight:${safeDiag.preflightIssues.slice(0, 3).join(';')}`
+        : null,
+      safeDiag.existingIssues.length > 0
+        ? `docIssues:${safeDiag.existingIssues.slice(0, 3).join(';')}`
+        : null,
+    ].filter(Boolean);
+    const diagSuffix = diagParts.length > 0 ? ` [${diagParts.join(' · ')}]` : '';
+    return `Firestore সংরক্ষণের অনুমতি দেয়নি (permission-denied)। অ্যাডমিন অ্যাকাউন্ট যাচাই, Firestore Security Rules অথবা পণ্যের আবশ্যকীয় ফিল্ড যাচাই করে আবার চেষ্টা করুন।${diagSuffix}`;
   }
   if (rawCode === 'failed-precondition' || rawCode.endsWith('/failed-precondition')) {
     return 'Firestore-এর পূর্বশর্ত পূরণ হয়নি (failed-precondition)। অনুগ্রহ করে ডাটাবেসের অবস্থা বা ইনডেক্স যাচাই করুন।';
@@ -1126,8 +1268,17 @@ export function AdminProductsPanel() {
     ingredientsList: string[];
     sizesList: string[];
     cleanImages: string[];
+    preflightIssuesOut?: string[];
   }) => {
-    const { productRef, existingData, source, ingredientsList, sizesList, cleanImages } = params;
+    const {
+      productRef,
+      existingData,
+      source,
+      ingredientsList,
+      sizesList,
+      cleanImages,
+      preflightIssuesOut,
+    } = params;
     const unknownKeys = existingData ? getUnknownKeys(existingData, ALLOWED_PRODUCT_KEYS) : [];
     const hasValidCreated = hasValidTimestamp(existingData?.createdAt);
 
@@ -1140,10 +1291,21 @@ export function AdminProductsPanel() {
         existingData,
         forFullSet: true,
       });
-      await setDoc(productRef, {
+      const replacePayload = {
         ...fullPayload,
         createdAt: hasValidCreated ? existingData!.createdAt : serverTimestamp(),
-      });
+      };
+      assertValidProductWritePreflight(
+        {
+          docId: productRef.id,
+          payload: replacePayload,
+          existingData,
+          isCreate: false,
+          isFullReplace: true,
+        },
+        preflightIssuesOut
+      );
+      await setDoc(productRef, replacePayload);
       return;
     }
 
@@ -1155,10 +1317,20 @@ export function AdminProductsPanel() {
       existingData,
       forFullSet: false,
     });
-    await updateDoc(
-      productRef,
-      hasValidCreated ? updatePayload : { ...updatePayload, createdAt: serverTimestamp() }
+    const finalUpdatePayload = hasValidCreated
+      ? updatePayload
+      : { ...updatePayload, createdAt: serverTimestamp() };
+    assertValidProductWritePreflight(
+      {
+        docId: productRef.id,
+        payload: finalUpdatePayload,
+        existingData,
+        isCreate: false,
+        isFullReplace: false,
+      },
+      preflightIssuesOut
     );
+    await updateDoc(productRef, finalUpdatePayload);
   };
 
   const handleQuickRowImageUpload = async (
@@ -1182,6 +1354,7 @@ export function AdminProductsPanel() {
     let authSession: VerifiedWriteSession | null = null;
     let uploadedResult: { downloadUrl: string; storagePath: string } | null = null;
     let existingIssues: string[] = [];
+    const preflightIssues: string[] = [];
     let operationLabel = 'UPDATE';
 
     try {
@@ -1229,12 +1402,22 @@ export function AdminProductsPanel() {
       ].slice(0, 6);
 
       if (existingSnap.exists() && isExistingProductDocRuleReady(existingData)) {
-        await updateDoc(productRef, {
+        const fastUpdatePayload = {
           image: uploadedResult.downloadUrl,
           imageUrl: uploadedResult.downloadUrl,
           images: nextImages,
           updatedAt: serverTimestamp(),
-        });
+        };
+        assertValidProductWritePreflight(
+          {
+            docId: productRef.id,
+            payload: fastUpdatePayload,
+            existingData,
+            isCreate: false,
+          },
+          preflightIssues
+        );
+        await updateDoc(productRef, fastUpdatePayload);
       } else {
         const mergedSource: Product = {
           ...prod,
@@ -1255,10 +1438,19 @@ export function AdminProductsPanel() {
             cleanImages: nextImages,
             forFullSet: true,
           });
-          await setDoc(productRef, {
+          const createPayload = {
             ...fullPayload,
             createdAt: serverTimestamp(),
-          });
+          };
+          assertValidProductWritePreflight(
+            {
+              docId: productRef.id,
+              payload: createPayload,
+              isCreate: true,
+            },
+            preflightIssues
+          );
+          await setDoc(productRef, createPayload);
         } else {
           await writeExistingProductWithCleanup({
             productRef,
@@ -1267,6 +1459,7 @@ export function AdminProductsPanel() {
             ingredientsList: ingList,
             sizesList: szList,
             cleanImages: nextImages,
+            preflightIssuesOut: preflightIssues,
           });
         }
       }
@@ -1306,6 +1499,7 @@ export function AdminProductsPanel() {
           operation: operationLabel,
           staffRole,
           existingIssues,
+          preflightIssues,
           authSession,
         }),
       });
@@ -1407,6 +1601,7 @@ export function AdminProductsPanel() {
 
     let authSession: VerifiedWriteSession | null = null;
     let existingIssues: string[] = [];
+    const preflightIssues: string[] = [];
     let operationLabel = isNew ? 'CREATE' : 'UPDATE';
     const uploadedR2Results: Array<{ slotId: string; downloadUrl: string; storagePath: string }> = [];
 
@@ -1487,12 +1682,22 @@ export function AdminProductsPanel() {
         serializeNonImageState(editing, ingredientsText, sizesText) === originalSnapshot &&
         isExistingProductDocRuleReady(existingData)
       ) {
-        await updateDoc(productRef, {
+        const fastUpdatePayload = {
           image: primaryImage,
           imageUrl: primaryImage,
           images: nextImages,
           updatedAt: serverTimestamp(),
-        });
+        };
+        assertValidProductWritePreflight(
+          {
+            docId: productRef.id,
+            payload: fastUpdatePayload,
+            existingData,
+            isCreate: false,
+          },
+          preflightIssues
+        );
+        await updateDoc(productRef, fastUpdatePayload);
       } else {
         const ingredients = ingredientsText
           .split(',')
@@ -1516,10 +1721,19 @@ export function AdminProductsPanel() {
             cleanImages: nextImages,
             forFullSet: true,
           });
-          await setDoc(productRef, {
+          const createPayload = {
             ...payload,
             createdAt: serverTimestamp(),
-          });
+          };
+          assertValidProductWritePreflight(
+            {
+              docId: productRef.id,
+              payload: createPayload,
+              isCreate: true,
+            },
+            preflightIssues
+          );
+          await setDoc(productRef, createPayload);
         } else {
           await writeExistingProductWithCleanup({
             productRef,
@@ -1533,6 +1747,7 @@ export function AdminProductsPanel() {
             ingredientsList: ingredients,
             sizesList: sizes,
             cleanImages: nextImages,
+            preflightIssuesOut: preflightIssues,
           });
         }
       }
@@ -1576,6 +1791,7 @@ export function AdminProductsPanel() {
           operation: operationLabel,
           staffRole,
           existingIssues,
+          preflightIssues,
           authSession,
         }),
       });
@@ -1595,8 +1811,11 @@ export function AdminProductsPanel() {
   };
 
   const toggleVisibility = async (prod: Product) => {
+    let authSession: VerifiedWriteSession | null = null;
+    let existingIssues: string[] = [];
+    const preflightIssues: string[] = [];
     try {
-      await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'products_edit',
       });
@@ -1606,6 +1825,7 @@ export function AdminProductsPanel() {
       const existingData = existingSnap.exists()
         ? (existingSnap.data() as Record<string, unknown>)
         : undefined;
+      existingIssues = existingData ? inspectExistingProductIssues(existingData) : [];
       const nextVis = prod.visible === false;
       if (existingSnap.exists() && isExistingProductDocRuleReady(existingData)) {
         await updateDoc(productRef, {
@@ -1631,7 +1851,12 @@ export function AdminProductsPanel() {
             cleanImages,
             forFullSet: true,
           });
-          await setDoc(productRef, { ...payload, createdAt: serverTimestamp() });
+          const createPayload = { ...payload, createdAt: serverTimestamp() };
+          assertValidProductWritePreflight(
+            { docId: productRef.id, payload: createPayload, isCreate: true },
+            preflightIssues
+          );
+          await setDoc(productRef, createPayload);
         } else {
           await writeExistingProductWithCleanup({
             productRef,
@@ -1640,6 +1865,7 @@ export function AdminProductsPanel() {
             ingredientsList: ingList,
             sizesList: szList,
             cleanImages,
+            preflightIssuesOut: preflightIssues,
           });
         }
       }
@@ -1656,14 +1882,20 @@ export function AdminProductsPanel() {
           path: `products/${prod.id}`,
           operation: 'UPDATE',
           staffRole,
+          existingIssues,
+          preflightIssues,
+          authSession,
         }),
       });
     }
   };
 
   const toggleArchive = async (prod: Product) => {
+    let authSession: VerifiedWriteSession | null = null;
+    let existingIssues: string[] = [];
+    const preflightIssues: string[] = [];
     try {
-      await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'products_edit',
       });
@@ -1673,6 +1905,7 @@ export function AdminProductsPanel() {
       const existingData = existingSnap.exists()
         ? (existingSnap.data() as Record<string, unknown>)
         : undefined;
+      existingIssues = existingData ? inspectExistingProductIssues(existingData) : [];
       const nextDeleted = !prod.deleted;
       if (existingSnap.exists() && isExistingProductDocRuleReady(existingData)) {
         await updateDoc(productRef, {
@@ -1698,7 +1931,12 @@ export function AdminProductsPanel() {
             cleanImages,
             forFullSet: true,
           });
-          await setDoc(productRef, { ...payload, createdAt: serverTimestamp() });
+          const createPayload = { ...payload, createdAt: serverTimestamp() };
+          assertValidProductWritePreflight(
+            { docId: productRef.id, payload: createPayload, isCreate: true },
+            preflightIssues
+          );
+          await setDoc(productRef, createPayload);
         } else {
           await writeExistingProductWithCleanup({
             productRef,
@@ -1707,6 +1945,7 @@ export function AdminProductsPanel() {
             ingredientsList: ingList,
             sizesList: szList,
             cleanImages,
+            preflightIssuesOut: preflightIssues,
           });
         }
       }
@@ -1727,6 +1966,9 @@ export function AdminProductsPanel() {
           path: `products/${prod.id}`,
           operation: 'UPDATE',
           staffRole,
+          existingIssues,
+          preflightIssues,
+          authSession,
         }),
       });
     }
@@ -1736,8 +1978,9 @@ export function AdminProductsPanel() {
     if (!pendingDeleteProduct) return;
     const target = pendingDeleteProduct;
     setDeletingProduct(true);
+    let authSession: VerifiedWriteSession | null = null;
     try {
-      await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'products_delete',
       });
@@ -1756,6 +1999,7 @@ export function AdminProductsPanel() {
           path: `products/${target.id}`,
           operation: 'DELETE',
           staffRole,
+          authSession,
         }),
       });
       try {
@@ -1769,8 +2013,11 @@ export function AdminProductsPanel() {
   };
 
   const toggleFeatured = async (prod: Product) => {
+    let authSession: VerifiedWriteSession | null = null;
+    let existingIssues: string[] = [];
+    const preflightIssues: string[] = [];
     try {
-      await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'products_edit',
       });
@@ -1780,6 +2027,7 @@ export function AdminProductsPanel() {
       const existingData = existingSnap.exists()
         ? (existingSnap.data() as Record<string, unknown>)
         : undefined;
+      existingIssues = existingData ? inspectExistingProductIssues(existingData) : [];
       const nextFeatured = !prod.featured;
       if (existingSnap.exists() && isExistingProductDocRuleReady(existingData)) {
         await updateDoc(productRef, {
@@ -1804,7 +2052,12 @@ export function AdminProductsPanel() {
             cleanImages,
             forFullSet: true,
           });
-          await setDoc(productRef, { ...payload, createdAt: serverTimestamp() });
+          const createPayload = { ...payload, createdAt: serverTimestamp() };
+          assertValidProductWritePreflight(
+            { docId: productRef.id, payload: createPayload, isCreate: true },
+            preflightIssues
+          );
+          await setDoc(productRef, createPayload);
         } else {
           await writeExistingProductWithCleanup({
             productRef,
@@ -1813,6 +2066,7 @@ export function AdminProductsPanel() {
             ingredientsList: ingList,
             sizesList: szList,
             cleanImages,
+            preflightIssuesOut: preflightIssues,
           });
         }
       }
@@ -1823,6 +2077,9 @@ export function AdminProductsPanel() {
           path: `products/${prod.id}`,
           operation: 'UPDATE',
           staffRole,
+          existingIssues,
+          preflightIssues,
+          authSession,
         }),
       });
     }
