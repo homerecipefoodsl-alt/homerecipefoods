@@ -1163,15 +1163,21 @@ service cloud.firestore {
         && isValidId(categoryId)
         && isValidCategory(incoming())
         && (
-          ('id' in existing() && incoming().id == existing().id)
-          || (!('id' in existing()) && incoming().id == categoryId)
+          ('id' in existing() && isValidId(existing().id) && incoming().id == existing().id)
+          || ((!('id' in existing()) || !isValidId(existing().id)) && incoming().id == categoryId)
         )
         && incoming().updatedAt == request.time
         && (
           ('createdAt' in existing()
             && existing().createdAt is timestamp
             && incoming().createdAt == existing().createdAt
-            && incoming().diff(existing()).affectedKeys().hasOnly([
+            && incoming().diff(existing()).addedKeys().hasOnly([
+              'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
+              'description', 'descriptionEn', 'description_bn', 'description_en',
+              'image', 'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
+              'updatedAt'
+            ])
+            && incoming().diff(existing()).changedKeys().hasOnly([
               'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
               'description', 'descriptionEn', 'description_bn', 'description_en',
               'image', 'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
@@ -1180,7 +1186,13 @@ service cloud.firestore {
           ||
           ((!('createdAt' in existing()) || !(existing().createdAt is timestamp))
             && incoming().createdAt == request.time
-            && incoming().diff(existing()).affectedKeys().hasOnly([
+            && incoming().diff(existing()).addedKeys().hasOnly([
+              'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
+              'description', 'descriptionEn', 'description_bn', 'description_en',
+              'image', 'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
+              'createdAt', 'updatedAt'
+            ])
+            && incoming().diff(existing()).changedKeys().hasOnly([
               'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
               'description', 'descriptionEn', 'description_bn', 'description_en',
               'image', 'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
@@ -1203,15 +1215,21 @@ service cloud.firestore {
         && isValidId(occasionId)
         && isValidOccasion(incoming())
         && (
-          ('id' in existing() && incoming().id == existing().id)
-          || (!('id' in existing()) && incoming().id == occasionId)
+          ('id' in existing() && isValidId(existing().id) && incoming().id == existing().id)
+          || ((!('id' in existing()) || !isValidId(existing().id)) && incoming().id == occasionId)
         )
         && incoming().updatedAt == request.time
         && (
           ('createdAt' in existing()
             && existing().createdAt is timestamp
             && incoming().createdAt == existing().createdAt
-            && incoming().diff(existing()).affectedKeys().hasOnly([
+            && incoming().diff(existing()).addedKeys().hasOnly([
+              'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
+              'description', 'descriptionEn', 'description_bn', 'description_en',
+              'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
+              'updatedAt'
+            ])
+            && incoming().diff(existing()).changedKeys().hasOnly([
               'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
               'description', 'descriptionEn', 'description_bn', 'description_en',
               'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
@@ -1220,7 +1238,13 @@ service cloud.firestore {
           ||
           ((!('createdAt' in existing()) || !(existing().createdAt is timestamp))
             && incoming().createdAt == request.time
-            && incoming().diff(existing()).affectedKeys().hasOnly([
+            && incoming().diff(existing()).addedKeys().hasOnly([
+              'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
+              'description', 'descriptionEn', 'description_bn', 'description_en',
+              'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
+              'createdAt', 'updatedAt'
+            ])
+            && incoming().diff(existing()).changedKeys().hasOnly([
               'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
               'description', 'descriptionEn', 'description_bn', 'description_en',
               'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
@@ -1243,15 +1267,27 @@ service cloud.firestore {
         && isValidId(productId)
         && isValidProduct(incoming())
         && (
-          ('id' in existing() && incoming().id == existing().id)
-          || (!('id' in existing()) && incoming().id == productId)
+          ('id' in existing() && isValidId(existing().id) && incoming().id == existing().id)
+          || ((!('id' in existing()) || !isValidId(existing().id)) && incoming().id == productId)
         )
         && incoming().updatedAt == request.time
         && (
           ('createdAt' in existing()
             && existing().createdAt is timestamp
             && incoming().createdAt == existing().createdAt
-            && incoming().diff(existing()).affectedKeys().hasOnly([
+            && incoming().diff(existing()).addedKeys().hasOnly([
+              'id', 'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
+              'category', 'categorySlug', 'categoryName', 'categoryNameEn', 'productType',
+              'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
+              'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
+              'description', 'descriptionEn', 'description_bn', 'description_en',
+              'image', 'imageUrl', 'images', 'masterKey', 'rating', 'stock', 'sku',
+              'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
+              'availability', 'importantNotes', 'featured', 'popular',
+              'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription', 'seoImage',
+              'updatedAt'
+            ])
+            && incoming().diff(existing()).changedKeys().hasOnly([
               'id', 'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
               'category', 'categorySlug', 'categoryName', 'categoryNameEn', 'productType',
               'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
@@ -1266,7 +1302,19 @@ service cloud.firestore {
           ||
           ((!('createdAt' in existing()) || !(existing().createdAt is timestamp))
             && incoming().createdAt == request.time
-            && incoming().diff(existing()).affectedKeys().hasOnly([
+            && incoming().diff(existing()).addedKeys().hasOnly([
+              'id', 'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
+              'category', 'categorySlug', 'categoryName', 'categoryNameEn', 'productType',
+              'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
+              'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
+              'description', 'descriptionEn', 'description_bn', 'description_en',
+              'image', 'imageUrl', 'images', 'masterKey', 'rating', 'stock', 'sku',
+              'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
+              'availability', 'importantNotes', 'featured', 'popular',
+              'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription', 'seoImage',
+              'createdAt', 'updatedAt'
+            ])
+            && incoming().diff(existing()).changedKeys().hasOnly([
               'id', 'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
               'category', 'categorySlug', 'categoryName', 'categoryNameEn', 'productType',
               'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
@@ -1295,15 +1343,25 @@ service cloud.firestore {
         && isValidId(showroomId)
         && isValidShowroom(incoming())
         && (
-          ('id' in existing() && incoming().id == existing().id)
-          || (!('id' in existing()) && incoming().id == showroomId)
+          ('id' in existing() && isValidId(existing().id) && incoming().id == existing().id)
+          || ((!('id' in existing()) || !isValidId(existing().id)) && incoming().id == showroomId)
         )
         && incoming().updatedAt == request.time
         && (
           ('createdAt' in existing()
             && existing().createdAt is timestamp
             && incoming().createdAt == existing().createdAt
-            && incoming().diff(existing()).affectedKeys().hasOnly([
+            && incoming().diff(existing()).addedKeys().hasOnly([
+              'id', 'name', 'nameEn', 'name_bn', 'name_en',
+              'area', 'areaEn', 'address', 'addressEn', 'address_bn', 'address_en',
+              'description', 'descriptionEn', 'description_bn', 'description_en',
+              'phone', 'alternate_phone', 'email',
+              'openingHours', 'openingHoursEn', 'opening_time', 'closing_time', 'weekly_holiday',
+              'mapUrl', 'lat', 'lng', 'images', 'available_categories', 'available_products',
+              'isMain', 'visible', 'deleted', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription',
+              'updatedAt'
+            ])
+            && incoming().diff(existing()).changedKeys().hasOnly([
               'id', 'name', 'nameEn', 'name_bn', 'name_en',
               'area', 'areaEn', 'address', 'addressEn', 'address_bn', 'address_en',
               'description', 'descriptionEn', 'description_bn', 'description_en',
@@ -1316,7 +1374,17 @@ service cloud.firestore {
           ||
           ((!('createdAt' in existing()) || !(existing().createdAt is timestamp))
             && incoming().createdAt == request.time
-            && incoming().diff(existing()).affectedKeys().hasOnly([
+            && incoming().diff(existing()).addedKeys().hasOnly([
+              'id', 'name', 'nameEn', 'name_bn', 'name_en',
+              'area', 'areaEn', 'address', 'addressEn', 'address_bn', 'address_en',
+              'description', 'descriptionEn', 'description_bn', 'description_en',
+              'phone', 'alternate_phone', 'email',
+              'openingHours', 'openingHoursEn', 'opening_time', 'closing_time', 'weekly_holiday',
+              'mapUrl', 'lat', 'lng', 'images', 'available_categories', 'available_products',
+              'isMain', 'visible', 'deleted', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription',
+              'createdAt', 'updatedAt'
+            ])
+            && incoming().diff(existing()).changedKeys().hasOnly([
               'id', 'name', 'nameEn', 'name_bn', 'name_en',
               'area', 'areaEn', 'address', 'addressEn', 'address_bn', 'address_en',
               'description', 'descriptionEn', 'description_bn', 'description_en',

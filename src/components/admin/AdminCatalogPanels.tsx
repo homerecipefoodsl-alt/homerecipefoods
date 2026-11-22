@@ -42,7 +42,7 @@ import {
   getProductText,
   getShowroomText,
 } from '../../lib/bilingual';
-import { OperationType, handleFirestoreError, requireDb } from '../../lib/firebase';
+import { OperationType, auth, handleFirestoreError, requireDb } from '../../lib/firebase';
 import {
   isForbiddenInlineImageUrl,
   uploadCatalogImageToStorage,
@@ -52,6 +52,7 @@ import { formatBdtPrice, toSlug } from '../../lib/utils';
 import type {
   Category,
   Occasion,
+  PermissionKey,
   Product,
   ProductAvailability,
   Showroom,
@@ -81,6 +82,52 @@ const REQUIRED_PRODUCT_SCHEMA_KEYS = [
   'popular',
 ] as const;
 
+const ALLOWED_PRODUCT_KEYS = new Set<string>([
+  'id', 'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
+  'category', 'categorySlug', 'categoryName', 'categoryNameEn', 'productType',
+  'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
+  'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
+  'description', 'descriptionEn', 'description_bn', 'description_en',
+  'image', 'imageUrl', 'images', 'masterKey', 'rating', 'stock', 'sku',
+  'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
+  'availability', 'importantNotes', 'featured', 'popular',
+  'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt',
+  'seoTitle', 'seoDescription', 'seoImage',
+  'createdAt', 'updatedAt',
+]);
+
+const PRODUCT_OPTIONAL_STRING_BOUNDS: ReadonlyArray<[string, number]> = [
+  ['nameBn', 160],
+  ['name_bn', 160],
+  ['name_en', 160],
+  ['categorySlug', 160],
+  ['categoryNameEn', 120],
+  ['discount', 60],
+  ['price_label', 80],
+  ['unit', 60],
+  ['shortDescriptionEn', 300],
+  ['short_description_bn', 300],
+  ['short_description_en', 300],
+  ['descriptionEn', 4000],
+  ['description_bn', 4000],
+  ['description_en', 4000],
+  ['masterKey', 240],
+  ['sku', 80],
+  ['ingredients_bn', 600],
+  ['ingredients_en', 600],
+  ['seoTitle', 200],
+  ['seoDescription', 400],
+];
+
+const PRODUCT_OPTIONAL_BOOL_KEYS = ['visible', 'active', 'isActive', 'deleted'] as const;
+
+const ALLOWED_CATEGORY_KEYS = new Set<string>([
+  'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
+  'description', 'descriptionEn', 'description_bn', 'description_en',
+  'image', 'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
+  'createdAt', 'updatedAt',
+]);
+
 const REQUIRED_CATEGORY_SCHEMA_KEYS = [
   'id',
   'name',
@@ -97,6 +144,77 @@ const VALID_AVAILABILITIES: ReadonlySet<ProductAvailability> = new Set([
   'Seasonal',
   'Out of Stock',
 ]);
+
+const VALID_PRODUCT_STATUSES = new Set(['draft', 'published', 'archived']);
+
+class CatalogAuthError extends Error {
+  code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+    this.name = 'CatalogAuthError';
+  }
+}
+
+interface VerifiedWriteSession {
+  uid: string;
+  email: string;
+  emailVerified: boolean;
+}
+
+async function ensureVerifiedAdminWriteSession(params: {
+  hasPermission: (perm: PermissionKey) => boolean;
+  requiredPermission: PermissionKey;
+}): Promise<VerifiedWriteSession> {
+  const currentUser = auth?.currentUser;
+  if (!currentUser || !currentUser.email) {
+    throw new CatalogAuthError(
+      'auth/unauthenticated',
+      'আপনার লগইন সেশন পাওয়া যায়নি বা শেষ হয়ে গেছে। অনুগ্রহ করে পুনরায় লগইন করুন।'
+    );
+  }
+
+  if (!currentUser.emailVerified) {
+    try {
+      await currentUser.reload();
+    } catch {
+      // Proceed to re-check current flag
+    }
+  }
+
+  const refreshedUser = auth?.currentUser || currentUser;
+  if (!refreshedUser.emailVerified) {
+    throw new CatalogAuthError(
+      'auth/email-unverified',
+      'আপনার অ্যাডমিন ইমেইল এখনো ভেরিফাইড নয়। অনুগ্রহ করে ইমেইল ভেরিফাই করে আবার চেষ্টা করুন।'
+    );
+  }
+
+  try {
+    const tokenResult = await refreshedUser.getIdTokenResult();
+    if (tokenResult.claims.email_verified !== true) {
+      await refreshedUser.getIdToken(true);
+    }
+  } catch {
+    throw new CatalogAuthError(
+      'auth/token-refresh-failed',
+      'আপনার লগইন টোকেন রিফ্রেশ করা যায়নি। অনুগ্রহ করে পুনরায় লগইন করুন।'
+    );
+  }
+
+  if (!params.hasPermission(params.requiredPermission)) {
+    throw new CatalogAuthError(
+      'rbac/missing-permission',
+      `এই কাজের জন্য "${params.requiredPermission}" অনুমতি প্রয়োজন। অনুগ্রহ করে সুপার অ্যাডমিনের সাথে যোগাযোগ করুন।`
+    );
+  }
+
+  return {
+    uid: refreshedUser.uid,
+    email: (refreshedUser.email || currentUser.email).trim().toLowerCase(),
+    emailVerified: refreshedUser.emailVerified,
+  };
+}
 
 function sanitizeStoredImageUrls(urls: unknown): string[] {
   if (!Array.isArray(urls)) return [];
@@ -130,55 +248,283 @@ function hasCompleteSchema(
   return requiredKeys.every((key) => key in data);
 }
 
-function isExistingProductDocRuleReady(data: Record<string, unknown> | undefined): boolean {
-  if (!data || !hasCompleteSchema(data, REQUIRED_PRODUCT_SCHEMA_KEYS)) return false;
-  if (!hasValidTimestamp(data.createdAt)) return false;
-  if (typeof data.id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(data.id)) return false;
-  if (typeof data.slug !== 'string' || !/^[a-z0-9-]{1,160}$/.test(data.slug)) return false;
-  if (typeof data.category !== 'string' || !/^[a-z0-9-]{1,160}$/.test(data.category)) return false;
-  if (typeof data.price !== 'number' || !Number.isFinite(data.price) || data.price < 0) return false;
+function isNonEmptyString(val: unknown, maxLen: number): boolean {
+  return typeof val === 'string' && val.length >= 1 && val.length <= maxLen;
+}
+
+function isBoundedStringArray(val: unknown, maxLen: number, maxItemLen: number): boolean {
+  if (!Array.isArray(val) || val.length > maxLen) return false;
+  return val.every((item) => typeof item === 'string' && item.length <= maxItemLen);
+}
+
+function getUnknownKeys(data: Record<string, unknown>, allowlist: Set<string>): string[] {
+  return Object.keys(data).filter((k) => !allowlist.has(k));
+}
+
+function inspectExistingProductIssues(
+  data: Record<string, unknown> | undefined
+): string[] {
+  if (!data) return ['missing_doc'];
+  const issues: string[] = [];
+
+  const unknownKeys = getUnknownKeys(data, ALLOWED_PRODUCT_KEYS);
+  if (unknownKeys.length > 0) {
+    issues.push(`unknown_keys:${unknownKeys.join(',')}`);
+  }
+  if (!hasCompleteSchema(data, REQUIRED_PRODUCT_SCHEMA_KEYS)) {
+    const missing = REQUIRED_PRODUCT_SCHEMA_KEYS.filter((k) => !(k in data));
+    issues.push(`missing_required:${missing.join(',')}`);
+  }
+  if (!hasValidTimestamp(data.createdAt)) issues.push('invalid_createdAt');
+  if (typeof data.id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(data.id)) {
+    issues.push('invalid_id');
+  }
+  if (!isNonEmptyString(data.name, 160)) issues.push('invalid_name');
+  if (!isNonEmptyString(data.nameEn, 160)) issues.push('invalid_nameEn');
+  if (typeof data.slug !== 'string' || !/^[a-z0-9-]{1,160}$/.test(data.slug)) {
+    issues.push('invalid_slug');
+  }
+  if (typeof data.category !== 'string' || !/^[a-z0-9-]{1,160}$/.test(data.category)) {
+    issues.push('invalid_category');
+  }
+  if (!isNonEmptyString(data.categoryName, 120)) issues.push('invalid_categoryName');
+  if (!isNonEmptyString(data.productType, 120)) issues.push('invalid_productType');
+  if (
+    typeof data.price !== 'number' ||
+    !Number.isFinite(data.price) ||
+    data.price < 0 ||
+    data.price > 1000000
+  ) {
+    issues.push('invalid_price');
+  }
+  if (!isNonEmptyString(data.priceUnit, 60)) issues.push('invalid_priceUnit');
+  if (!isNonEmptyString(data.shortDescription, 300)) issues.push('invalid_shortDescription');
+  if (!isNonEmptyString(data.description, 4000)) issues.push('invalid_description');
+  if (typeof data.weight !== 'string' || data.weight.length > 80) issues.push('invalid_weight');
+  if (typeof data.importantNotes !== 'string' || data.importantNotes.length > 800) {
+    issues.push('invalid_importantNotes');
+  }
+  if (typeof data.availability !== 'string' || !VALID_AVAILABILITIES.has(data.availability as ProductAvailability)) {
+    issues.push('invalid_availability');
+  }
+  if (typeof data.featured !== 'boolean') issues.push('invalid_featured');
+  if (typeof data.popular !== 'boolean') issues.push('invalid_popular');
+
+  if (!isBoundedStringArray(data.images, 6, 400000)) {
+    issues.push('invalid_images');
+  } else if ((data.images as string[]).some((u) => isForbiddenInlineImageUrl(u))) {
+    issues.push('forbidden_inline_images');
+  }
+  if (!isBoundedStringArray(data.ingredients, 25, 120)) issues.push('invalid_ingredients');
+  if (!isBoundedStringArray(data.sizes, 10, 80)) issues.push('invalid_sizes');
+  if (!isBoundedStringArray(data.occasions, 15, 80)) issues.push('invalid_occasions');
+  if (!isBoundedStringArray(data.showrooms, 20, 128)) issues.push('invalid_showrooms');
+
+  for (const [key, maxLen] of PRODUCT_OPTIONAL_STRING_BOUNDS) {
+    if (key in data && (typeof data[key] !== 'string' || (data[key] as string).length > maxLen)) {
+      issues.push(`invalid_${key}`);
+    }
+  }
+  for (const imgKey of ['image', 'imageUrl', 'seoImage'] as const) {
+    if (imgKey in data) {
+      const val = data[imgKey];
+      if (typeof val !== 'string' || val.length > 400000 || isForbiddenInlineImageUrl(val)) {
+        issues.push(`invalid_${imgKey}`);
+      }
+    }
+  }
+  for (const boolKey of PRODUCT_OPTIONAL_BOOL_KEYS) {
+    if (boolKey in data && typeof data[boolKey] !== 'boolean') {
+      issues.push(`invalid_${boolKey}`);
+    }
+  }
   if (
     'old_price' in data &&
-    (typeof data.old_price !== 'number' || !Number.isFinite(data.old_price) || data.old_price < 0)
+    (typeof data.old_price !== 'number' ||
+      !Number.isFinite(data.old_price) ||
+      data.old_price < 0 ||
+      data.old_price > 1000000)
   ) {
-    return false;
+    issues.push('invalid_old_price');
+  }
+  if (
+    'rating' in data &&
+    (typeof data.rating !== 'number' ||
+      !Number.isFinite(data.rating) ||
+      data.rating < 0 ||
+      data.rating > 5)
+  ) {
+    issues.push('invalid_rating');
+  }
+  if (
+    'stock' in data &&
+    (typeof data.stock !== 'number' ||
+      !Number.isInteger(data.stock) ||
+      data.stock < 0 ||
+      data.stock > 1000000)
+  ) {
+    issues.push('invalid_stock');
   }
   if (
     'display_order' in data &&
-    (typeof data.display_order !== 'number' || !Number.isInteger(data.display_order))
+    (typeof data.display_order !== 'number' ||
+      !Number.isInteger(data.display_order) ||
+      data.display_order < 0 ||
+      data.display_order > 10000)
   ) {
-    return false;
+    issues.push('invalid_display_order');
   }
-  return true;
+  if (
+    'status' in data &&
+    (typeof data.status !== 'string' || !VALID_PRODUCT_STATUSES.has(data.status))
+  ) {
+    issues.push('invalid_status');
+  }
+
+  return issues;
+}
+
+function isExistingProductDocRuleReady(data: Record<string, unknown> | undefined): boolean {
+  return inspectExistingProductIssues(data).length === 0;
+}
+
+function getInvalidOptionalProductFieldsToDelete(data: Record<string, unknown> | undefined): string[] {
+  if (!data) return [];
+  const toDelete: string[] = [];
+  for (const [key, maxLen] of PRODUCT_OPTIONAL_STRING_BOUNDS) {
+    if (key in data && (typeof data[key] !== 'string' || (data[key] as string).length > maxLen)) {
+      toDelete.push(key);
+    }
+  }
+  for (const imgKey of ['image', 'imageUrl', 'seoImage'] as const) {
+    if (imgKey in data) {
+      const val = data[imgKey];
+      if (typeof val !== 'string' || val.length > 400000 || isForbiddenInlineImageUrl(val)) {
+        toDelete.push(imgKey);
+      }
+    }
+  }
+  for (const boolKey of PRODUCT_OPTIONAL_BOOL_KEYS) {
+    if (boolKey in data && typeof data[boolKey] !== 'boolean') {
+      toDelete.push(boolKey);
+    }
+  }
+  if (
+    'old_price' in data &&
+    (typeof data.old_price !== 'number' ||
+      !Number.isFinite(data.old_price) ||
+      data.old_price < 0 ||
+      data.old_price > 1000000)
+  ) {
+    toDelete.push('old_price');
+  }
+  if (
+    'rating' in data &&
+    (typeof data.rating !== 'number' ||
+      !Number.isFinite(data.rating) ||
+      data.rating < 0 ||
+      data.rating > 5)
+  ) {
+    toDelete.push('rating');
+  }
+  if (
+    'stock' in data &&
+    (typeof data.stock !== 'number' ||
+      !Number.isInteger(data.stock) ||
+      data.stock < 0 ||
+      data.stock > 1000000)
+  ) {
+    toDelete.push('stock');
+  }
+  if (
+    'display_order' in data &&
+    (typeof data.display_order !== 'number' ||
+      !Number.isInteger(data.display_order) ||
+      data.display_order < 0 ||
+      data.display_order > 10000)
+  ) {
+    toDelete.push('display_order');
+  }
+  if (
+    'status' in data &&
+    (typeof data.status !== 'string' || !VALID_PRODUCT_STATUSES.has(data.status))
+  ) {
+    toDelete.push('status');
+  }
+  return toDelete;
 }
 
 function isExistingCategoryDocRuleReady(data: Record<string, unknown> | undefined): boolean {
   if (!data || !hasCompleteSchema(data, REQUIRED_CATEGORY_SCHEMA_KEYS)) return false;
+  if (getUnknownKeys(data, ALLOWED_CATEGORY_KEYS).length > 0) return false;
   if (!hasValidTimestamp(data.createdAt)) return false;
   if (typeof data.id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(data.id)) return false;
+  if (!isNonEmptyString(data.name, 120) || !isNonEmptyString(data.nameEn, 120)) return false;
   if (typeof data.slug !== 'string' || !/^[a-z0-9-]{1,160}$/.test(data.slug)) return false;
-  if (typeof data.order !== 'number' || !Number.isInteger(data.order)) return false;
+  if (!isNonEmptyString(data.description, 600)) return false;
+  if (typeof data.image !== 'string' || !isNonEmptyString(data.image, 500000) || isForbiddenInlineImageUrl(data.image)) return false;
+  if (
+    typeof data.order !== 'number' ||
+    !Number.isInteger(data.order) ||
+    data.order < 0 ||
+    data.order > 1000
+  ) {
+    return false;
+  }
+  if ('visible' in data && typeof data.visible !== 'boolean') return false;
+  if ('deleted' in data && typeof data.deleted !== 'boolean') return false;
   return true;
 }
 
-function mapCatalogSaveError(err: unknown, context: string): string {
-  console.error(`[CatalogSave:${context}]`, err);
+function mapCatalogSaveError(
+  err: unknown,
+  context: string,
+  diag?: {
+    path?: string;
+    operation?: string;
+    staffRole?: string | null;
+    existingIssues?: string[];
+  }
+): string {
   const rawCode =
     err && typeof err === 'object' && 'code' in err
       ? String((err as { code?: unknown }).code || '').toLowerCase()
       : '';
-  const rawMessage = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+  const rawMessage = err instanceof Error ? err.message : String(err);
+  const lowerMessage = rawMessage.toLowerCase();
+  const activeUser = auth?.currentUser;
 
-  if (rawCode.includes('permission-denied') || rawMessage.includes('missing or insufficient permissions')) {
-    return 'সংরক্ষণের অনুমতি পাওয়া যায়নি। অনুগ্রহ করে অ্যাডমিন অ্যাকাউন্ট যাচাই করে আবার চেষ্টা করুন।';
-  }
-  if (rawCode.includes('unauthenticated')) {
+  console.error(`[CatalogSave:${context}]`, {
+    code: rawCode || 'unknown',
+    message: rawMessage,
+    uid: activeUser?.uid ?? null,
+    email: activeUser?.email ?? null,
+    emailVerified: activeUser?.emailVerified ?? null,
+    staffRole: diag?.staffRole ?? null,
+    path: diag?.path ?? null,
+    operation: diag?.operation ?? null,
+    existingIssues: diag?.existingIssues ?? [],
+  });
+
+  if (rawCode === 'auth/unauthenticated' || rawCode.includes('unauthenticated')) {
     return 'আপনার লগইন সেশন শেষ হয়ে গেছে। অনুগ্রহ করে আবার লগইন করুন।';
+  }
+  if (rawCode === 'auth/email-unverified') {
+    return 'আপনার অ্যাডমিন ইমেইল এখনো ভেরিফাইড নয়। ইমেইল ভেরিফাই করে পুনরায় চেষ্টা করুন।';
+  }
+  if (rawCode === 'auth/token-refresh-failed') {
+    return 'লগইন টোকেন যাচাই করা যায়নি। অনুগ্রহ করে সাইন আউট করে পুনরায় লগইন করুন।';
+  }
+  if (rawCode === 'rbac/missing-permission') {
+    return 'আপনার অ্যাকাউন্টে এই ক্যাটালগ পরিবর্তনের অনুমতি নেই। অনুগ্রহ করে সুপার অ্যাডমিনের সাথে যোগাযোগ করুন।';
+  }
+  if (rawCode.includes('permission-denied') || lowerMessage.includes('missing or insufficient permissions')) {
+    return 'সংরক্ষণের অনুমতি পাওয়া যায়নি। অ্যাডমিন রোল/পারমিশন অথবা Firestore-এর ফিল্ড/নিরাপত্তা নিয়ম যাচাই করে আবার চেষ্টা করুন।';
   }
   if (
     rawCode.includes('unavailable') ||
     rawCode.includes('network') ||
-    rawMessage.includes('offline')
+    lowerMessage.includes('offline')
   ) {
     return 'ইন্টারনেট সংযোগের কারণে সংরক্ষণ করা যায়নি। অনুগ্রহ করে আবার চেষ্টা করুন।';
   }
@@ -197,6 +543,7 @@ export function AdminProductsPanel() {
     allCategories,
     allOccasions,
     allShowrooms,
+    staffRole,
     hasPermission,
     logAdminActivity,
     importProductMasterList,
@@ -472,9 +819,16 @@ export function AdminProductsPanel() {
     ingredientsList: string[];
     sizesList: string[];
     cleanImages: string[];
-    includeDeleteOldPrice?: boolean;
+    existingData?: Record<string, unknown>;
+    forFullSet?: boolean;
   }): Record<string, unknown> => {
-    const { source, ingredientsList, sizesList, cleanImages, includeDeleteOldPrice } = params;
+    const { source, ingredientsList, sizesList, cleanImages, existingData, forFullSet } = params;
+    const preservedValidId =
+      existingData &&
+      typeof existingData.id === 'string' &&
+      /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
+        ? existingData.id
+        : source.id;
     const nameBn = (source.name || source.nameBn || source.nameEn || 'পণ্য').trim().slice(0, 160);
     const nameEn = (source.nameEn || source.name_en || nameBn).trim().slice(0, 160);
     const resolvedCategorySlug = toSlug(
@@ -508,9 +862,10 @@ export function AdminProductsPanel() {
     const safeAvailability: ProductAvailability = VALID_AVAILABILITIES.has(source.availability)
       ? source.availability
       : 'In Showroom';
+    const primaryImg = cleanImages[0] ?? '';
 
     const payload: Record<string, unknown> = {
-      id: source.id,
+      id: preservedValidId,
       name: nameBn,
       nameBn,
       nameEn,
@@ -540,7 +895,8 @@ export function AdminProductsPanel() {
       descriptionEn: fullDescEn,
       description_bn: fullDescBn,
       description_en: fullDescEn,
-      image: cleanImages[0] ?? '',
+      image: primaryImg,
+      imageUrl: primaryImg,
       images: cleanImages,
       ingredients: ingredientsList
         .map((s) => s.trim().slice(0, 120))
@@ -564,6 +920,8 @@ export function AdminProductsPanel() {
       featured: Boolean(source.featured),
       popular: Boolean(source.popular),
       visible: source.visible !== false,
+      active: source.active !== false,
+      isActive: source.isActive !== false,
       deleted: Boolean(source.deleted),
       display_order: safeDisplayOrder,
       status: source.deleted ? 'archived' : source.visible === false ? 'draft' : 'published',
@@ -580,25 +938,75 @@ export function AdminProductsPanel() {
       source.old_price > 0;
     if (hasValidOldPrice) {
       payload.old_price = Math.min(1000000, Math.max(0, Number(source.old_price)));
-    } else if (includeDeleteOldPrice) {
+    } else if (!forFullSet && existingData && 'old_price' in existingData) {
       payload.old_price = deleteField();
     }
 
     const trimmedDiscount = source.discount?.trim() ?? '';
     if (trimmedDiscount) {
       payload.discount = trimmedDiscount.slice(0, 60);
-    } else if (includeDeleteOldPrice) {
+    } else if (!forFullSet && existingData && 'discount' in existingData) {
       payload.discount = '';
     }
 
     const trimmedPriceLabel = source.price_label?.trim() ?? '';
     if (trimmedPriceLabel) {
       payload.price_label = trimmedPriceLabel.slice(0, 80);
-    } else if (includeDeleteOldPrice) {
+    } else if (!forFullSet && existingData && 'price_label' in existingData) {
       payload.price_label = '';
     }
 
+    if (!forFullSet && existingData) {
+      for (const badKey of getInvalidOptionalProductFieldsToDelete(existingData)) {
+        if (!(badKey in payload)) {
+          payload[badKey] = deleteField();
+        }
+      }
+    }
+
     return payload;
+  };
+
+  const writeExistingProductWithCleanup = async (params: {
+    productRef: ReturnType<typeof doc>;
+    existingData: Record<string, unknown> | undefined;
+    source: Product;
+    ingredientsList: string[];
+    sizesList: string[];
+    cleanImages: string[];
+  }) => {
+    const { productRef, existingData, source, ingredientsList, sizesList, cleanImages } = params;
+    const unknownKeys = existingData ? getUnknownKeys(existingData, ALLOWED_PRODUCT_KEYS) : [];
+    const hasValidCreated = hasValidTimestamp(existingData?.createdAt);
+
+    if (unknownKeys.length > 0) {
+      const fullPayload = buildNormalizedProductPayload({
+        source,
+        ingredientsList,
+        sizesList,
+        cleanImages,
+        existingData,
+        forFullSet: true,
+      });
+      await setDoc(productRef, {
+        ...fullPayload,
+        createdAt: hasValidCreated ? existingData!.createdAt : serverTimestamp(),
+      });
+      return;
+    }
+
+    const updatePayload = buildNormalizedProductPayload({
+      source,
+      ingredientsList,
+      sizesList,
+      cleanImages,
+      existingData,
+      forFullSet: false,
+    });
+    await updateDoc(
+      productRef,
+      hasValidCreated ? updatePayload : { ...updatePayload, createdAt: serverTimestamp() }
+    );
   };
 
   const handleQuickRowImageUpload = async (
@@ -614,6 +1022,10 @@ export function AdminProductsPanel() {
 
     let uploadedUrl = '';
     try {
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'products_edit',
+      });
       const uploaded = await uploadCatalogImageToStorage({
         folder: 'products',
         entityId: prod.id,
@@ -626,7 +1038,13 @@ export function AdminProductsPanel() {
       uploadedUrl = uploaded.downloadUrl;
     } catch (uploadErr) {
       const msg =
-        uploadErr instanceof Error && uploadErr.message
+        uploadErr instanceof CatalogAuthError
+          ? mapCatalogSaveError(uploadErr, 'quick_image_auth', {
+              path: `products/${prod.id}`,
+              operation: 'AUTH_CHECK',
+              staffRole,
+            })
+          : uploadErr instanceof Error && uploadErr.message
           ? uploadErr.message
           : 'ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে আবার চেষ্টা করুন।';
       setFeedback({ type: 'error', message: msg });
@@ -635,13 +1053,19 @@ export function AdminProductsPanel() {
       return;
     }
 
+    let existingIssues: string[] = [];
     try {
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'products_edit',
+      });
       const firestore = requireDb();
       const productRef = doc(firestore, 'products', prod.id);
       const existingSnap = await getDoc(productRef);
       const existingData = existingSnap.exists()
         ? (existingSnap.data() as Record<string, unknown>)
         : undefined;
+      existingIssues = existingData ? inspectExistingProductIssues(existingData) : [];
 
       const existingImages = sanitizeStoredImageUrls(
         Array.isArray(existingData?.images) ? existingData.images : prod.images
@@ -651,12 +1075,10 @@ export function AdminProductsPanel() {
         ...existingImages.filter((u) => u !== uploadedUrl),
       ].slice(0, 6);
 
-      if (
-        existingSnap.exists() &&
-        isExistingProductDocRuleReady(existingData)
-      ) {
+      if (existingSnap.exists() && isExistingProductDocRuleReady(existingData)) {
         await updateDoc(productRef, {
           image: uploadedUrl,
+          imageUrl: uploadedUrl,
           images: nextImages,
           updatedAt: serverTimestamp(),
         });
@@ -666,30 +1088,33 @@ export function AdminProductsPanel() {
           ...(existingData ? (existingData as Partial<Product>) : {}),
           id: prod.id,
           image: uploadedUrl,
+          imageUrl: uploadedUrl,
           images: nextImages,
         };
-        const fullPayload = buildNormalizedProductPayload({
-          source: mergedSource,
-          ingredientsList: Array.isArray(mergedSource.ingredients)
-            ? mergedSource.ingredients
-            : [],
-          sizesList: Array.isArray(mergedSource.sizes) ? mergedSource.sizes : [],
-          cleanImages: nextImages,
-          includeDeleteOldPrice: Boolean(existingData && 'old_price' in existingData),
-        });
+        const ingList = Array.isArray(mergedSource.ingredients) ? mergedSource.ingredients : [];
+        const szList = Array.isArray(mergedSource.sizes) ? mergedSource.sizes : [];
 
         if (!existingSnap.exists()) {
+          const fullPayload = buildNormalizedProductPayload({
+            source: mergedSource,
+            ingredientsList: ingList,
+            sizesList: szList,
+            cleanImages: nextImages,
+            forFullSet: true,
+          });
           await setDoc(productRef, {
             ...fullPayload,
             createdAt: serverTimestamp(),
           });
         } else {
-          await updateDoc(
+          await writeExistingProductWithCleanup({
             productRef,
-            hasValidTimestamp(existingData?.createdAt)
-              ? fullPayload
-              : { ...fullPayload, createdAt: serverTimestamp() }
-          );
+            existingData,
+            source: mergedSource,
+            ingredientsList: ingList,
+            sizesList: szList,
+            cleanImages: nextImages,
+          });
         }
       }
 
@@ -707,7 +1132,12 @@ export function AdminProductsPanel() {
     } catch (err) {
       setFeedback({
         type: 'error',
-        message: mapCatalogSaveError(err, 'quick_image_save'),
+        message: mapCatalogSaveError(err, 'quick_image_save', {
+          path: `products/${prod.id}`,
+          operation: 'UPDATE',
+          staffRole,
+          existingIssues,
+        }),
       });
       try {
         handleFirestoreError(err, OperationType.WRITE, `products/${prod.id}`);
@@ -723,15 +1153,22 @@ export function AdminProductsPanel() {
   const handleMasterImportClick = async () => {
     setFeedback(null);
     try {
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'products_add',
+      });
       const summary = await importProductMasterList();
       setFeedback({
         type: 'success',
         message: `মাস্টার তালিকা সিঙ্ক সম্পন্ন: মোট ${summary.totalMasterCount}টি, নতুন যোগ ${summary.newlyAddedCount}টি, স্কিপ (বিদ্যমান) ${summary.skippedExistingCount}টি।`,
       });
-    } catch {
+    } catch (err) {
       setFeedback({
         type: 'error',
-        message: 'মাস্টার প্রোডাক্ট তালিকা ইমপোর্ট করতে সমস্যা হয়েছে।',
+        message:
+          err instanceof CatalogAuthError
+            ? mapCatalogSaveError(err, 'master_import', { staffRole })
+            : 'মাস্টার প্রোডাক্ট তালিকা ইমপোর্ট করতে সমস্যা হয়েছে।',
       });
     }
   };
@@ -770,14 +1207,22 @@ export function AdminProductsPanel() {
 
     const nextImages = sanitizeStoredImageUrls(editing.images);
     const primaryImage = nextImages[0] ?? '';
+    let existingIssues: string[] = [];
+    let operationLabel = isNew ? 'CREATE' : 'UPDATE';
 
     try {
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: isNew ? 'products_add' : 'products_edit',
+      });
       const firestore = requireDb();
       const productRef = doc(firestore, 'products', editing.id);
       const existingSnap = await getDoc(productRef);
       const existingData = existingSnap.exists()
         ? (existingSnap.data() as Record<string, unknown>)
         : undefined;
+      existingIssues = existingData ? inspectExistingProductIssues(existingData) : [];
+      operationLabel = existingSnap.exists() ? 'UPDATE' : 'CREATE';
 
       // Safe image-only fast update ONLY when existing Firestore doc already satisfies complete schema
       if (
@@ -789,6 +1234,7 @@ export function AdminProductsPanel() {
       ) {
         await updateDoc(productRef, {
           image: primaryImage,
+          imageUrl: primaryImage,
           images: nextImages,
           updatedAt: serverTimestamp(),
         });
@@ -813,31 +1259,42 @@ export function AdminProductsPanel() {
         .map((s) => s.trim())
         .filter(Boolean);
 
-      const payload = buildNormalizedProductPayload({
-        source: {
-          ...editing,
-          image: primaryImage,
-          images: nextImages,
-        },
-        ingredientsList: ingredients,
-        sizesList: sizes,
-        cleanImages: nextImages,
-        includeDeleteOldPrice: Boolean(existingData && 'old_price' in existingData),
-      });
-
       if (!existingSnap.exists()) {
+        await ensureVerifiedAdminWriteSession({
+          hasPermission,
+          requiredPermission: 'products_add',
+        });
+        const payload = buildNormalizedProductPayload({
+          source: {
+            ...editing,
+            image: primaryImage,
+            imageUrl: primaryImage,
+            images: nextImages,
+          },
+          ingredientsList: ingredients,
+          sizesList: sizes,
+          cleanImages: nextImages,
+          forFullSet: true,
+        });
         await setDoc(productRef, {
           ...payload,
           createdAt: serverTimestamp(),
         });
         await logAdminActivity('create', 'products', editing.id, nameEn, `Created product ${nameBn}`);
       } else {
-        await updateDoc(
+        await writeExistingProductWithCleanup({
           productRef,
-          hasValidTimestamp(existingData?.createdAt)
-            ? payload
-            : { ...payload, createdAt: serverTimestamp() }
-        );
+          existingData,
+          source: {
+            ...editing,
+            image: primaryImage,
+            imageUrl: primaryImage,
+            images: nextImages,
+          },
+          ingredientsList: ingredients,
+          sizesList: sizes,
+          cleanImages: nextImages,
+        });
         await logAdminActivity('update', 'products', editing.id, nameEn, `Updated product ${nameBn}`);
       }
 
@@ -846,7 +1303,12 @@ export function AdminProductsPanel() {
     } catch (err) {
       setFeedback({
         type: 'error',
-        message: mapCatalogSaveError(err, 'product_save'),
+        message: mapCatalogSaveError(err, 'product_save', {
+          path: `products/${editing.id}`,
+          operation: operationLabel,
+          staffRole,
+          existingIssues,
+        }),
       });
       try {
         handleFirestoreError(err, OperationType.WRITE, `products/${editing.id}`);
@@ -860,36 +1322,120 @@ export function AdminProductsPanel() {
 
   const toggleVisibility = async (prod: Product) => {
     try {
-      const firestore = requireDb();
-      const nextVis = prod.visible === false;
-      await updateDoc(doc(firestore, 'products', prod.id), {
-        visible: nextVis,
-        status: nextVis ? 'published' : 'draft',
-        updatedAt: serverTimestamp(),
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'products_edit',
       });
+      const firestore = requireDb();
+      const productRef = doc(firestore, 'products', prod.id);
+      const existingSnap = await getDoc(productRef);
+      const existingData = existingSnap.exists()
+        ? (existingSnap.data() as Record<string, unknown>)
+        : undefined;
+      const nextVis = prod.visible === false;
+      if (existingSnap.exists() && isExistingProductDocRuleReady(existingData)) {
+        await updateDoc(productRef, {
+          visible: nextVis,
+          status: nextVis ? 'published' : 'draft',
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        const cleanImages = sanitizeStoredImageUrls(
+          Array.isArray(prod.images) && prod.images.length > 0
+            ? prod.images
+            : prod.image
+            ? [prod.image]
+            : []
+        );
+        const ingList = Array.isArray(prod.ingredients) ? prod.ingredients : [];
+        const szList = Array.isArray(prod.sizes) ? prod.sizes : [];
+        if (!existingSnap.exists()) {
+          const payload = buildNormalizedProductPayload({
+            source: { ...prod, visible: nextVis },
+            ingredientsList: ingList,
+            sizesList: szList,
+            cleanImages,
+            forFullSet: true,
+          });
+          await setDoc(productRef, { ...payload, createdAt: serverTimestamp() });
+        } else {
+          await writeExistingProductWithCleanup({
+            productRef,
+            existingData,
+            source: { ...prod, visible: nextVis },
+            ingredientsList: ingList,
+            sizesList: szList,
+            cleanImages,
+          });
+        }
+      }
       await logAdminActivity(
         nextVis ? 'show' : 'hide',
         'products',
         prod.id,
         prod.nameEn || prod.name
       );
-    } catch {
+    } catch (err) {
       setFeedback({
         type: 'error',
-        message: 'আপডেট করার আগে Firebase সংযোগ ও অনুমতি যাচাই করুন।',
+        message: mapCatalogSaveError(err, 'product_visibility', {
+          path: `products/${prod.id}`,
+          operation: 'UPDATE',
+          staffRole,
+        }),
       });
     }
   };
 
   const toggleArchive = async (prod: Product) => {
     try {
-      const firestore = requireDb();
-      const nextDeleted = !prod.deleted;
-      await updateDoc(doc(firestore, 'products', prod.id), {
-        deleted: nextDeleted,
-        status: nextDeleted ? 'archived' : 'published',
-        updatedAt: serverTimestamp(),
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'products_edit',
       });
+      const firestore = requireDb();
+      const productRef = doc(firestore, 'products', prod.id);
+      const existingSnap = await getDoc(productRef);
+      const existingData = existingSnap.exists()
+        ? (existingSnap.data() as Record<string, unknown>)
+        : undefined;
+      const nextDeleted = !prod.deleted;
+      if (existingSnap.exists() && isExistingProductDocRuleReady(existingData)) {
+        await updateDoc(productRef, {
+          deleted: nextDeleted,
+          status: nextDeleted ? 'archived' : 'published',
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        const cleanImages = sanitizeStoredImageUrls(
+          Array.isArray(prod.images) && prod.images.length > 0
+            ? prod.images
+            : prod.image
+            ? [prod.image]
+            : []
+        );
+        const ingList = Array.isArray(prod.ingredients) ? prod.ingredients : [];
+        const szList = Array.isArray(prod.sizes) ? prod.sizes : [];
+        if (!existingSnap.exists()) {
+          const payload = buildNormalizedProductPayload({
+            source: { ...prod, deleted: nextDeleted },
+            ingredientsList: ingList,
+            sizesList: szList,
+            cleanImages,
+            forFullSet: true,
+          });
+          await setDoc(productRef, { ...payload, createdAt: serverTimestamp() });
+        } else {
+          await writeExistingProductWithCleanup({
+            productRef,
+            existingData,
+            source: { ...prod, deleted: nextDeleted },
+            ingredientsList: ingList,
+            sizesList: szList,
+            cleanImages,
+          });
+        }
+      }
       await logAdminActivity(
         nextDeleted ? 'archive' : 'restore',
         'products',
@@ -900,8 +1446,15 @@ export function AdminProductsPanel() {
         type: 'success',
         message: nextDeleted ? 'পণ্যটি আর্কাইভ করা হয়েছে।' : 'পণ্যটি পুনরুদ্ধার করা হয়েছে।',
       });
-    } catch {
-      setFeedback({ type: 'error', message: 'আর্কাইভ পরিবর্তন ব্যর্থ হয়েছে।' });
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        message: mapCatalogSaveError(err, 'product_archive', {
+          path: `products/${prod.id}`,
+          operation: 'UPDATE',
+          staffRole,
+        }),
+      });
     }
   };
 
@@ -910,6 +1463,10 @@ export function AdminProductsPanel() {
     const target = pendingDeleteProduct;
     setDeletingProduct(true);
     try {
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'products_delete',
+      });
       const firestore = requireDb();
       await deleteDoc(doc(firestore, 'products', target.id));
       await logAdminActivity('delete', 'products', target.id, target.nameEn || target.name);
@@ -919,7 +1476,14 @@ export function AdminProductsPanel() {
       setPendingDeleteProduct(null);
       setFeedback({ type: 'success', message: 'পণ্যটি স্থায়ীভাবে ডিলিট করা হয়েছে।' });
     } catch (err) {
-      setFeedback({ type: 'error', message: 'ডিলিট করতে সমস্যা হয়েছে।' });
+      setFeedback({
+        type: 'error',
+        message: mapCatalogSaveError(err, 'product_delete', {
+          path: `products/${target.id}`,
+          operation: 'DELETE',
+          staffRole,
+        }),
+      });
       try {
         handleFirestoreError(err, OperationType.DELETE, `products/${target.id}`);
       } catch {
@@ -932,13 +1496,61 @@ export function AdminProductsPanel() {
 
   const toggleFeatured = async (prod: Product) => {
     try {
-      const firestore = requireDb();
-      await updateDoc(doc(firestore, 'products', prod.id), {
-        featured: !prod.featured,
-        updatedAt: serverTimestamp(),
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'products_edit',
       });
-    } catch {
-      setFeedback({ type: 'error', message: 'Featured পরিবর্তন ব্যর্থ হয়েছে।' });
+      const firestore = requireDb();
+      const productRef = doc(firestore, 'products', prod.id);
+      const existingSnap = await getDoc(productRef);
+      const existingData = existingSnap.exists()
+        ? (existingSnap.data() as Record<string, unknown>)
+        : undefined;
+      const nextFeatured = !prod.featured;
+      if (existingSnap.exists() && isExistingProductDocRuleReady(existingData)) {
+        await updateDoc(productRef, {
+          featured: nextFeatured,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        const cleanImages = sanitizeStoredImageUrls(
+          Array.isArray(prod.images) && prod.images.length > 0
+            ? prod.images
+            : prod.image
+            ? [prod.image]
+            : []
+        );
+        const ingList = Array.isArray(prod.ingredients) ? prod.ingredients : [];
+        const szList = Array.isArray(prod.sizes) ? prod.sizes : [];
+        if (!existingSnap.exists()) {
+          const payload = buildNormalizedProductPayload({
+            source: { ...prod, featured: nextFeatured },
+            ingredientsList: ingList,
+            sizesList: szList,
+            cleanImages,
+            forFullSet: true,
+          });
+          await setDoc(productRef, { ...payload, createdAt: serverTimestamp() });
+        } else {
+          await writeExistingProductWithCleanup({
+            productRef,
+            existingData,
+            source: { ...prod, featured: nextFeatured },
+            ingredientsList: ingList,
+            sizesList: szList,
+            cleanImages,
+          });
+        }
+      }
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        message: mapCatalogSaveError(err, 'product_featured', {
+          path: `products/${prod.id}`,
+          operation: 'UPDATE',
+          staffRole,
+        }),
+      });
     }
   };
 
@@ -2030,7 +2642,7 @@ export function AdminProductsPanel() {
 // 2. CATEGORY MANAGEMENT
 // ========================
 export function AdminCategoriesPanel() {
-  const { allCategories, logAdminActivity } = useStore();
+  const { allCategories, staffRole, hasPermission, logAdminActivity } = useStore();
   const [editing, setEditing] = useState<Category | null>(null);
   const [isNew, setIsNew] = useState(false);
   const [catUploading, setCatUploading] = useState(false);
@@ -2074,6 +2686,10 @@ export function AdminCategoriesPanel() {
     setCatUploadPct(0);
     setMsg(null);
     try {
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'categories_manage',
+      });
       const result = await uploadCatalogImageToStorage({
         folder: 'categories',
         entityId: editing.id,
@@ -2092,7 +2708,9 @@ export function AdminCategoriesPanel() {
       setMsg({
         type: 'error',
         text:
-          err instanceof Error && err.message
+          err instanceof CatalogAuthError
+            ? mapCatalogSaveError(err, 'category_upload_auth', { staffRole })
+            : err instanceof Error && err.message
             ? err.message
             : 'ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে আবার চেষ্টা করুন।',
       });
@@ -2134,30 +2752,41 @@ export function AdminCategoriesPanel() {
       ? Math.min(1000, Math.max(0, Math.round(rawOrder)))
       : 1;
 
-    const payload = {
-      id: editing.id,
-      name: nameBn,
-      nameEn,
-      name_bn: nameBn,
-      name_en: nameEn,
-      slug,
-      description: descBn,
-      descriptionEn: descEn,
-      description_bn: descBn,
-      description_en: descEn,
-      image: (editing.image || '/src/assets/images/hero_bakery_clean_1794746110066.jpg').trim(),
-      order: safeOrder,
-      visible: editing.visible !== false,
-      deleted: Boolean(editing.deleted),
-      updatedAt: serverTimestamp(),
-    };
     try {
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'categories_manage',
+      });
       const firestore = requireDb();
       const catRef = doc(firestore, 'categories', editing.id);
       const existingSnap = await getDoc(catRef);
       const existingData = existingSnap.exists()
         ? (existingSnap.data() as Record<string, unknown>)
         : undefined;
+      const preservedValidId =
+        existingData &&
+        typeof existingData.id === 'string' &&
+        /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
+          ? existingData.id
+          : editing.id;
+
+      const payload: Record<string, unknown> = {
+        id: preservedValidId,
+        name: nameBn,
+        nameEn,
+        name_bn: nameBn,
+        name_en: nameEn,
+        slug,
+        description: descBn,
+        descriptionEn: descEn,
+        description_bn: descBn,
+        description_en: descEn,
+        image: (editing.image || '/src/assets/images/hero_bakery_clean_1794746110066.jpg').trim(),
+        order: safeOrder,
+        visible: editing.visible !== false,
+        deleted: Boolean(editing.deleted),
+        updatedAt: serverTimestamp(),
+      };
 
       if (!existingSnap.exists()) {
         await setDoc(catRef, {
@@ -2165,6 +2794,14 @@ export function AdminCategoriesPanel() {
           createdAt: serverTimestamp(),
         });
         await logAdminActivity('create', 'categories', editing.id, nameEn);
+      } else if (getUnknownKeys(existingData!, ALLOWED_CATEGORY_KEYS).length > 0) {
+        await setDoc(catRef, {
+          ...payload,
+          createdAt: hasValidTimestamp(existingData?.createdAt)
+            ? existingData!.createdAt
+            : serverTimestamp(),
+        });
+        await logAdminActivity('update', 'categories', editing.id, nameEn);
       } else {
         await updateDoc(
           catRef,
@@ -2177,7 +2814,14 @@ export function AdminCategoriesPanel() {
       setEditing(null);
       setMsg({ type: 'success', text: 'ক্যাটাগরি সফলভাবে সংরক্ষণ হয়েছে।' });
     } catch (err) {
-      setMsg({ type: 'error', text: mapCatalogSaveError(err, 'category_save') });
+      setMsg({
+        type: 'error',
+        text: mapCatalogSaveError(err, 'category_save', {
+          path: `categories/${editing.id}`,
+          operation: isNew ? 'CREATE' : 'UPDATE',
+          staffRole,
+        }),
+      });
       try {
         handleFirestoreError(err, OperationType.WRITE, `categories/${editing.id}`);
       } catch {
@@ -2188,6 +2832,10 @@ export function AdminCategoriesPanel() {
 
   const toggleCategoryVisibility = async (cat: Category) => {
     try {
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'categories_manage',
+      });
       const firestore = requireDb();
       const catRef = doc(firestore, 'categories', cat.id);
       const existingSnap = await getDoc(catRef);
@@ -2204,8 +2852,14 @@ export function AdminCategoriesPanel() {
         });
       } else {
         const ct = getCategoryText(cat);
+        const preservedValidId =
+          existingData &&
+          typeof existingData.id === 'string' &&
+          /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
+            ? existingData.id
+            : cat.id;
         const fullCatPayload = {
-          id: cat.id,
+          id: preservedValidId,
           name: ct.nameBn.slice(0, 120),
           nameEn: (ct.nameEn || ct.nameBn).slice(0, 120),
           name_bn: ct.nameBn.slice(0, 120),
@@ -2223,6 +2877,13 @@ export function AdminCategoriesPanel() {
         };
         if (!existingSnap.exists()) {
           await setDoc(catRef, { ...fullCatPayload, createdAt: serverTimestamp() });
+        } else if (getUnknownKeys(existingData!, ALLOWED_CATEGORY_KEYS).length > 0) {
+          await setDoc(catRef, {
+            ...fullCatPayload,
+            createdAt: hasValidTimestamp(existingData?.createdAt)
+              ? existingData!.createdAt
+              : serverTimestamp(),
+          });
         } else {
           await updateDoc(
             catRef,
@@ -2233,18 +2894,36 @@ export function AdminCategoriesPanel() {
         }
       }
     } catch (err) {
-      setMsg({ type: 'error', text: mapCatalogSaveError(err, 'category_visibility') });
+      setMsg({
+        type: 'error',
+        text: mapCatalogSaveError(err, 'category_visibility', {
+          path: `categories/${cat.id}`,
+          operation: 'UPDATE',
+          staffRole,
+        }),
+      });
     }
   };
 
   const removeCategory = async (id: string) => {
     try {
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'categories_manage',
+      });
       const firestore = requireDb();
       await deleteDoc(doc(firestore, 'categories', id));
       await logAdminActivity('delete', 'categories', id, id);
       setMsg({ type: 'success', text: 'ক্যাটাগরি ডিলিট করা হয়েছে।' });
     } catch (err) {
-      setMsg({ type: 'error', text: mapCatalogSaveError(err, 'category_delete') });
+      setMsg({
+        type: 'error',
+        text: mapCatalogSaveError(err, 'category_delete', {
+          path: `categories/${id}`,
+          operation: 'DELETE',
+          staffRole,
+        }),
+      });
     }
   };
 
@@ -2530,7 +3209,7 @@ export function AdminCategoriesPanel() {
 // 3. OCCASION MANAGEMENT
 // ========================
 export function AdminOccasionsPanel() {
-  const { allOccasions, allProducts, logAdminActivity } = useStore();
+  const { allOccasions, allProducts, staffRole, hasPermission, logAdminActivity } = useStore();
   const [editing, setEditing] = useState<Occasion | null>(null);
   const [isNew, setIsNew] = useState(false);
   const [assigningSlug, setAssigningSlug] = useState<string | null>(null);
@@ -2539,8 +3218,8 @@ export function AdminOccasionsPanel() {
   const saveOccasion = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editing) return;
-    const nameBn = editing.name.trim();
-    const nameEn = editing.nameEn.trim();
+    const nameBn = editing.name.trim().slice(0, 120);
+    const nameEn = editing.nameEn.trim().slice(0, 120);
     if (!nameBn) {
       setMsg('অনুগ্রহ করে বাংলা নাম দিন।');
       return;
@@ -2550,42 +3229,75 @@ export function AdminOccasionsPanel() {
       return;
     }
 
-    const slug = editing.slug.trim() || toSlug(nameEn || nameBn);
-    const descEn = (editing.descriptionEn ?? '').trim();
-    const descBn = editing.description.trim() || descEn || nameBn;
+    const slug = toSlug(editing.slug.trim() || nameEn || nameBn);
+    const descEn = (editing.descriptionEn ?? '').trim().slice(0, 600);
+    const descBn = (editing.description.trim() || descEn || nameBn).slice(0, 600);
+    const rawOrder = Number(editing.order);
+    const safeOrder = Number.isFinite(rawOrder)
+      ? Math.min(1000, Math.max(0, Math.round(rawOrder)))
+      : 1;
 
-    const payload = {
-      id: editing.id,
-      name: nameBn,
-      nameEn,
-      name_bn: nameBn,
-      name_en: nameEn,
-      slug,
-      icon: editing.icon.trim() || '✨',
-      description: descBn,
-      descriptionEn: descEn,
-      description_bn: descBn,
-      description_en: descEn,
-      order: Number(editing.order) || 1,
-      visible: editing.visible !== false,
-      updatedAt: serverTimestamp(),
-    };
     try {
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'categories_manage',
+      });
       const firestore = requireDb();
-      if (isNew) {
-        await setDoc(doc(firestore, 'occasions', editing.id), {
+      const occRef = doc(firestore, 'occasions', editing.id);
+      const existingSnap = await getDoc(occRef);
+      const existingData = existingSnap.exists()
+        ? (existingSnap.data() as Record<string, unknown>)
+        : undefined;
+      const preservedValidId =
+        existingData &&
+        typeof existingData.id === 'string' &&
+        /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
+          ? existingData.id
+          : editing.id;
+
+      const payload = {
+        id: preservedValidId,
+        name: nameBn,
+        nameEn,
+        name_bn: nameBn,
+        name_en: nameEn,
+        slug,
+        icon: (editing.icon.trim() || '✨').slice(0, 32),
+        description: descBn,
+        descriptionEn: descEn,
+        description_bn: descBn,
+        description_en: descEn,
+        order: safeOrder,
+        visible: editing.visible !== false,
+        deleted: Boolean(editing.deleted),
+        updatedAt: serverTimestamp(),
+      };
+
+      if (!existingSnap.exists()) {
+        await setDoc(occRef, {
           ...payload,
           createdAt: serverTimestamp(),
         });
         await logAdminActivity('create', 'occasions', editing.id, nameEn);
       } else {
-        await updateDoc(doc(firestore, 'occasions', editing.id), payload);
+        await updateDoc(
+          occRef,
+          hasValidTimestamp(existingData?.createdAt)
+            ? payload
+            : { ...payload, createdAt: serverTimestamp() }
+        );
         await logAdminActivity('update', 'occasions', editing.id, nameEn);
       }
       setEditing(null);
       setMsg('উপলক্ষ সেভ হয়েছে।');
     } catch (err) {
-      setMsg(mapCatalogSaveError(err, 'occasion_save'));
+      setMsg(
+        mapCatalogSaveError(err, 'occasion_save', {
+          path: `occasions/${editing.id}`,
+          operation: isNew ? 'CREATE' : 'UPDATE',
+          staffRole,
+        })
+      );
     }
   };
 
@@ -2595,13 +3307,34 @@ export function AdminOccasionsPanel() {
       ? product.occasions.filter((o) => o !== occSlug)
       : [...product.occasions, occSlug];
     try {
-      const firestore = requireDb();
-      await updateDoc(doc(firestore, 'products', product.id), {
-        occasions: next,
-        updatedAt: serverTimestamp(),
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'products_edit',
       });
-    } catch {
-      setMsg('আপডেট করতে প্রথমে ডেমো ক্যাটালগ Firestore-এ সেভ করুন।');
+      const firestore = requireDb();
+      const prodRef = doc(firestore, 'products', product.id);
+      const existingSnap = await getDoc(prodRef);
+      const existingData = existingSnap.exists()
+        ? (existingSnap.data() as Record<string, unknown>)
+        : undefined;
+      if (existingSnap.exists() && isExistingProductDocRuleReady(existingData)) {
+        await updateDoc(prodRef, {
+          occasions: next.slice(0, 15),
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        setMsg(
+          'এই পণ্যের কিছু পুরোনো ফিল্ড অসম্পূর্ণ থাকায় প্রথমে Product Management থেকে পণ্যটি একবার সংরক্ষণ (Save) করুন।'
+        );
+      }
+    } catch (err) {
+      setMsg(
+        mapCatalogSaveError(err, 'occasion_product_toggle', {
+          path: `products/${product.id}`,
+          operation: 'UPDATE',
+          staffRole,
+        })
+      );
     }
   };
 
@@ -2854,6 +3587,8 @@ export function AdminShowroomsPanel() {
   const {
     firestoreShowrooms,
     legacyDemoShowrooms,
+    staffRole,
+    hasPermission,
     logAdminActivity,
   } = useStore();
   const [editing, setEditing] = useState<Showroom | null>(null);
@@ -2866,6 +3601,10 @@ export function AdminShowroomsPanel() {
     setPurgingDemoDocs(true);
     setMsg(null);
     try {
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'showrooms_manage',
+      });
       const firestore = requireDb();
       let deletedCount = 0;
       for (const demoDoc of legacyDemoShowrooms) {
@@ -2887,8 +3626,13 @@ export function AdminShowroomsPanel() {
           ? `নিশ্চিতভাবে চিহ্নিত ${deletedCount}টি পুরোনো Demo Showroom ডকুমেন্ট Firestore থেকে স্থায়ীভাবে মুছে ফেলা হয়েছে।`
           : 'মুছে ফেলার মতো কোনো Demo ডকুমেন্ট পাওয়া যায়নি।'
       );
-    } catch {
-      setMsg('Demo ডকুমেন্ট মুছতে সমস্যা হয়েছে। অনুগ্রহ করে আপনার অনুমতি যাচাই করুন।');
+    } catch (err) {
+      setMsg(
+        mapCatalogSaveError(err, 'showroom_purge', {
+          operation: 'DELETE',
+          staffRole,
+        })
+      );
     } finally {
       setPurgingDemoDocs(false);
     }
@@ -2942,54 +3686,83 @@ export function AdminShowroomsPanel() {
         ? `https://maps.google.com/?q=${rawLat},${rawLng}`
         : `https://maps.google.com/?q=${encodeURIComponent(addressEn || addressBn)}`);
 
-    const payload: Record<string, unknown> = {
-      id: editing.id,
-      name: nameBn,
-      nameEn,
-      name_bn: nameBn,
-      name_en: nameEn,
-      area: areaBn,
-      areaEn,
-      address: addressBn,
-      addressEn,
-      address_bn: addressBn,
-      address_en: addressEn,
-      description: descBn,
-      descriptionEn: descEn,
-      description_bn: descBn,
-      description_en: descEn,
-      phone,
-      alternate_phone: (editing.alternate_phone ?? '').trim(),
-      email: (editing.email ?? '').trim(),
-      openingHours: hoursBn,
-      openingHoursEn: hoursEn,
-      opening_time: (editing.opening_time ?? '').trim(),
-      closing_time: (editing.closing_time ?? '').trim(),
-      weekly_holiday: (editing.weekly_holiday ?? '').trim(),
-      mapUrl: safeMapUrl,
-      lat: Number.isFinite(rawLat) ? rawLat : 0,
-      lng: Number.isFinite(rawLng) ? rawLng : 0,
-      isMain: Boolean(editing.isMain),
-      visible: editing.visible !== false,
-      display_order: Number(editing.display_order) || 1,
-      updatedAt: serverTimestamp(),
-    };
     try {
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'showrooms_manage',
+      });
       const firestore = requireDb();
-      if (isNew) {
-        await setDoc(doc(firestore, 'showrooms', editing.id), {
+      const showroomRef = doc(firestore, 'showrooms', editing.id);
+      const existingSnap = await getDoc(showroomRef);
+      const existingData = existingSnap.exists()
+        ? (existingSnap.data() as Record<string, unknown>)
+        : undefined;
+      const preservedValidId =
+        existingData &&
+        typeof existingData.id === 'string' &&
+        /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
+          ? existingData.id
+          : editing.id;
+
+      const payload: Record<string, unknown> = {
+        id: preservedValidId,
+        name: nameBn.slice(0, 140),
+        nameEn: nameEn.slice(0, 140),
+        name_bn: nameBn.slice(0, 140),
+        name_en: nameEn.slice(0, 140),
+        area: areaBn.slice(0, 100),
+        areaEn: areaEn.slice(0, 100),
+        address: addressBn.slice(0, 400),
+        addressEn: addressEn.slice(0, 400),
+        address_bn: addressBn.slice(0, 400),
+        address_en: addressEn.slice(0, 400),
+        description: descBn.slice(0, 600),
+        descriptionEn: descEn.slice(0, 600),
+        description_bn: descBn.slice(0, 600),
+        description_en: descEn.slice(0, 600),
+        phone: phone.slice(0, 40),
+        alternate_phone: (editing.alternate_phone ?? '').trim().slice(0, 40),
+        email: (editing.email ?? '').trim().slice(0, 254),
+        openingHours: hoursBn.slice(0, 160),
+        openingHoursEn: hoursEn.slice(0, 160),
+        opening_time: (editing.opening_time ?? '').trim().slice(0, 40),
+        closing_time: (editing.closing_time ?? '').trim().slice(0, 40),
+        weekly_holiday: (editing.weekly_holiday ?? '').trim().slice(0, 80),
+        mapUrl: safeMapUrl.slice(0, 600),
+        lat: Number.isFinite(rawLat) ? rawLat : 0,
+        lng: Number.isFinite(rawLng) ? rawLng : 0,
+        isMain: Boolean(editing.isMain),
+        visible: editing.visible !== false,
+        deleted: Boolean(editing.deleted),
+        display_order: Math.min(1000, Math.max(0, Math.round(Number(editing.display_order) || 1))),
+        updatedAt: serverTimestamp(),
+      };
+
+      if (!existingSnap.exists()) {
+        await setDoc(showroomRef, {
           ...payload,
           createdAt: serverTimestamp(),
         });
         await logAdminActivity('create', 'showrooms', editing.id, nameEn);
       } else {
-        await updateDoc(doc(firestore, 'showrooms', editing.id), payload);
+        await updateDoc(
+          showroomRef,
+          hasValidTimestamp(existingData?.createdAt)
+            ? payload
+            : { ...payload, createdAt: serverTimestamp() }
+        );
         await logAdminActivity('update', 'showrooms', editing.id, nameEn);
       }
       setEditing(null);
       setMsg('শোরুম তথ্য সংরক্ষণ করা হয়েছে।');
     } catch (err) {
-      setMsg(mapCatalogSaveError(err, 'showroom_save'));
+      setMsg(
+        mapCatalogSaveError(err, 'showroom_save', {
+          path: `showrooms/${editing.id}`,
+          operation: isNew ? 'CREATE' : 'UPDATE',
+          staffRole,
+        })
+      );
     }
   };
 
@@ -3379,10 +4152,20 @@ export function AdminShowroomsPanel() {
                         type="button"
                         onClick={async () => {
                           try {
+                            await ensureVerifiedAdminWriteSession({
+                              hasPermission,
+                              requiredPermission: 'showrooms_manage',
+                            });
                             await deleteDoc(doc(requireDb(), 'showrooms', sr.id));
                             await logAdminActivity('delete', 'showrooms', sr.id, st.nameEn || st.nameBn);
-                          } catch {
-                            setMsg('ডিলিট করা যায়নি।');
+                          } catch (err) {
+                            setMsg(
+                              mapCatalogSaveError(err, 'showroom_delete', {
+                                path: `showrooms/${sr.id}`,
+                                operation: 'DELETE',
+                                staffRole,
+                              })
+                            );
                           }
                         }}
                         className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-red-700"

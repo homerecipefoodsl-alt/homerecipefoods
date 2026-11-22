@@ -625,6 +625,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setAdminProfile(resolvedAdminRecord);
         setAccountStatus(resolvedStatus);
 
+        if (currentUser.emailVerified) {
+          try {
+            const tokenResult = await currentUser.getIdTokenResult();
+            if (tokenResult.claims.email_verified !== true) {
+              await currentUser.getIdToken(true);
+            }
+          } catch {
+            // Non-blocking token refresh check
+          }
+        }
+
         if (
           currentUser.emailVerified &&
           resolvedStatus === 'active' &&
@@ -649,38 +660,89 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           })();
         }
 
-        let latestRbacStatus: AccountStatus = resolvedStatus;
-        let hasLiveRbacDoc = Boolean(rbacSnapDataCache);
+        let liveRbacDoc: RbacRoleEntry | null = rbacSnapDataCache;
+        let liveAdminDoc: AdminRecord | null = resolvedAdminRecord;
+        let liveUserStatus: AccountStatus = resolvedStatus;
+
+        const syncEffectiveAuthority = () => {
+          if (
+            (liveUserStatus === 'disabled' || liveUserStatus === 'suspended') &&
+            !isPrimarySuperAdminEmail
+          ) {
+            setUserRole('customer');
+            setRbacPermissions([]);
+            setAccountStatus(liveUserStatus);
+            return;
+          }
+
+          if (liveRbacDoc) {
+            if (liveRbacDoc.status === 'active') {
+              setUserRole(liveRbacDoc.role);
+              setRbacPermissions(
+                Array.isArray(liveRbacDoc.permissions)
+                  ? liveRbacDoc.permissions
+                  : DEFAULT_ROLE_PERMISSIONS[liveRbacDoc.role] ?? []
+              );
+              setAccountStatus('active');
+            } else if (isPrimarySuperAdminEmail) {
+              setUserRole('super_admin');
+              setRbacPermissions(DEFAULT_ROLE_PERMISSIONS.super_admin);
+              setAccountStatus('active');
+            } else {
+              setUserRole('customer');
+              setRbacPermissions([]);
+              setAccountStatus(
+                liveRbacDoc.status === 'suspended' ? 'suspended' : 'disabled'
+              );
+            }
+            return;
+          }
+
+          if (liveAdminDoc) {
+            const adminNonActive =
+              !liveAdminDoc.active ||
+              liveAdminDoc.status === 'disabled' ||
+              liveAdminDoc.status === 'suspended';
+            if (!adminNonActive) {
+              setUserRole(liveAdminDoc.role);
+              setRbacPermissions(
+                Array.isArray(liveAdminDoc.permissions)
+                  ? liveAdminDoc.permissions
+                  : DEFAULT_ROLE_PERMISSIONS[liveAdminDoc.role] ?? []
+              );
+              setAccountStatus('active');
+            } else if (isPrimarySuperAdminEmail) {
+              setUserRole('super_admin');
+              setRbacPermissions(DEFAULT_ROLE_PERMISSIONS.super_admin);
+              setAccountStatus('active');
+            } else {
+              setUserRole('customer');
+              setRbacPermissions([]);
+              setAccountStatus(
+                liveAdminDoc.status === 'suspended' ? 'suspended' : 'disabled'
+              );
+            }
+            return;
+          }
+
+          if (isPrimarySuperAdminEmail) {
+            setUserRole('super_admin');
+            setRbacPermissions(DEFAULT_ROLE_PERMISSIONS.super_admin);
+            setAccountStatus('active');
+            return;
+          }
+
+          setUserRole('customer');
+          setRbacPermissions([]);
+          setAccountStatus('disabled');
+        };
 
         // Live subscriptions so role/status/permission changes apply immediately
         unsubRbac = onSnapshot(
           rbacRef,
           (snap) => {
-            hasLiveRbacDoc = snap.exists();
-            if (!snap.exists()) {
-              if (!isPrimarySuperAdminEmail) {
-                latestRbacStatus = 'disabled';
-                setUserRole('customer');
-                setRbacPermissions([]);
-                setAccountStatus('disabled');
-              }
-              return;
-            }
-            const r = snap.data() as RbacRoleEntry;
-            latestRbacStatus = r.status;
-            if (r.status === 'active') {
-              setUserRole(r.role);
-              setRbacPermissions(
-                Array.isArray(r.permissions)
-                  ? r.permissions
-                  : DEFAULT_ROLE_PERMISSIONS[r.role] ?? []
-              );
-              setAccountStatus('active');
-            } else {
-              setUserRole('customer');
-              setRbacPermissions([]);
-              setAccountStatus(r.status === 'suspended' ? 'suspended' : 'disabled');
-            }
+            liveRbacDoc = snap.exists() ? (snap.data() as RbacRoleEntry) : null;
+            syncEffectiveAuthority();
           },
           () => {}
         );
@@ -688,23 +750,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         unsubAdminDoc = onSnapshot(
           adminRef,
           (snap) => {
-            if (snap.exists()) {
-              const a = snap.data() as AdminRecord;
-              setAdminProfile(a);
-              const adminNonActive =
-                !a.active || a.status === 'disabled' || a.status === 'suspended';
-              if (adminNonActive && !isPrimarySuperAdminEmail) {
-                setUserRole('customer');
-                setRbacPermissions([]);
-                setAccountStatus(a.status === 'suspended' ? 'suspended' : 'disabled');
-              } else if (latestRbacStatus === 'active' && !hasLiveRbacDoc) {
-                setUserRole(a.role);
-                if (Array.isArray(a.permissions)) {
-                  setRbacPermissions(a.permissions);
-                }
-                setAccountStatus('active');
-              }
-            }
+            liveAdminDoc = snap.exists() ? (snap.data() as AdminRecord) : null;
+            setAdminProfile(liveAdminDoc);
+            syncEffectiveAuthority();
           },
           () => {}
         );
@@ -714,11 +762,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           (snap) => {
             if (snap.exists() && !isPrimarySuperAdminEmail) {
               const u = snap.data() as UserAccount;
-              if (u.status === 'disabled' || u.status === 'suspended') {
-                setUserRole('customer');
-                setRbacPermissions([]);
-                setAccountStatus(u.status);
-              }
+              liveUserStatus =
+                u.status === 'disabled' || u.status === 'suspended' ? u.status : 'active';
+              syncEffectiveAuthority();
             }
           },
           () => {}
@@ -760,7 +806,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setDbCategories(
           snap.docs.map((d) => ({
             ...(d.data() as Category),
-            id: (d.data().id as string) || d.id,
+            id: d.id,
           }))
         );
         markSettled('categories');
@@ -783,7 +829,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setDbOccasions(
           snap.docs.map((d) => ({
             ...(d.data() as Occasion),
-            id: (d.data().id as string) || d.id,
+            id: d.id,
           }))
         );
         markSettled('occasions');
@@ -799,13 +845,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       (snap) => {
         setProductsError(null);
         setDbProducts(
-          snap.docs.map((d) => {
-            const raw = d.data() as Product;
-            return {
-              ...raw,
-              id: raw.id || d.id,
-            };
-          })
+          snap.docs.map((d) => ({
+            ...(d.data() as Product),
+            id: d.id,
+          }))
         );
         setProductsLoading(false);
         markSettled('products');
@@ -829,7 +872,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       collection(activeDb, 'showrooms'),
       (snap) => {
         setShowroomsError(null);
-        setDbShowrooms(snap.docs.map((d) => d.data() as Showroom));
+        setDbShowrooms(
+          snap.docs.map((d) => ({
+            ...(d.data() as Showroom),
+            id: d.id,
+          }))
+        );
         setShowroomsLoading(false);
         markSettled('showrooms');
       },

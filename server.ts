@@ -395,7 +395,8 @@ interface CallerRbacCheck {
 
 async function verifyCallerStaffAuthority(
   idToken: string,
-  callerEmail: string
+  callerEmail: string,
+  callerUid = ''
 ): Promise<CallerRbacCheck> {
   if (callerEmail === PRIMARY_SUPER_ADMIN_EMAIL) {
     return {
@@ -418,41 +419,82 @@ async function verifyCallerStaffAuthority(
     const resp = await fetch(docUrl, {
       headers: { Authorization: `Bearer ${idToken}` },
     });
-    if (!resp.ok) {
+    if (resp.ok) {
+      const docData = (await resp.json()) as {
+        fields?: {
+          role?: { stringValue?: string };
+          status?: { stringValue?: string };
+          permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
+        };
+      };
+      const role = docData.fields?.role?.stringValue || '';
+      const status = docData.fields?.status?.stringValue || '';
+      const permissions = (docData.fields?.permissions?.arrayValue?.values || [])
+        .map((v) => v.stringValue || '')
+        .filter(Boolean);
+
+      const isActive = status === 'active';
+      const isSuper = isActive && role === 'super_admin';
+      const canManageManagers = isActive && (isSuper || permissions.includes('manager_manage'));
       return {
-        allowed: false,
+        allowed: isSuper || canManageManagers,
         isPrimarySuperAdmin: false,
-        isSuperAdmin: false,
-        canManageManagers: false,
+        isSuperAdmin: isSuper,
+        canManageManagers,
         callerEmail,
-        role: 'customer',
-        status: 'disabled',
+        role: role || 'customer',
+        status: status || 'disabled',
       };
     }
-    const docData = (await resp.json()) as {
-      fields?: {
-        role?: { stringValue?: string };
-        status?: { stringValue?: string };
-        permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
-      };
-    };
-    const role = docData.fields?.role?.stringValue || '';
-    const status = docData.fields?.status?.stringValue || '';
-    const permissions = (docData.fields?.permissions?.arrayValue?.values || [])
-      .map((v) => v.stringValue || '')
-      .filter(Boolean);
 
-    const isActive = status === 'active';
-    const isSuper = isActive && role === 'super_admin';
-    const canManageManagers = isActive && (isSuper || permissions.includes('manager_manage'));
+    if (resp.status === 404 && callerUid) {
+      const adminUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+        firebaseProjectId
+      )}/databases/${encodeURIComponent(
+        firestoreDatabaseId
+      )}/documents/admins/${encodeURIComponent(callerUid)}`;
+      const adminResp = await fetch(adminUrl, {
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      if (adminResp.ok) {
+        const adminData = (await adminResp.json()) as {
+          fields?: {
+            role?: { stringValue?: string };
+            active?: { booleanValue?: boolean };
+            status?: { stringValue?: string };
+            permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
+          };
+        };
+        const role = adminData.fields?.role?.stringValue || '';
+        const status = adminData.fields?.status?.stringValue || 'active';
+        const active = adminData.fields?.active?.booleanValue === true;
+        const permissions = (adminData.fields?.permissions?.arrayValue?.values || [])
+          .map((v) => v.stringValue || '')
+          .filter(Boolean);
+        const isActive = active && status === 'active';
+        const isSuper = isActive && role === 'super_admin';
+        const canManageManagers =
+          isActive && (isSuper || permissions.includes('manager_manage'));
+        return {
+          allowed: isSuper || canManageManagers,
+          isPrimarySuperAdmin: false,
+          isSuperAdmin: isSuper,
+          canManageManagers,
+          callerEmail,
+          role: role || 'customer',
+          status: isActive ? 'active' : status || 'disabled',
+        };
+      }
+    }
+
     return {
-      allowed: isSuper || canManageManagers,
+      allowed: false,
       isPrimarySuperAdmin: false,
-      isSuperAdmin: isSuper,
-      canManageManagers,
+      isSuperAdmin: false,
+      canManageManagers: false,
       callerEmail,
-      role: role || 'customer',
-      status: status || 'disabled',
+      role: 'customer',
+      status: 'disabled',
     };
   } catch {
     return {
@@ -868,7 +910,7 @@ app.post('/api/auth/session-init', async (req, res) => {
       return;
     }
 
-    const authority = await verifyCallerStaffAuthority(token, decoded.email);
+    const authority = await verifyCallerStaffAuthority(token, decoded.email, decoded.uid);
     const saCheck = inspectServiceAccountConfig(
       process.env.FIREBASE_SERVICE_ACCOUNT_JSON,
       SHARED_EXPECTED_FIREBASE_PROJECT_ID || firebaseProjectId
@@ -961,7 +1003,7 @@ async function handleCreateAdminUser(req: Request, res: Response) {
       return;
     }
 
-    const authority = await verifyCallerStaffAuthority(idToken, decoded.email);
+    const authority = await verifyCallerStaffAuthority(idToken, decoded.email, decoded.uid);
     if (!authority.isSuperAdmin) {
       sendError(
         res,
@@ -1292,7 +1334,7 @@ app.post('/api/admin/rollback-user', async (req, res) => {
       return;
     }
 
-    const authority = await verifyCallerStaffAuthority(idToken, decoded.email);
+    const authority = await verifyCallerStaffAuthority(idToken, decoded.email, decoded.uid);
     if (!authority.isSuperAdmin) {
       sendError(res, 'PERMISSION_DENIED', 'Unauthorized rollback request.', 403);
       return;
@@ -1351,7 +1393,7 @@ app.post('/api/admin/update-user-status', async (req, res) => {
       return;
     }
 
-    const authority = await verifyCallerStaffAuthority(idToken, decoded.email);
+    const authority = await verifyCallerStaffAuthority(idToken, decoded.email, decoded.uid);
     if (!authority.allowed) {
       sendError(res, 'PERMISSION_DENIED', 'Insufficient privileges.', 403);
       return;
@@ -1463,7 +1505,7 @@ app.post('/api/admin/reset-password', async (req, res) => {
       return;
     }
 
-    const authority = await verifyCallerStaffAuthority(idToken, decoded.email);
+    const authority = await verifyCallerStaffAuthority(idToken, decoded.email, decoded.uid);
     if (!authority.isSuperAdmin) {
       sendError(
         res,
@@ -1534,7 +1576,7 @@ app.post('/api/admin/delete-user', async (req, res) => {
       return;
     }
 
-    const authority = await verifyCallerStaffAuthority(idToken, decoded.email);
+    const authority = await verifyCallerStaffAuthority(idToken, decoded.email, decoded.uid);
     if (!authority.isSuperAdmin) {
       sendError(res, 'PERMISSION_DENIED', 'Only a Super Admin can delete user accounts.', 403);
       return;

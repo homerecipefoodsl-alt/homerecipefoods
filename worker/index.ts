@@ -467,7 +467,8 @@ async function verifyCallerStaffAuthorityWorker(
   idToken: string,
   callerEmail: string,
   projectId: string,
-  firestoreDatabaseId: string
+  firestoreDatabaseId: string,
+  callerUid = ''
 ): Promise<{
   allowed: boolean;
   isPrimarySuperAdmin: boolean;
@@ -496,39 +497,79 @@ async function verifyCallerStaffAuthorityWorker(
     const resp = await fetch(docUrl, {
       headers: { Authorization: `Bearer ${idToken}` },
     });
-    if (!resp.ok) {
+    if (resp.ok) {
+      const docData = (await resp.json()) as {
+        fields?: {
+          role?: { stringValue?: string };
+          status?: { stringValue?: string };
+          permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
+        };
+      };
+      const role = docData.fields?.role?.stringValue || '';
+      const status = docData.fields?.status?.stringValue || '';
+      const permissions = (docData.fields?.permissions?.arrayValue?.values || [])
+        .map((v) => v.stringValue || '')
+        .filter(Boolean);
+
+      const isActive = status === 'active';
+      const isSuper = isActive && role === 'super_admin';
+      const canManageManagers = isActive && (isSuper || permissions.includes('manager_manage'));
       return {
-        allowed: false,
+        allowed: isSuper || canManageManagers,
         isPrimarySuperAdmin: false,
-        isSuperAdmin: false,
-        canManageManagers: false,
-        role: 'customer',
-        status: 'disabled',
+        isSuperAdmin: isSuper,
+        canManageManagers,
+        role: role || 'customer',
+        status: status || 'disabled',
       };
     }
-    const docData = (await resp.json()) as {
-      fields?: {
-        role?: { stringValue?: string };
-        status?: { stringValue?: string };
-        permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
-      };
-    };
-    const role = docData.fields?.role?.stringValue || '';
-    const status = docData.fields?.status?.stringValue || '';
-    const permissions = (docData.fields?.permissions?.arrayValue?.values || [])
-      .map((v) => v.stringValue || '')
-      .filter(Boolean);
 
-    const isActive = status === 'active';
-    const isSuper = isActive && role === 'super_admin';
-    const canManageManagers = isActive && (isSuper || permissions.includes('manager_manage'));
+    if (resp.status === 404 && callerUid) {
+      const adminUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+        projectId
+      )}/databases/${encodeURIComponent(
+        firestoreDatabaseId
+      )}/documents/admins/${encodeURIComponent(callerUid)}`;
+      const adminResp = await fetch(adminUrl, {
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      if (adminResp.ok) {
+        const adminData = (await adminResp.json()) as {
+          fields?: {
+            role?: { stringValue?: string };
+            active?: { booleanValue?: boolean };
+            status?: { stringValue?: string };
+            permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
+          };
+        };
+        const role = adminData.fields?.role?.stringValue || '';
+        const status = adminData.fields?.status?.stringValue || 'active';
+        const active = adminData.fields?.active?.booleanValue === true;
+        const permissions = (adminData.fields?.permissions?.arrayValue?.values || [])
+          .map((v) => v.stringValue || '')
+          .filter(Boolean);
+        const isActive = active && status === 'active';
+        const isSuper = isActive && role === 'super_admin';
+        const canManageManagers =
+          isActive && (isSuper || permissions.includes('manager_manage'));
+        return {
+          allowed: isSuper || canManageManagers,
+          isPrimarySuperAdmin: false,
+          isSuperAdmin: isSuper,
+          canManageManagers,
+          role: role || 'customer',
+          status: isActive ? 'active' : status || 'disabled',
+        };
+      }
+    }
+
     return {
-      allowed: isSuper || canManageManagers,
+      allowed: false,
       isPrimarySuperAdmin: false,
-      isSuperAdmin: isSuper,
-      canManageManagers,
-      role: role || 'customer',
-      status: status || 'disabled',
+      isSuperAdmin: false,
+      canManageManagers: false,
+      role: 'customer',
+      status: 'disabled',
     };
   } catch {
     return {
@@ -1010,7 +1051,8 @@ async function handleSessionInit(request: Request, env: Env): Promise<Response> 
       token,
       decoded.email,
       projectId,
-      firestoreDatabaseId
+      firestoreDatabaseId,
+      decoded.uid
     );
     const saCheck = inspectSharedServiceAccountConfig(
       env.FIREBASE_SERVICE_ACCOUNT_JSON,
@@ -1106,7 +1148,8 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
       idToken,
       decoded.email,
       projectId,
-      firestoreDatabaseId
+      firestoreDatabaseId,
+      decoded.uid
     );
     if (!authority.isSuperAdmin) {
       return errorResponse(
@@ -1436,7 +1479,8 @@ async function handleAdminRollbackUser(request: Request, env: Env): Promise<Resp
       idToken,
       decoded.email,
       projectId,
-      firestoreDatabaseId
+      firestoreDatabaseId,
+      decoded.uid
     );
     if (!authority.isSuperAdmin) {
       return errorResponse('PERMISSION_DENIED', 'Unauthorized rollback request.', 403);
@@ -1498,7 +1542,8 @@ async function handleAdminUpdateUserStatus(request: Request, env: Env): Promise<
       idToken,
       decoded.email,
       projectId,
-      firestoreDatabaseId
+      firestoreDatabaseId,
+      decoded.uid
     );
     if (!authority.allowed) {
       return errorResponse('PERMISSION_DENIED', 'Insufficient privileges.', 403);
@@ -1607,7 +1652,8 @@ async function handleAdminResetPassword(request: Request, env: Env): Promise<Res
       idToken,
       decoded.email,
       projectId,
-      firestoreDatabaseId
+      firestoreDatabaseId,
+      decoded.uid
     );
     if (!authority.isSuperAdmin) {
       return errorResponse(
@@ -1691,7 +1737,8 @@ async function handleAdminDeleteUser(request: Request, env: Env): Promise<Respon
       idToken,
       decoded.email,
       projectId,
-      firestoreDatabaseId
+      firestoreDatabaseId,
+      decoded.uid
     );
     if (!authority.isSuperAdmin) {
       return errorResponse(
