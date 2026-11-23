@@ -8,18 +8,21 @@ export const ALLOWED_MEDIA_FOLDERS = [
 
 export type MediaUploadFolder = (typeof ALLOWED_MEDIA_FOLDERS)[number];
 
-export const DEFAULT_R2_BUCKET_NAME = 'home-recipe-product-images';
+export const DEFAULT_R2_BUCKET_NAME = 'home-recipe-foods-images';
+export const DEFAULT_R2_PUBLIC_DOMAIN = 'https://images.homerecipefoods.com.bd';
 export const MAX_MEDIA_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
 
 export const ALLOWED_MEDIA_MIME_TYPES = [
   'image/jpeg',
   'image/png',
   'image/webp',
+  'image/gif',
 ] as const;
 
 export type AllowedMediaMimeType = (typeof ALLOWED_MEDIA_MIME_TYPES)[number];
 
 export const CATALOG_UPLOAD_STAFF_ROLES = new Set([
+  'primary_super_admin',
   'super_admin',
   'admin',
   'manager',
@@ -61,14 +64,22 @@ export function buildR2ObjectKey(params: {
   folder: MediaUploadFolder;
   entityId: string;
   fileName: string;
-  ext: 'jpg' | 'png' | 'webp';
+  ext: 'jpg' | 'png' | 'webp' | 'gif';
+  isPrimary?: boolean;
 }): string {
   const safeEntity = sanitizeMediaEntityId(params.entityId);
-  const safeBase = sanitizeMediaFileBase(params.fileName);
-  const randBytes = new Uint8Array(3);
+  const randBytes = new Uint8Array(4);
   globalThis.crypto.getRandomValues(randBytes);
   const randHex = Array.from(randBytes, (b) => b.toString(16).padStart(2, '0')).join('');
-  return `${params.folder}/${safeEntity}/${Date.now()}_${randHex}_${safeBase}.${params.ext}`;
+  const uniqueId = `${Date.now()}_${randHex}`;
+
+  if (params.folder === 'products') {
+    const prefix = params.isPrimary ? 'main-' : '';
+    return `products/${safeEntity}/${prefix}${uniqueId}.${params.ext}`;
+  }
+
+  const safeBase = sanitizeMediaFileBase(params.fileName);
+  return `${params.folder}/${safeEntity}/${uniqueId}_${safeBase}.${params.ext}`;
 }
 
 export function validateR2ReadKey(rawPath: string): string | null {
@@ -98,30 +109,88 @@ export function validateR2ReadKey(rawPath: string): string | null {
     return null;
   }
 
-  if (!/\.(jpg|jpeg|png|webp)$/i.test(trimmed)) {
+  if (!/\.(jpg|jpeg|png|webp|gif)$/i.test(trimmed)) {
     return null;
   }
 
   return trimmed;
 }
 
-export function extractR2KeyFromInput(input: {
-  storagePath?: string;
-  downloadUrl?: string;
-}): string | null {
-  if (typeof input.storagePath === 'string' && input.storagePath.trim()) {
-    return validateR2ReadKey(input.storagePath);
+export function isR2PublicHost(hostname: string, extraPublicUrl?: string): boolean {
+  const host = hostname.trim().toLowerCase();
+  if (!host) return false;
+  if (host === 'images.homerecipefoods.com.bd') return true;
+  if (extraPublicUrl) {
+    try {
+      const parsed = new URL(extraPublicUrl.trim());
+      if (parsed.hostname.toLowerCase() === host && !isPrivateR2S3Host(extraPublicUrl)) {
+        return true;
+      }
+    } catch {
+      // Ignore invalid configured public URL
+    }
   }
-  if (typeof input.downloadUrl === 'string' && input.downloadUrl.trim()) {
-    const raw = input.downloadUrl.trim();
+  return false;
+}
+
+export function isR2ManagedImageUrl(url: string, extraPublicUrl?: string): boolean {
+  const raw = (url || '').trim();
+  if (!raw) return false;
+  if (raw.startsWith('/api/media/file/')) {
+    return Boolean(validateR2ReadKey(raw.slice('/api/media/file/'.length)));
+  }
+  try {
+    const parsed = new URL(raw);
+    if (parsed.pathname.startsWith('/api/media/file/')) {
+      return Boolean(validateR2ReadKey(parsed.pathname.slice('/api/media/file/'.length)));
+    }
+    if (isR2PublicHost(parsed.hostname, extraPublicUrl)) {
+      return Boolean(validateR2ReadKey(parsed.pathname.replace(/^\/+/, '')));
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export function extractR2KeyFromInput(
+  input: {
+    storagePath?: string;
+    imageKey?: string;
+    downloadUrl?: string;
+    imageUrl?: string;
+  },
+  extraPublicUrl?: string
+): string | null {
+  const explicitKey =
+    typeof input.imageKey === 'string' && input.imageKey.trim()
+      ? input.imageKey
+      : typeof input.storagePath === 'string' && input.storagePath.trim()
+      ? input.storagePath
+      : '';
+  if (explicitKey) {
+    return validateR2ReadKey(explicitKey);
+  }
+
+  const candidateUrl =
+    typeof input.imageUrl === 'string' && input.imageUrl.trim()
+      ? input.imageUrl.trim()
+      : typeof input.downloadUrl === 'string' && input.downloadUrl.trim()
+      ? input.downloadUrl.trim()
+      : '';
+
+  if (candidateUrl) {
     const marker = '/api/media/file/';
-    const idx = raw.indexOf(marker);
+    const idx = candidateUrl.indexOf(marker);
     if (idx !== -1) {
-      return validateR2ReadKey(raw.slice(idx + marker.length));
+      return validateR2ReadKey(candidateUrl.slice(idx + marker.length));
     }
     try {
-      const parsed = new URL(raw);
-      return validateR2ReadKey(parsed.pathname.replace(/^\/+/, ''));
+      const parsed = new URL(candidateUrl);
+      if (isR2PublicHost(parsed.hostname, extraPublicUrl)) {
+        return validateR2ReadKey(parsed.pathname.replace(/^\/+/, ''));
+      }
+      return null;
     } catch {
       return null;
     }
@@ -133,7 +202,7 @@ export function inspectImageBytes(
   bytes: Uint8Array,
   declaredMime?: string
 ):
-  | { ok: true; contentType: AllowedMediaMimeType; ext: 'jpg' | 'png' | 'webp' }
+  | { ok: true; contentType: AllowedMediaMimeType; ext: 'jpg' | 'png' | 'webp' | 'gif' }
   | { ok: false; status: number; code: string; message: string } {
   if (!bytes || bytes.byteLength <= 12) {
     return {
@@ -160,13 +229,14 @@ export function inspectImageBytes(
     normalizedMime !== 'image/jpeg' &&
     normalizedMime !== 'image/jpg' &&
     normalizedMime !== 'image/png' &&
-    normalizedMime !== 'image/webp'
+    normalizedMime !== 'image/webp' &&
+    normalizedMime !== 'image/gif'
   ) {
     return {
       ok: false,
       status: 415,
       code: 'UNSUPPORTED_MEDIA_TYPE',
-      message: 'অসমর্থিত ফাইল ফরম্যাট। শুধু JPG, JPEG, PNG অথবা WEBP ছবি আপলোড করা যাবে।',
+      message: 'অসমর্থিত ফাইল ফরম্যাট। শুধু JPG, JPEG, PNG, WEBP অথবা GIF ছবি আপলোড করা যাবে।',
     };
   }
 
@@ -203,11 +273,23 @@ export function inspectImageBytes(
     return { ok: true, contentType: 'image/webp', ext: 'webp' };
   }
 
+  // GIF: "GIF87a" or "GIF89a"
+  if (
+    bytes[0] === 0x47 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x38 &&
+    (bytes[4] === 0x37 || bytes[4] === 0x39) &&
+    bytes[5] === 0x61
+  ) {
+    return { ok: true, contentType: 'image/gif', ext: 'gif' };
+  }
+
   return {
     ok: false,
     status: 415,
     code: 'INVALID_IMAGE_SIGNATURE',
-    message: 'নির্বাচিত ফাইলটি বৈধ JPG, JPEG, PNG বা WEBP ছবি নয়।',
+    message: 'নির্বাচিত ফাইলটি বৈধ JPG, JPEG, PNG, WEBP বা GIF ছবি নয়।',
   };
 }
 
@@ -243,10 +325,10 @@ export function resolveAllowedApiCorsOrigin(
   const host = parsed.hostname.toLowerCase();
   if (
     parsed.protocol === 'https:' &&
-    (host === 'homerecipefoods.com' ||
-      host === 'www.homerecipefoods.com' ||
-      host === 'homerecipefoods.com.bd' ||
+    (host === 'homerecipefoods.com.bd' ||
       host === 'www.homerecipefoods.com.bd' ||
+      host === 'homerecipefoods.com' ||
+      host === 'www.homerecipefoods.com' ||
       host.endsWith('.homerecipefoods-l.workers.dev') ||
       host.endsWith('.run.app'))
   ) {
@@ -266,7 +348,8 @@ export function resolveAllowedApiCorsOrigin(
 export function isPrivateR2S3Host(urlStr: string): boolean {
   try {
     const parsed = new URL(urlStr);
-    return parsed.hostname.toLowerCase().endsWith('.r2.cloudflarestorage.com');
+    const host = parsed.hostname.toLowerCase();
+    return host.endsWith('.r2.cloudflarestorage.com') || host.endsWith('.r2.dev');
   } catch {
     return false;
   }
@@ -282,7 +365,7 @@ export function buildR2MediaPublicUrl(params: {
   if (rawPublic) {
     try {
       const parsed = new URL(rawPublic);
-      // Never allow private S3 endpoint (*.r2.cloudflarestorage.com) to be returned as a public URL
+      // Never allow private S3 endpoints (*.r2.cloudflarestorage.com) or *.r2.dev development URLs in production responses
       if (parsed.protocol === 'https:' && !isPrivateR2S3Host(rawPublic)) {
         return `${parsed.origin}${parsed.pathname.replace(/\/+$/, '')}/${cleanKey}`;
       }

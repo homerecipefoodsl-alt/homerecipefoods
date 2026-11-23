@@ -394,7 +394,7 @@ export function AdminMediaLibraryPanel() {
             <span>{uploading ? 'আপলোড হচ্ছে...' : 'ছবি আপলোড'}</span>
             <input
               type="file"
-              accept="image/*"
+              accept=".jpg,.jpeg,.png,.webp,.gif,image/jpeg,image/png,image/webp,image/gif"
               onChange={handleUpload}
               disabled={uploading}
               className="hidden"

@@ -19,6 +19,7 @@ import {
   CATALOG_UPLOAD_PERMISSIONS,
   CATALOG_UPLOAD_STAFF_ROLES,
   DEFAULT_R2_BUCKET_NAME,
+  DEFAULT_R2_PUBLIC_DOMAIN,
   deleteObjectFromR2S3,
   extractR2KeyFromInput,
   getObjectFromR2S3,
@@ -30,6 +31,7 @@ import {
   putObjectToR2S3,
   resolveAllowedApiCorsOrigin,
   validateR2ReadKey,
+  type MediaUploadFolder,
 } from '../shared/r2Media';
 
 interface CloudflareAssetsBinding {
@@ -149,7 +151,7 @@ function buildScopedCorsHeaders(corsOrigin: string | null): Record<string, strin
   const headers: Record<string, string> = {
     'Access-Control-Allow-Methods': 'GET, HEAD, POST, DELETE, OPTIONS',
     'Access-Control-Allow-Headers':
-      'Content-Type, Authorization, X-Chat-Client-Id, X-Upload-Folder, X-Entity-Id, X-File-Name',
+      'Content-Type, Authorization, X-Chat-Client-Id, X-Upload-Folder, X-Entity-Id, X-File-Name, X-Is-Primary',
     Vary: 'Origin',
   };
   if (corsOrigin) {
@@ -1965,7 +1967,12 @@ async function handleMediaUploadWorker(
   request: Request,
   env: Env,
   url: URL,
-  corsOrigin: string | null
+  corsOrigin: string | null,
+  overrides?: {
+    folder?: MediaUploadFolder;
+    entityId?: string;
+    isPrimary?: boolean;
+  }
 ): Promise<Response> {
   try {
     const authHeader = request.headers.get('authorization') || '';
@@ -2018,6 +2025,7 @@ async function handleMediaUploadWorker(
     }
 
     const rawFolder = (
+      overrides?.folder ||
       url.searchParams.get('folder') ||
       request.headers.get('x-upload-folder') ||
       'products'
@@ -2034,7 +2042,7 @@ async function handleMediaUploadWorker(
     }
 
     const contentLengthHeader = Number(request.headers.get('content-length') || '0');
-    if (Number.isFinite(contentLengthHeader) && contentLengthHeader > MAX_MEDIA_IMAGE_BYTES) {
+    if (Number.isFinite(contentLengthHeader) && contentLengthHeader > MAX_MEDIA_IMAGE_BYTES + 65536) {
       return scopedErrorResponse(
         'IMAGE_TOO_LARGE',
         'ছবির আকার অনেক বড়। সর্বোচ্চ ৫ এমবি আকারের ছবি আপলোড করা যাবে।',
@@ -2044,20 +2052,56 @@ async function handleMediaUploadWorker(
     }
 
     const rawEntityId =
+      overrides?.entityId ||
       url.searchParams.get('entityId') ||
       request.headers.get('x-entity-id') ||
       `item-${Date.now()}`;
-    const rawFileName =
+    let rawFileName =
       url.searchParams.get('filename') ||
       request.headers.get('x-file-name') ||
       'image.jpg';
+    let isPrimary =
+      overrides?.isPrimary ??
+      (url.searchParams.get('isPrimary') === 'true' ||
+        url.searchParams.get('slot') === 'main' ||
+        request.headers.get('x-is-primary') === 'true' ||
+        request.headers.get('x-is-primary') === '1');
 
-    const arrayBuffer = await request.arrayBuffer();
-    const bytes = new Uint8Array(arrayBuffer);
-    const inspection = inspectImageBytes(
-      bytes,
-      request.headers.get('content-type') || undefined
-    );
+    let bytes: Uint8Array;
+    let declaredMime = request.headers.get('content-type') || undefined;
+    const lowerCt = (declaredMime || '').toLowerCase();
+
+    if (lowerCt.includes('multipart/form-data')) {
+      const form = await request.formData();
+      const candidateFile = form.get('file') || form.get('image');
+      if (!candidateFile || typeof candidateFile === 'string') {
+        return scopedErrorResponse(
+          'MISSING_IMAGE_FILE',
+          'অনুগ্রহ করে একটি বৈধ ছবি ফাইল নির্বাচন করুন।',
+          400,
+          corsOrigin
+        );
+      }
+      rawFileName = candidateFile.name || rawFileName;
+      declaredMime = candidateFile.type || undefined;
+      if (form.get('isPrimary') === 'true' || form.get('slot') === 'main') {
+        isPrimary = true;
+      }
+      bytes = new Uint8Array(await candidateFile.arrayBuffer());
+    } else {
+      if (Number.isFinite(contentLengthHeader) && contentLengthHeader > MAX_MEDIA_IMAGE_BYTES) {
+        return scopedErrorResponse(
+          'IMAGE_TOO_LARGE',
+          'ছবির আকার অনেক বড়। সর্বোচ্চ ৫ এমবি আকারের ছবি আপলোড করা যাবে।',
+          413,
+          corsOrigin
+        );
+      }
+      const arrayBuffer = await request.arrayBuffer();
+      bytes = new Uint8Array(arrayBuffer);
+    }
+
+    const inspection = inspectImageBytes(bytes, declaredMime);
     if (inspection.ok === false) {
       return scopedErrorResponse(
         inspection.code,
@@ -2072,6 +2116,7 @@ async function handleMediaUploadWorker(
       entityId: rawEntityId,
       fileName: rawFileName,
       ext: inspection.ext,
+      isPrimary,
     });
 
     const s3Creds = inspectR2S3Credentials(env);
@@ -2084,8 +2129,20 @@ async function handleMediaUploadWorker(
         customMetadata: {
           uploadedByEmail: decoded.email,
           folder: rawFolder,
+          entityId: rawEntityId,
         },
       });
+      if (typeof env.PRODUCT_IMAGES.head === 'function') {
+        const verifiedObj = await env.PRODUCT_IMAGES.head(objectKey);
+        if (!verifiedObj) {
+          return scopedErrorResponse(
+            'R2_UPLOAD_FAILED',
+            'Cloudflare R2-তে ছবি সংরক্ষণ যাচাই করা যায়নি। অনুগ্রহ করে আবার চেষ্টা করুন।',
+            502,
+            corsOrigin
+          );
+        }
+      }
     } else if (s3Creds.configured) {
       const s3Result = await putObjectToR2S3({
         creds: s3Creds.creds,
@@ -2110,13 +2167,17 @@ async function handleMediaUploadWorker(
       );
     }
 
+    const isLocalHost = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
     const workerOrigin =
-      url.origin.startsWith('http://') && !url.hostname.includes('localhost')
+      url.origin.startsWith('http://') && !isLocalHost
         ? url.origin.replace(/^http:\/\//i, 'https://')
         : url.origin;
+    const effectivePublicUrl = isLocalHost
+      ? undefined
+      : env.R2_PUBLIC_URL || DEFAULT_R2_PUBLIC_DOMAIN;
     const downloadUrl = buildR2MediaPublicUrl({
       objectKey,
-      publicBaseUrl: env.R2_PUBLIC_URL,
+      publicBaseUrl: effectivePublicUrl,
       workerOrigin,
     });
 
@@ -2124,6 +2185,8 @@ async function handleMediaUploadWorker(
       {
         success: true,
         ok: true,
+        imageUrl: downloadUrl,
+        imageKey: objectKey,
         downloadUrl,
         storagePath: objectKey,
         fileName: rawFileName,
@@ -2204,9 +2267,14 @@ async function handleMediaDeleteWorker(
     if (!objectKey) {
       const body = (await request.json().catch(() => ({}))) as {
         storagePath?: string;
+        imageKey?: string;
         downloadUrl?: string;
+        imageUrl?: string;
       };
-      objectKey = extractR2KeyFromInput(body);
+      objectKey = extractR2KeyFromInput(
+        body,
+        env.R2_PUBLIC_URL || DEFAULT_R2_PUBLIC_DOMAIN
+      );
     }
 
     if (!objectKey) {
@@ -2304,6 +2372,8 @@ async function handleMediaFileGetWorker(
       ? 'image/png'
       : objectKey.endsWith('.webp')
       ? 'image/webp'
+      : objectKey.endsWith('.gif')
+      ? 'image/gif'
       : 'image/jpeg';
 
     const headers: Record<string, string> = {
@@ -2412,6 +2482,28 @@ export default {
         }
       }
 
+      const adminProductImageMatch = url.pathname.match(
+        /^\/api\/admin\/products\/([a-zA-Z0-9_-]{1,128})\/image$/
+      );
+      if (adminProductImageMatch) {
+        const productId = adminProductImageMatch[1];
+        if (request.method === 'OPTIONS') {
+          return new Response(null, {
+            status: 204,
+            headers: buildScopedCorsHeaders(corsOrigin),
+          });
+        }
+        if (request.method === 'POST') {
+          return handleMediaUploadWorker(request, env, url, corsOrigin, {
+            folder: 'products',
+            entityId: productId,
+          });
+        }
+        if (request.method === 'DELETE') {
+          return handleMediaDeleteWorker(request, env, corsOrigin);
+        }
+      }
+
       if (url.pathname === '/api/media/health' && request.method === 'GET') {
         const s3Configured = inspectR2S3Credentials(env).configured;
         return scopedJsonResponse(
@@ -2421,6 +2513,7 @@ export default {
             provider: 'cloudflare-r2',
             bindingName: 'PRODUCT_IMAGES',
             bucketName: DEFAULT_R2_BUCKET_NAME,
+            publicDomain: env.R2_PUBLIC_URL || DEFAULT_R2_PUBLIC_DOMAIN,
             bindingActive: Boolean(env.PRODUCT_IMAGES),
             s3FallbackActive: s3Configured,
           },

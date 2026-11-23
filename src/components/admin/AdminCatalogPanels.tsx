@@ -46,6 +46,7 @@ import { OperationType, auth, handleFirestoreError, requireDb } from '../../lib/
 import {
   deleteCatalogImageFromStorage,
   isForbiddenInlineImageUrl,
+  isR2ImageUrl,
   uploadCatalogImageToStorage,
   validateCatalogImageFile,
 } from '../../lib/productStorage';
@@ -407,6 +408,28 @@ function sanitizeStoredImageUrls(urls: unknown): string[] {
     if (clean.length >= 6) break;
   }
   return clean;
+}
+
+function collectProductR2ImageUrls(
+  data: Record<string, unknown> | Product | undefined
+): string[] {
+  if (!data) return [];
+  const urls = new Set<string>();
+  const addIfR2 = (val: unknown) => {
+    if (typeof val === 'string' && isR2ImageUrl(val)) {
+      urls.add(val.trim());
+    }
+  };
+  addIfR2((data as { image?: unknown }).image);
+  addIfR2((data as { imageUrl?: unknown }).imageUrl);
+  addIfR2((data as { seoImage?: unknown }).seoImage);
+  const imgs = (data as { images?: unknown }).images;
+  if (Array.isArray(imgs)) {
+    for (const item of imgs) {
+      addIfR2(item);
+    }
+  }
+  return Array.from(urls);
 }
 
 function hasValidTimestamp(value: unknown): boolean {
@@ -1564,6 +1587,7 @@ export function AdminProductsPanel() {
         folder: 'products',
         entityId: prod.id,
         file,
+        isPrimary: true,
         onProgress: (pct) => setRowUploadProgress(pct),
       });
       if (!uploaded.downloadUrl || isForbiddenInlineImageUrl(uploaded.downloadUrl)) {
@@ -1577,6 +1601,7 @@ export function AdminProductsPanel() {
       const existingImages = sanitizeStoredImageUrls(
         Array.isArray(existingData?.images) ? existingData.images : prod.images
       );
+      const previousR2Urls = collectProductR2ImageUrls(existingData);
       const nextImages = [
         uploadedResult.downloadUrl,
         ...existingImages.filter((u) => u !== uploadedResult!.downloadUrl),
@@ -1649,6 +1674,14 @@ export function AdminProductsPanel() {
       }
 
       uploadedResult = null; // Persisted in Firestore; do not roll back
+
+      // Best-effort delete any R2 images that fell off the 6-image list AFTER Firestore commit succeeds
+      const evictedR2Urls = previousR2Urls.filter((oldUrl) => !nextImages.includes(oldUrl));
+      if (evictedR2Urls.length > 0) {
+        await Promise.allSettled(
+          evictedR2Urls.map((oldUrl) => deleteCatalogImageFromStorage({ imageUrl: oldUrl }))
+        );
+      }
 
       try {
         await logAdminActivity(
@@ -1774,7 +1807,7 @@ export function AdminProductsPanel() {
       setFeedback({
         type: 'error',
         message:
-          'এই পণ্যটিতে পুরোনো ইনলাইন (base64) ছবি রয়েছে। অনুগ্রহ করে ছবিটি সরিয়ে নতুন JPG/PNG/WEBP ছবি নির্বাচন করুন অথবা ছবিটি তালিকা থেকে রিমুভ করে সংরক্ষণ করুন।',
+          'এই পণ্যটিতে পুরোনো ইনলাইন (base64) ছবি রয়েছে। অনুগ্রহ করে ছবিটি সরিয়ে নতুন JPG/PNG/WEBP/GIF ছবি নির্বাচন করুন অথবা ছবিটি তালিকা থেকে রিমুভ করে সংরক্ষণ করুন।',
       });
       return;
     }
@@ -1787,6 +1820,7 @@ export function AdminProductsPanel() {
     let existingIssues: string[] = [];
     const preflightIssues: string[] = [];
     let operationLabel = isNew ? 'CREATE' : 'UPDATE';
+    let failedDuringImageUpload = false;
     const uploadedR2Results: Array<{ slotId: string; downloadUrl: string; storagePath: string }> = [];
 
     try {
@@ -1804,6 +1838,7 @@ export function AdminProductsPanel() {
         : undefined;
       existingIssues = existingData ? inspectExistingProductIssues(existingData) : [];
       operationLabel = existingSnap.exists() ? 'UPDATE' : 'CREATE';
+      const previousR2Urls = collectProductR2ImageUrls(existingData);
 
       if (!existingSnap.exists()) {
         authSession = await ensureVerifiedAdminWriteSession({
@@ -1816,6 +1851,7 @@ export function AdminProductsPanel() {
       if (pendingSlots.length > 0) {
         for (let i = 0; i < pendingSlots.length; i += 1) {
           const slot = pendingSlots[i];
+          const slotIndex = editorImageSlots.findIndex((s) => s.id === slot.id);
           setEditorUploadPreviewUrl(slot.previewUrl);
           setEditorUploadLabel(
             pendingSlots.length > 1
@@ -1824,20 +1860,26 @@ export function AdminProductsPanel() {
           );
           setEditorUploadProgress(0);
 
-          const res = await uploadCatalogImageToStorage({
-            folder: 'products',
-            entityId: editing.id,
-            file: slot.file,
-            onProgress: (pct) => setEditorUploadProgress(pct),
-          });
-          if (!res.downloadUrl || isForbiddenInlineImageUrl(res.downloadUrl)) {
-            throw new Error('ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে পরে আবার চেষ্টা করুন।');
+          try {
+            const res = await uploadCatalogImageToStorage({
+              folder: 'products',
+              entityId: editing.id,
+              file: slot.file,
+              isPrimary: slotIndex === 0,
+              onProgress: (pct) => setEditorUploadProgress(pct),
+            });
+            if (!res.downloadUrl || isForbiddenInlineImageUrl(res.downloadUrl)) {
+              throw new Error('ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে পরে আবার চেষ্টা করুন।');
+            }
+            uploadedR2Results.push({
+              slotId: slot.id,
+              downloadUrl: res.downloadUrl,
+              storagePath: res.storagePath,
+            });
+          } catch (uploadErr) {
+            failedDuringImageUpload = true;
+            throw uploadErr;
           }
-          uploadedR2Results.push({
-            slotId: slot.id,
-            downloadUrl: res.downloadUrl,
-            storagePath: res.storagePath,
-          });
         }
       }
 
@@ -1939,9 +1981,22 @@ export function AdminProductsPanel() {
         }
       }
 
-      // Commit succeeded in Firestore; do NOT roll back uploaded R2 images
+      // Commit succeeded in Firestore; do NOT roll back newly uploaded R2 images
       const committedOperation = !existingSnap.exists() ? 'create' : 'update';
       uploadedR2Results.length = 0;
+
+      // Safe cleanup: delete ONLY replaced/removed old R2 images AFTER Firestore commit succeeded
+      // (Legacy Firebase Storage URLs and bundled assets are never touched)
+      const replacedOrRemovedR2Urls = previousR2Urls.filter(
+        (oldUrl) => !nextImages.includes(oldUrl)
+      );
+      if (replacedOrRemovedR2Urls.length > 0) {
+        await Promise.allSettled(
+          replacedOrRemovedR2Urls.map((oldUrl) =>
+            deleteCatalogImageFromStorage({ imageUrl: oldUrl })
+          )
+        );
+      }
 
       try {
         await logAdminActivity(
@@ -1971,16 +2026,21 @@ export function AdminProductsPanel() {
         );
       }
 
+      const mappedMessage = mapCatalogSaveError(err, 'product_save', {
+        path: `products/${editing.id}`,
+        operation: operationLabel,
+        staffRole,
+        existingIssues,
+        preflightIssues,
+        authSession,
+      });
+
+      if (failedDuringImageUpload) {
+        setEditorUploadError(mappedMessage);
+      }
       setFeedback({
         type: 'error',
-        message: mapCatalogSaveError(err, 'product_save', {
-          path: `products/${editing.id}`,
-          operation: operationLabel,
-          staffRole,
-          existingIssues,
-          preflightIssues,
-          authSession,
-        }),
+        message: mappedMessage,
       });
       if (import.meta.env.DEV) {
         try {
@@ -2178,7 +2238,27 @@ export function AdminProductsPanel() {
         requiredPermission: 'products_delete',
       });
       const firestore = requireDb();
-      await deleteDoc(doc(firestore, 'products', target.id));
+      const productRef = doc(firestore, 'products', target.id);
+      const existingSnap = await getDoc(productRef).catch(() => null);
+      const r2UrlsToDelete = Array.from(
+        new Set([
+          ...collectProductR2ImageUrls(target),
+          ...collectProductR2ImageUrls(
+            existingSnap && existingSnap.exists()
+              ? (existingSnap.data() as Record<string, unknown>)
+              : undefined
+          ),
+        ])
+      );
+
+      await deleteDoc(productRef);
+
+      if (r2UrlsToDelete.length > 0) {
+        await Promise.allSettled(
+          r2UrlsToDelete.map((url) => deleteCatalogImageFromStorage({ imageUrl: url }))
+        );
+      }
+
       await logAdminActivity('delete', 'products', target.id, target.nameEn || target.name);
       if (editing?.id === target.id) {
         closeEditor();
@@ -2839,7 +2919,7 @@ export function AdminProductsPanel() {
                 <div>
                   <p className="text-xs font-bold text-[#1C1917]">পণ্যের ছবি (Cloudflare R2)</p>
                   <p className="text-[11px] text-[#57534E]">
-                    JPG, JPEG, PNG বা WEBP ফরম্যাট · সর্বোচ্চ ৫ এমবি (সর্বোচ্চ ৬টি ছবি)। সংরক্ষণ বাটনে চাপ দিলে ছবি Cloudflare R2-তে আপলোড হয়ে ডাটাবেসে সেভ হবে।
+                    JPG, JPEG, PNG, WEBP বা GIF ফরম্যাট · সর্বোচ্চ ৫ এমবি (সর্বোচ্চ ৬টি ছবি)। সংরক্ষণ বাটনে চাপ দিলে ছবি Cloudflare R2-তে আপলোড হয়ে ডাটাবেসে সেভ হবে।
                   </p>
                 </div>
                 <span className="font-mono text-[11px] font-semibold text-[#57534E]">
@@ -2848,9 +2928,20 @@ export function AdminProductsPanel() {
               </div>
 
               {editorUploadError && (
-                <div className="mt-3 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-800">
-                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  <span>{editorUploadError}</span>
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-800">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>{editorUploadError}</span>
+                  </div>
+                  {editorImageSlots.some((s) => s.kind === 'pending') && !saving && (
+                    <button
+                      type="submit"
+                      className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-red-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-red-800 hover:bg-red-100"
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      <span>আবার চেষ্টা করুন</span>
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -3017,7 +3108,7 @@ export function AdminProductsPanel() {
                     <input
                       type="file"
                       multiple
-                      accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                      accept=".jpg,.jpeg,.png,.webp,.gif,image/jpeg,image/png,image/webp,image/gif"
                       disabled={saving || editorUploadProgress !== null}
                       onChange={handleImageUpload}
                       className="hidden"
@@ -3067,7 +3158,7 @@ export function AdminProductsPanel() {
             </button>
             <button
               type="submit"
-              disabled={saving}
+              disabled={saving || editorUploadProgress !== null}
               className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C] disabled:opacity-50"
             >
               {saving ? 'সংরক্ষণ হচ্ছে...' : 'সংরক্ষণ করুন'}
@@ -3261,7 +3352,7 @@ export function AdminProductsPanel() {
                                 </span>
                                 <input
                                   type="file"
-                                  accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                                  accept=".jpg,.jpeg,.png,.webp,.gif,image/jpeg,image/png,image/webp,image/gif"
                                   disabled={uploadingRowId === p.id}
                                   onChange={(ev) => handleQuickRowImageUpload(p, ev)}
                                   className="hidden"
@@ -3754,7 +3845,7 @@ export function AdminCategoriesPanel() {
           </div>
           <div>
             <label className="mb-1 block text-xs font-semibold">
-              ক্যাটাগরির ছবি (JPG, PNG বা WEBP · সর্বোচ্চ ৫ এমবি)
+              ক্যাটাগরির ছবি (JPG, PNG, WEBP বা GIF · সর্বোচ্চ ৫ এমবি)
             </label>
             <div className="flex items-center gap-3">
               <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3 py-2 text-xs font-semibold text-[#1C1917] hover:border-[#DC1F26]">
@@ -3770,7 +3861,7 @@ export function AdminCategoriesPanel() {
                 </span>
                 <input
                   type="file"
-                  accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                  accept=".jpg,.jpeg,.png,.webp,.gif,image/jpeg,image/png,image/webp,image/gif"
                   disabled={catUploading}
                   onChange={handleUpload}
                   className="hidden"

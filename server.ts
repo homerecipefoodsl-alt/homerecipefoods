@@ -21,6 +21,7 @@ import {
   CATALOG_UPLOAD_PERMISSIONS,
   CATALOG_UPLOAD_STAFF_ROLES,
   DEFAULT_R2_BUCKET_NAME,
+  DEFAULT_R2_PUBLIC_DOMAIN,
   deleteObjectFromR2S3,
   extractR2KeyFromInput,
   getObjectFromR2S3,
@@ -32,6 +33,7 @@ import {
   putObjectToR2S3,
   resolveAllowedApiCorsOrigin,
   validateR2ReadKey,
+  type MediaUploadFolder,
 } from './shared/r2Media';
 
 dotenv.config();
@@ -109,7 +111,7 @@ app.use('/api', (req, res, next) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, X-Chat-Client-Id, X-Upload-Folder, X-Entity-Id, X-File-Name'
+    'Content-Type, Authorization, X-Chat-Client-Id, X-Upload-Folder, X-Entity-Id, X-File-Name, X-Is-Primary'
   );
   res.setHeader('Cache-Control', 'no-store');
   if (req.method === 'OPTIONS') {
@@ -1947,6 +1949,8 @@ app.head('/api/media/file/*', async (req, res) => {
       ? 'image/png'
       : objectKey.endsWith('.webp')
       ? 'image/webp'
+      : objectKey.endsWith('.gif')
+      ? 'image/gif'
       : 'image/jpeg';
 
     res.setHeader('Content-Type', safeMime);
@@ -1993,6 +1997,8 @@ app.get('/api/media/file/*', async (req, res) => {
       ? 'image/png'
       : objectKey.endsWith('.webp')
       ? 'image/webp'
+      : objectKey.endsWith('.gif')
+      ? 'image/gif'
       : 'image/jpeg';
 
     const buf = Buffer.from(await s3Resp.arrayBuffer());
@@ -2005,164 +2011,232 @@ app.get('/api/media/file/*', async (req, res) => {
   }
 });
 
-app.post(
-  '/api/media/upload',
-  express.raw({
-    type: ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'application/octet-stream'],
-    limit: MAX_MEDIA_IMAGE_BYTES,
-  }),
-  async (req: Request, res: Response) => {
+async function handleExpressMediaUpload(
+  req: Request,
+  res: Response,
+  overrides?: {
+    folder?: MediaUploadFolder;
+    entityId?: string;
+    isPrimary?: boolean;
+  }
+) {
+  try {
+    const authHeader = req.headers.authorization || '';
+    const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (!idToken) {
+      sendError(
+        res,
+        'UNAUTHORIZED',
+        'ছবি আপলোড করতে অ্যাডমিন অ্যাকাউন্টে লগইন থাকতে হবে।',
+        401
+      );
+      return;
+    }
+
+    let decoded: VerifiedFirebaseToken;
     try {
-      const authHeader = req.headers.authorization || '';
-      const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
-      if (!idToken) {
-        sendError(
-          res,
-          'UNAUTHORIZED',
-          'ছবি আপলোড করতে অ্যাডমিন অ্যাকাউন্টে লগইন থাকতে হবে।',
-          401
-        );
-        return;
-      }
-
-      let decoded: VerifiedFirebaseToken;
-      try {
-        decoded = await verifyFirebaseIdToken(idToken);
-      } catch {
-        sendError(
-          res,
-          'UNAUTHORIZED',
-          'আপনার লগইন সেশন শেষ হয়ে গেছে। অনুগ্রহ করে আবার লগইন করুন।',
-          401
-        );
-        return;
-      }
-
-      if (!decoded.email || !decoded.emailVerified) {
-        sendError(
-          res,
-          'UNVERIFIED_ADMIN',
-          'অ্যাডমিন ইমেইল যাচাইকৃত না হলে ছবি আপলোড করা যাবে না।',
-          403
-        );
-        return;
-      }
-
-      const authority = await verifyCatalogUploadAuthority(idToken, decoded.uid, decoded.email);
-      if (!authority.allowed) {
-        sendError(
-          res,
-          'PERMISSION_DENIED',
-          'ছবি আপলোডের জন্য আপনার পর্যাপ্ত প্রশাসনিক অনুমতি নেই।',
-          403
-        );
-        return;
-      }
-
-      const rawFolder = String(
-        req.query.folder || req.headers['x-upload-folder'] || 'products'
-      )
-        .trim()
-        .toLowerCase();
-      if (!isAllowedMediaFolder(rawFolder)) {
-        sendError(res, 'INVALID_FOLDER', 'অবৈধ মিডিয়া ফোল্ডার নির্বাচিত হয়েছে।', 400);
-        return;
-      }
-
-      const rawEntityId = String(
-        req.query.entityId || req.headers['x-entity-id'] || `item-${Date.now()}`
-      );
-      const rawFileName = String(
-        req.query.filename || req.headers['x-file-name'] || 'image.jpg'
-      );
-
-      if (!Buffer.isBuffer(req.body)) {
-        sendError(
-          res,
-          'UNSUPPORTED_MEDIA_TYPE',
-          'অসমর্থিত ফাইল ফরম্যাট। শুধু JPG, PNG অথবা WEBP ছবি আপলোড করা যাবে।',
-          415
-        );
-        return;
-      }
-
-      const bytes = new Uint8Array(req.body.buffer, req.body.byteOffset, req.body.byteLength);
-      const inspection = inspectImageBytes(
-        bytes,
-        typeof req.headers['content-type'] === 'string' ? req.headers['content-type'] : undefined
-      );
-      if (inspection.ok === false) {
-        sendError(res, inspection.code, inspection.message, inspection.status);
-        return;
-      }
-
-      const s3Creds = inspectR2S3Credentials(process.env);
-      if (!s3Creds.configured) {
-        sendError(
-          res,
-          'R2_NOT_CONFIGURED',
-          'প্রিভিউ সার্ভারে Cloudflare R2 S3 টোকেন সেট করা নেই। লাইভ Cloudflare সাইটে (homerecipefoods.workers.dev) R2 বাকেট সরাসরি কাজ করবে, অথবা প্রিভিউতে আপলোড করতে .env/Secrets-এ R2_ACCOUNT_ID, R2_ACCESS_KEY_ID ও R2_SECRET_ACCESS_KEY যোগ করুন।',
-          503
-        );
-        return;
-      }
-
-      const objectKey = buildR2ObjectKey({
-        folder: rawFolder,
-        entityId: rawEntityId,
-        fileName: rawFileName,
-        ext: inspection.ext,
-      });
-
-      const s3Result = await putObjectToR2S3({
-        creds: s3Creds.creds,
-        objectKey,
-        body: bytes,
-        contentType: inspection.contentType,
-      });
-      if (s3Result.ok === false) {
-        sendError(
-          res,
-          'R2_UPLOAD_FAILED',
-          'Cloudflare R2-তে ছবি সংরক্ষণ করা যায়নি। অনুগ্রহ করে R2 বাকেট ও অনুমতি যাচাই করুন।',
-          502
-        );
-        return;
-      }
-
-      const host = req.get('host') || `localhost:${PORT}`;
-      const proto = req.headers['x-forwarded-proto']
-        ? String(req.headers['x-forwarded-proto']).split(',')[0].trim()
-        : req.protocol;
-      const serverOrigin = `${proto}://${host}`;
-      const downloadUrl = buildR2MediaPublicUrl({
-        objectKey,
-        publicBaseUrl: process.env.R2_PUBLIC_URL,
-        workerOrigin: serverOrigin,
-      });
-
-      res.status(201).json({
-        success: true,
-        ok: true,
-        downloadUrl,
-        storagePath: objectKey,
-        fileName: rawFileName,
-        sizeBytes: bytes.byteLength,
-        contentType: inspection.contentType,
-        storageProvider: 'cloudflare-r2',
-      });
+      decoded = await verifyFirebaseIdToken(idToken);
     } catch {
       sendError(
         res,
-        'MEDIA_UPLOAD_ERROR',
-        'ছবি আপলোডের সময় সার্ভারে সমস্যা হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।',
-        500
+        'UNAUTHORIZED',
+        'আপনার লগইন সেশন শেষ হয়ে গেছে। অনুগ্রহ করে আবার লগইন করুন।',
+        401
       );
+      return;
     }
+
+    if (!decoded.email || !decoded.emailVerified) {
+      sendError(
+        res,
+        'UNVERIFIED_ADMIN',
+        'অ্যাডমিন ইমেইল যাচাইকৃত না হলে ছবি আপলোড করা যাবে না।',
+        403
+      );
+      return;
+    }
+
+    const authority = await verifyCatalogUploadAuthority(idToken, decoded.uid, decoded.email);
+    if (!authority.allowed) {
+      sendError(
+        res,
+        'PERMISSION_DENIED',
+        'ছবি আপলোডের জন্য আপনার পর্যাপ্ত প্রশাসনিক অনুমতি নেই।',
+        403
+      );
+      return;
+    }
+
+    const rawFolder = String(
+      overrides?.folder || req.query.folder || req.headers['x-upload-folder'] || 'products'
+    )
+      .trim()
+      .toLowerCase();
+    if (!isAllowedMediaFolder(rawFolder)) {
+      sendError(res, 'INVALID_FOLDER', 'অবৈধ মিডিয়া ফোল্ডার নির্বাচিত হয়েছে।', 400);
+      return;
+    }
+
+    const rawEntityId = String(
+      overrides?.entityId ||
+        req.query.entityId ||
+        req.headers['x-entity-id'] ||
+        `item-${Date.now()}`
+    );
+    let rawFileName = String(
+      req.query.filename || req.headers['x-file-name'] || 'image.jpg'
+    );
+    let isPrimary =
+      overrides?.isPrimary ??
+      (req.query.isPrimary === 'true' ||
+        req.query.slot === 'main' ||
+        req.headers['x-is-primary'] === 'true' ||
+        req.headers['x-is-primary'] === '1');
+
+    if (!Buffer.isBuffer(req.body)) {
+      sendError(
+        res,
+        'UNSUPPORTED_MEDIA_TYPE',
+        'অসমর্থিত ফাইল ফরম্যাট। শুধু JPG, PNG, WEBP অথবা GIF ছবি আপলোড করা যাবে।',
+        415
+      );
+      return;
+    }
+
+    let bytes: Uint8Array;
+    let declaredMime =
+      typeof req.headers['content-type'] === 'string' ? req.headers['content-type'] : undefined;
+
+    if ((declaredMime || '').toLowerCase().includes('multipart/form-data')) {
+      const formBuffer = new ArrayBuffer(req.body.byteLength);
+      new Uint8Array(formBuffer).set(req.body);
+      const parsedForm = await new Response(formBuffer, {
+        headers: { 'content-type': declaredMime! },
+      }).formData();
+      const candidateFile = parsedForm.get('file') || parsedForm.get('image');
+      if (!candidateFile || typeof candidateFile === 'string') {
+        sendError(
+          res,
+          'MISSING_IMAGE_FILE',
+          'অনুগ্রহ করে একটি বৈধ ছবি ফাইল নির্বাচন করুন।',
+          400
+        );
+        return;
+      }
+      rawFileName = candidateFile.name || rawFileName;
+      declaredMime = candidateFile.type || undefined;
+      if (parsedForm.get('isPrimary') === 'true' || parsedForm.get('slot') === 'main') {
+        isPrimary = true;
+      }
+      bytes = new Uint8Array(await candidateFile.arrayBuffer());
+    } else {
+      bytes = new Uint8Array(req.body.buffer, req.body.byteOffset, req.body.byteLength);
+    }
+
+    const inspection = inspectImageBytes(bytes, declaredMime);
+    if (inspection.ok === false) {
+      sendError(res, inspection.code, inspection.message, inspection.status);
+      return;
+    }
+
+    const s3Creds = inspectR2S3Credentials(process.env);
+    if (!s3Creds.configured) {
+      sendError(
+        res,
+        'R2_NOT_CONFIGURED',
+        `প্রিভিউ সার্ভারে Cloudflare R2 S3 টোকেন সেট করা নেই। লাইভ Cloudflare সাইটে (${DEFAULT_R2_BUCKET_NAME}) PRODUCT_IMAGES বাইন্ডিং সরাসরি কাজ করবে, অথবা প্রিভিউতে আপলোড করতে .env/Secrets-এ R2_ACCOUNT_ID, R2_ACCESS_KEY_ID ও R2_SECRET_ACCESS_KEY যোগ করুন।`,
+        503
+      );
+      return;
+    }
+
+    const objectKey = buildR2ObjectKey({
+      folder: rawFolder,
+      entityId: rawEntityId,
+      fileName: rawFileName,
+      ext: inspection.ext,
+      isPrimary,
+    });
+
+    const s3Result = await putObjectToR2S3({
+      creds: s3Creds.creds,
+      objectKey,
+      body: bytes,
+      contentType: inspection.contentType,
+    });
+    if (s3Result.ok === false) {
+      sendError(
+        res,
+        'R2_UPLOAD_FAILED',
+        'Cloudflare R2-তে ছবি সংরক্ষণ করা যায়নি। অনুগ্রহ করে R2 বাকেট ও অনুমতি যাচাই করুন।',
+        502
+      );
+      return;
+    }
+
+    const host = req.get('host') || `localhost:${PORT}`;
+    const proto = req.headers['x-forwarded-proto']
+      ? String(req.headers['x-forwarded-proto']).split(',')[0].trim()
+      : req.protocol;
+    const serverOrigin = `${proto}://${host}`;
+    const downloadUrl = buildR2MediaPublicUrl({
+      objectKey,
+      publicBaseUrl: process.env.R2_PUBLIC_URL,
+      workerOrigin: serverOrigin,
+    });
+
+    res.status(201).json({
+      success: true,
+      ok: true,
+      imageUrl: downloadUrl,
+      imageKey: objectKey,
+      downloadUrl,
+      storagePath: objectKey,
+      fileName: rawFileName,
+      sizeBytes: bytes.byteLength,
+      contentType: inspection.contentType,
+      storageProvider: 'cloudflare-r2',
+    });
+  } catch {
+    sendError(
+      res,
+      'MEDIA_UPLOAD_ERROR',
+      'ছবি আপলোডের সময় সার্ভারে সমস্যা হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।',
+      500
+    );
   }
+}
+
+const rawMediaUploadMiddleware = express.raw({
+  type: [
+    'image/jpeg',
+    'image/jpg',
+    'image/png',
+    'image/webp',
+    'image/gif',
+    'application/octet-stream',
+    'multipart/form-data',
+  ],
+  limit: MAX_MEDIA_IMAGE_BYTES + 65536,
+});
+
+app.post('/api/media/upload', rawMediaUploadMiddleware, (req, res) =>
+  handleExpressMediaUpload(req, res)
 );
 
-app.use('/api/media/upload', (err: unknown, _req: Request, res: Response, next: NextFunction) => {
+app.post('/api/admin/products/:productId/image', rawMediaUploadMiddleware, (req, res) =>
+  handleExpressMediaUpload(req, res, {
+    folder: 'products',
+    entityId: req.params.productId,
+  })
+);
+
+function handleRawMediaSizeLimitError(
+  err: unknown,
+  _req: Request,
+  res: Response,
+  next: NextFunction
+) {
   if (
     err &&
     typeof err === 'object' &&
@@ -2178,7 +2252,10 @@ app.use('/api/media/upload', (err: unknown, _req: Request, res: Response, next: 
     return;
   }
   next(err);
-});
+}
+
+app.use('/api/media/upload', handleRawMediaSizeLimitError);
+app.use('/api/admin/products/:productId/image', handleRawMediaSizeLimitError);
 
 async function handleExpressMediaDelete(req: Request, res: Response, rawPathKey?: string) {
   try {
@@ -2225,7 +2302,15 @@ async function handleExpressMediaDelete(req: Request, res: Response, rawPathKey?
 
     const objectKey = rawPathKey
       ? validateR2ReadKey(rawPathKey)
-      : extractR2KeyFromInput((req.body || {}) as { storagePath?: string; downloadUrl?: string });
+      : extractR2KeyFromInput(
+          (req.body || {}) as {
+            storagePath?: string;
+            imageKey?: string;
+            downloadUrl?: string;
+            imageUrl?: string;
+          },
+          process.env.R2_PUBLIC_URL || DEFAULT_R2_PUBLIC_DOMAIN
+        );
 
     if (!objectKey) {
       sendError(res, 'INVALID_OBJECT_KEY', 'বৈধ R2 object key প্রদান করা হয়নি।', 400);
@@ -2265,6 +2350,9 @@ async function handleExpressMediaDelete(req: Request, res: Response, rawPathKey?
 
 app.post('/api/media/delete', (req, res) => handleExpressMediaDelete(req, res));
 app.delete('/api/media/delete', (req, res) => handleExpressMediaDelete(req, res));
+app.delete('/api/admin/products/:productId/image', (req, res) =>
+  handleExpressMediaDelete(req, res)
+);
 app.delete('/api/media/file/*', (req, res) => {
   const rawKey = req.path.replace(/^\/api\/media\/file\//, '');
   return handleExpressMediaDelete(req, res, rawKey);

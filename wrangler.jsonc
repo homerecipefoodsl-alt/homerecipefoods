@@ -16,10 +16,14 @@
       "/sitemap.xml"
     ]
   },
+  "vars": {
+    "APP_URL": "https://homerecipefoods.com.bd",
+    "R2_PUBLIC_URL": "https://images.homerecipefoods.com.bd"
+  },
   "r2_buckets": [
     {
       "binding": "PRODUCT_IMAGES",
-      "bucket_name": "home-recipe-product-images"
+      "bucket_name": "home-recipe-foods-images"
     }
   ]
 }

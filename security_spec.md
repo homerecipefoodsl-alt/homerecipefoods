@@ -35,5 +35,5 @@
    - Optional audit fields `createdBy` (immutable once set) and `updatedBy` (set on create/update) are permitted and bounded in `isValidProduct(data)` and update diff allowlists.
 2. **Product & Catalog Media Storage (Cloudflare R2)**:
    - Firebase Storage (`getStorage`, `uploadBytes`, `getDownloadURL`) is completely removed from catalog/CMS uploads.
-   - Images upload through `/api/r2/upload` (bound to Worker R2 binding `PRODUCT_IMAGES` / bucket `home-recipe-product-images`), protected by verified Firebase ID Token + verified Firestore `/admins/{uid}` (or fallback `/rbac_roles/{email}`) catalog authority.
-   - Uploaded assets are served publicly via `/api/r2/file/{key}` (or configured `R2_PUBLIC_URL`) and cleaned up cleanly on rollback via `/api/r2/delete`.
+   - Images upload through `/api/media/upload` and `/api/admin/products/:productId/image` (bound to Worker R2 binding `PRODUCT_IMAGES` / bucket `home-recipe-foods-images`), protected by verified Firebase ID Token + verified Firestore `/admins/{uid}` (or fallback `/rbac_roles/{email}`) catalog authority.
+   - Uploaded assets are served publicly via `https://images.homerecipefoods.com.bd/{key}` (or local `/api/media/file/{key}` in dev) and removed safely after Firestore updates/deletions via `/api/media/delete` or `DELETE /api/admin/products/:productId/image`.

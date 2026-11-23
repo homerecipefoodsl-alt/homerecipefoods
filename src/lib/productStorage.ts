@@ -5,18 +5,22 @@ export const ALLOWED_PRODUCT_IMAGE_TYPES = [
   'image/jpg',
   'image/png',
   'image/webp',
+  'image/gif',
 ] as const;
 
 export const MAX_PRODUCT_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
 const OPTIMIZE_THRESHOLD_BYTES = 1200 * 1024; // ~1.2 MB
 const MAX_UPLOAD_DIMENSION = 1600;
 const UPLOAD_TIMEOUT_MS = 25000;
+const PRODUCTION_R2_IMAGE_HOST = 'images.homerecipefoods.com.bd';
 
 export type MediaUploadFolder = 'products' | 'categories' | 'media' | 'banners' | 'showrooms';
 
 export interface CatalogImageUploadResult {
   downloadUrl: string;
   storagePath: string;
+  imageUrl: string;
+  imageKey: string;
   fileName: string;
   sizeBytes: number;
 }
@@ -26,6 +30,8 @@ interface MediaUploadApiResponse {
   ok?: boolean;
   downloadUrl?: string;
   storagePath?: string;
+  imageUrl?: string;
+  imageKey?: string;
   fileName?: string;
   sizeBytes?: number;
   error?: string;
@@ -37,6 +43,26 @@ export function isForbiddenInlineImageUrl(url: string | null | undefined): boole
   if (typeof url !== 'string') return false;
   const normalized = url.trim().toLowerCase();
   return normalized.startsWith('data:') || normalized.startsWith('blob:');
+}
+
+export function isR2ImageUrl(url: string | null | undefined): boolean {
+  if (typeof url !== 'string') return false;
+  const raw = url.trim();
+  if (!raw || isForbiddenInlineImageUrl(raw)) return false;
+  if (raw.startsWith('/api/media/file/')) return true;
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase();
+    if (host === PRODUCTION_R2_IMAGE_HOST) {
+      return /^\/(products|categories|media|banners|showrooms)\//.test(parsed.pathname);
+    }
+    if (parsed.pathname.startsWith('/api/media/file/')) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 function sanitizeImageFileName(fileName: string): string {
@@ -59,10 +85,12 @@ function inferContentTypeFromFile(file: File): string {
   if (mime === 'image/jpg' || mime === 'image/jpeg') return 'image/jpeg';
   if (mime === 'image/png') return 'image/png';
   if (mime === 'image/webp') return 'image/webp';
+  if (mime === 'image/gif') return 'image/gif';
 
   const lower = file.name.trim().toLowerCase();
   if (/\.png$/.test(lower)) return 'image/png';
   if (/\.webp$/.test(lower)) return 'image/webp';
+  if (/\.gif$/.test(lower)) return 'image/gif';
   return 'image/jpeg';
 }
 
@@ -73,14 +101,14 @@ export function validateCatalogImageFile(file: File): string | null {
 
   const lowerName = file.name.trim().toLowerCase();
   const rawMime = file.type.trim().toLowerCase();
-  const validExtension = /\.(jpe?g|png|webp)$/.test(lowerName);
+  const validExtension = /\.(jpe?g|png|webp|gif)$/.test(lowerName);
   const validMime = ALLOWED_PRODUCT_IMAGE_TYPES.includes(
     rawMime as (typeof ALLOWED_PRODUCT_IMAGE_TYPES)[number]
   );
 
   // Reject non-image MIME types strictly even if renamed (e.g. document.pdf -> photo.jpg)
   if (rawMime ? !validMime : !validExtension) {
-    return 'অসমর্থিত ফাইল ফরম্যাট। শুধু JPG, PNG অথবা WEBP ছবি ব্যবহার করুন।';
+    return 'অসমর্থিত ফাইল ফরম্যাট। শুধু JPG, PNG, WEBP অথবা GIF ছবি ব্যবহার করুন।';
   }
 
   if (file.size <= 0) {
@@ -96,16 +124,20 @@ export function validateCatalogImageFile(file: File): string | null {
 }
 
 /**
- * Gently optimizes large images (> 1.2 MB) into a crisp File before uploading
- * to Cloudflare R2. Never generates data: URLs or embeds files in Firestore.
+ * Gently optimizes large raster images (> 1.2 MB) into a crisp File before uploading
+ * to Cloudflare R2. Preserves GIF animations untouched and never embeds files in Firestore.
  */
 async function optimizeImageFileForStorage(file: File): Promise<File> {
-  if (typeof document === 'undefined' || file.size <= OPTIMIZE_THRESHOLD_BYTES) {
+  const inferredMime = inferContentTypeFromFile(file);
+  if (
+    typeof document === 'undefined' ||
+    inferredMime === 'image/gif' ||
+    file.size <= OPTIMIZE_THRESHOLD_BYTES
+  ) {
     return file;
   }
 
-  const targetMime =
-    inferContentTypeFromFile(file) === 'image/png' ? 'image/webp' : inferContentTypeFromFile(file);
+  const targetMime = inferredMime === 'image/png' ? 'image/webp' : inferredMime;
 
   const objectUrl = URL.createObjectURL(file);
   try {
@@ -186,9 +218,9 @@ function mapUploadHttpError(status: number, body: MediaUploadApiResponse | null)
     case 413:
       return 'ছবির আকার অনেক বড়। সর্বোচ্চ ৫ এমবি আকারের ছবি আপলোড করা যাবে।';
     case 415:
-      return 'অসমর্থিত ফাইল ফরম্যাট। শুধু JPG, PNG অথবা WEBP ছবি ব্যবহার করুন।';
+      return 'অসমর্থিত ফাইল ফরম্যাট। শুধু JPG, PNG, WEBP অথবা GIF ছবি ব্যবহার করুন।';
     case 503:
-      return 'Cloudflare R2 বাকেট (home-recipe-product-images) এখনো Worker-এর PRODUCT_IMAGES বাইন্ডিংয়ে সংযুক্ত করা হয়নি।';
+      return 'Cloudflare R2 বাকেট (home-recipe-foods-images) এখনো Worker-এর PRODUCT_IMAGES বাইন্ডিংয়ে সংযুক্ত করা হয়নি।';
     default:
       return 'Cloudflare R2-তে ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে কিছুক্ষণ পর আবার চেষ্টা করুন।';
   }
@@ -250,7 +282,8 @@ function isValidHostedImageUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
-    if (parsed.hostname.toLowerCase().endsWith('.r2.cloudflarestorage.com')) return false;
+    const host = parsed.hostname.toLowerCase();
+    if (host.endsWith('.r2.cloudflarestorage.com') || host.endsWith('.r2.dev')) return false;
     return true;
   } catch {
     return false;
@@ -288,7 +321,7 @@ async function verifyUploadedImageAccessible(url: string): Promise<boolean> {
     }
   }
 
-  // Cross-origin R2_PUBLIC_URL: verify via browser Image loader (avoids false failures when public CDN omits CORS headers)
+  // Cross-origin R2 custom domain (images.homerecipefoods.com.bd): verify via browser Image loader
   if (typeof Image === 'undefined') return true;
   return new Promise<boolean>((resolve) => {
     const img = new Image();
@@ -313,6 +346,7 @@ export async function uploadCatalogImageToStorage(params: {
   folder: MediaUploadFolder;
   entityId: string;
   file: File;
+  isPrimary?: boolean;
   onProgress?: (percent: number) => void;
 }): Promise<CatalogImageUploadResult> {
   const validationError = validateCatalogImageFile(params.file);
@@ -348,6 +382,9 @@ export async function uploadCatalogImageToStorage(params: {
     entityId: safeId,
     filename: safeFile,
   });
+  if (params.isPrimary) {
+    query.set('isPrimary', 'true');
+  }
   const endpointUrl = `/api/media/upload?${query.toString()}`;
 
   let response = await sendBinaryUploadRequest({
@@ -377,8 +414,8 @@ export async function uploadCatalogImageToStorage(params: {
     throw new Error(mapUploadHttpError(response.status, response.body));
   }
 
-  const downloadUrl = (response.body.downloadUrl || '').trim();
-  const storagePath = (response.body.storagePath || '').trim();
+  const downloadUrl = (response.body.imageUrl || response.body.downloadUrl || '').trim();
+  const storagePath = (response.body.imageKey || response.body.storagePath || '').trim();
   if (!isValidHostedImageUrl(downloadUrl) || !storagePath) {
     throw new Error('ছবি আপলোডের পর বৈধ Cloudflare R2 লিংক পাওয়া যায়নি।');
   }
@@ -391,7 +428,7 @@ export async function uploadCatalogImageToStorage(params: {
       // Best-effort cleanup of unreachable upload
     }
     throw new Error(
-      'ছবি আপলোড হয়েছে কিন্তু পাবলিক URL থেকে লোড করা যাচ্ছে না। অনুগ্রহ করে R2 / Worker রাউট যাচাই করে আবার চেষ্টা করুন।'
+      'ছবি আপলোড হয়েছে কিন্তু পাবলিক URL থেকে লোড করা যাচ্ছে না। অনুগ্রহ করে R2 কাস্টম ডোমেইন ও Worker রাউট যাচাই করে আবার চেষ্টা করুন।'
     );
   }
 
@@ -399,6 +436,8 @@ export async function uploadCatalogImageToStorage(params: {
   return {
     downloadUrl,
     storagePath,
+    imageUrl: downloadUrl,
+    imageKey: storagePath,
     fileName: preparedFile.name,
     sizeBytes: response.body.sizeBytes || preparedFile.size,
   };
@@ -406,7 +445,9 @@ export async function uploadCatalogImageToStorage(params: {
 
 export async function deleteCatalogImageFromStorage(params: {
   storagePath?: string;
+  imageKey?: string;
   downloadUrl?: string;
+  imageUrl?: string;
 }): Promise<void> {
   if (!auth?.currentUser || !auth.currentUser.emailVerified) {
     throw new Error('ছবি মুছতে যাচাইকৃত অ্যাডমিন অ্যাকাউন্টে লগইন থাকতে হবে।');
@@ -420,8 +461,10 @@ export async function deleteCatalogImageFromStorage(params: {
       Authorization: `Bearer ${idToken}`,
     },
     body: JSON.stringify({
-      storagePath: params.storagePath,
-      downloadUrl: params.downloadUrl,
+      storagePath: params.imageKey || params.storagePath,
+      imageKey: params.imageKey || params.storagePath,
+      downloadUrl: params.imageUrl || params.downloadUrl,
+      imageUrl: params.imageUrl || params.downloadUrl,
     }),
   });
 

@@ -2,13 +2,13 @@
 
 Home Recipe Foods compiles to a static React + Vite single-page application (`dist/`) paired with a lightweight Cloudflare Worker (`worker/index.ts`) for `/api/*` routes (AI concierge via Gemini API, `/api/health`, `/robots.txt`, `/sitemap.xml`) and SPA routing fallback.
 
-All backend database and authentication remain connected directly to your existing Firebase project **`ai-studio-applet-webapp-e4b0f`** (Firestore DB: `ai-studio-8e160dd1-e90f-4eac-89d5-fbd11fce8ac3`), while product & catalog images are stored in **Cloudflare R2** (`home-recipe-product-images` via the `PRODUCT_IMAGES` Worker binding).
+All backend database and authentication remain connected directly to your existing Firebase project **`ai-studio-applet-webapp-e4b0f`** (Firestore DB: `ai-studio-8e160dd1-e90f-4eac-89d5-fbd11fce8ac3`), while product & catalog images are stored in **Cloudflare R2** (`home-recipe-foods-images` via the `PRODUCT_IMAGES` Worker binding) and served via **`https://images.homerecipefoods.com.bd`**.
 
 ---
 
 ## Architecture Overview
 
-- **Frontend Build Output**: `dist/` (built via `bun run build` or `npm run build`)
+- **Frontend Build Output**: `dist/` (built via `npm run build` or `bun run build`)
 - **Cloudflare Workers Static Assets**: Configured in `wrangler.jsonc` (`"name": "homerecipefoods"`) with `not_found_handling: "single-page-application"` so `/`, `/products`, `/about`, `/contact`, `/complaint`, `/admin`, `/mahmud`, and `/mahmud/dashboard` all serve cleanly without `_redirects` infinite-loop errors.
 - **Secret Isolation**: `FIREBASE_SERVICE_ACCOUNT_JSON` and `GEMINI_API_KEY` are stored **only** as Cloudflare Worker secrets (`wrangler secret put ...`) and never bundled into `dist/`.
 
@@ -30,19 +30,21 @@ VITE_FIREBASE_FIRESTORE_DATABASE_ID="ai-studio-8e160dd1-e90f-4eac-89d5-fbd11fce8
 
 ### 2. Build & Deploy (Cloudflare Workers Builds / GitHub CI)
 ```bash
-bun install --frozen-lockfile
-bun run build
+npm ci
+npm run build
 npx wrangler deploy
 ```
+(Or with Bun: `bun install --frozen-lockfile && bun run build && npx wrangler deploy`.)
 Verify that `dist/index.html` and `dist/assets/*` were generated cleanly (without `_redirects`).
 
-### 3. Create Cloudflare R2 Media Bucket (One-Time, Before Deploying)
+### 3. Cloudflare R2 Media Bucket & Custom Domain (One-Time)
 Product, category, and media images are stored in Cloudflare R2 via the `PRODUCT_IMAGES` binding in `wrangler.jsonc`:
-1. Open **Cloudflare Dashboard → R2 Object Storage → Create bucket**
-2. Name the bucket **`home-recipe-product-images`** (Location: Automatic) → **Create bucket**
+1. In **Cloudflare Dashboard → R2 Object Storage → `home-recipe-foods-images`** (already created in APAC)
+2. Under **Settings → Custom Domains**, ensure **`images.homerecipefoods.com.bd`** is connected & Active (`Public Development URL` *.r2.dev disabled)
+3. Under **Worker `homerecipefoods` → Settings → Bindings**, confirm R2 bucket binding **`PRODUCT_IMAGES`** → **`home-recipe-foods-images`**
 
 ### 4. Configure Secrets (One-Time)
-Update `"APP_URL"` in `wrangler.jsonc` if using a custom domain, then upload your Firebase Service Account JSON (for project `ai-studio-applet-webapp-e4b0f`) and Gemini API key:
+Upload your Firebase Service Account JSON (for project `ai-studio-applet-webapp-e4b0f`) and Gemini API key as Worker Secrets:
 
 ```bash
 npx wrangler login
@@ -60,19 +62,20 @@ If deploying via Cloudflare Pages Git integration:
 2. **Build output directory**: `dist`
 3. **Environment variables (Optional overrides)**:
    By default `firebase-applet-config.json` connects to `ai-studio-applet-webapp-e4b0f`. If overriding per environment, add `VITE_FIREBASE_*` variables from `FIREBASE_SETUP.md`.
-4. Add `functions/api/chat/ai.ts` or route `/api/*` to the included `worker/index.ts` if you want the AI Assistant endpoint active on Cloudflare Pages.
-5. Add your Cloudflare Pages domain (`*.pages.dev`) and custom domain to **Firebase Console → Authentication → Settings → Authorized domains**.
+4. Route `/api/*` to the included `worker/index.ts` so `/api/media/*`, `/api/admin/*`, and AI Assistant endpoints remain protected and bound to `PRODUCT_IMAGES`.
+5. Add your custom domain (`homerecipefoods.com.bd`, `www.homerecipefoods.com.bd`) to **Firebase Console → Authentication → Settings → Authorized domains**.
 
 ---
 
 ## Post-Deployment Verification Checklist
 
-After deploying, verify the following URLs on your live Cloudflare domain:
+After deploying, verify the following URLs on your live Cloudflare domain (`https://homerecipefoods.com.bd`):
 
-1. `GET /api/health` → Returns `{"ok":true,"brand":"Home Recipe Foods","runtime":"cloudflare-worker"}`
-2. `GET /` → Loads dynamic homepage storefront with Bengali + English content and zero console errors
-3. `GET /products` & direct refresh (`F5`) → Resolves cleanly to the Products catalog
-4. `GET /mahmud` → Displays **Home Recipe Foods — Super Admin / Admin Login** (Email/Username + Password only; no social login)
-5. `GET /mahmud/dashboard` while logged out → Immediately redirects to `/mahmud`
-6. `GET /admin` → Displays the branded 404 Not Found page
-7. `GET /robots.txt` → Confirms `Disallow: /mahmud`
+1. `GET /api/health` → Returns `{"ok":true,"brand":"Home Recipe Foods","runtime":"cloudflare-worker","r2MediaBound":true}`
+2. `GET /api/media/health` → Returns `{"ok":true,"provider":"cloudflare-r2","bindingName":"PRODUCT_IMAGES","bucketName":"home-recipe-foods-images","bindingActive":true}`
+3. `GET /` → Loads dynamic homepage storefront with Bengali + English content and zero console errors
+4. `GET /products` & direct refresh (`F5`) → Resolves cleanly to the Products catalog
+5. `GET /mahmud` → Displays **Home Recipe Foods — Super Admin / Admin Login** (Email/Username + Password only; no social login)
+6. `GET /mahmud/dashboard` while logged out → Immediately redirects to `/mahmud`
+7. `GET /admin` → Displays the branded 404 Not Found page
+8. `GET /robots.txt` → Confirms `Disallow: /mahmud`
