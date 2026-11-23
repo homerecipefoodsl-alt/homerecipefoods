@@ -1226,6 +1226,104 @@ export function AdminProductsPanel() {
       payload.masterKey = String(source.masterKey).slice(0, 240);
     }
 
+    const preserveCategorySlug =
+      typeof source.categorySlug === 'string' && source.categorySlug.trim()
+        ? source.categorySlug.trim().slice(0, 160)
+        : typeof existingData?.categorySlug === 'string' && existingData.categorySlug.trim()
+        ? existingData.categorySlug.trim().slice(0, 160)
+        : '';
+    if (preserveCategorySlug) {
+      payload.categorySlug = preserveCategorySlug;
+    }
+
+    const preserveIngredientsBn =
+      typeof source.ingredients_bn === 'string' && source.ingredients_bn.trim()
+        ? source.ingredients_bn.trim().slice(0, 600)
+        : typeof existingData?.ingredients_bn === 'string' && existingData.ingredients_bn.trim()
+        ? existingData.ingredients_bn.trim().slice(0, 600)
+        : '';
+    if (preserveIngredientsBn) {
+      payload.ingredients_bn = preserveIngredientsBn;
+    }
+
+    const preserveIngredientsEn =
+      typeof source.ingredients_en === 'string' && source.ingredients_en.trim()
+        ? source.ingredients_en.trim().slice(0, 600)
+        : typeof existingData?.ingredients_en === 'string' && existingData.ingredients_en.trim()
+        ? existingData.ingredients_en.trim().slice(0, 600)
+        : '';
+    if (preserveIngredientsEn) {
+      payload.ingredients_en = preserveIngredientsEn;
+    }
+
+    const rawRating =
+      typeof source.rating === 'number'
+        ? source.rating
+        : typeof existingData?.rating === 'number'
+        ? existingData.rating
+        : NaN;
+    if (Number.isFinite(rawRating) && rawRating >= 0 && rawRating <= 5) {
+      payload.rating = rawRating;
+    }
+
+    const rawStock =
+      typeof source.stock === 'number'
+        ? source.stock
+        : typeof existingData?.stock === 'number'
+        ? existingData.stock
+        : NaN;
+    if (Number.isInteger(rawStock) && rawStock >= 0 && rawStock <= 1000000) {
+      payload.stock = rawStock;
+    }
+
+    const preserveSku =
+      typeof source.sku === 'string' && source.sku.trim()
+        ? source.sku.trim().slice(0, 80)
+        : typeof existingData?.sku === 'string' && existingData.sku.trim()
+        ? existingData.sku.trim().slice(0, 80)
+        : '';
+    if (preserveSku) {
+      payload.sku = preserveSku;
+    }
+
+    const preserveSeoTitle =
+      typeof source.seoTitle === 'string' && source.seoTitle.trim()
+        ? source.seoTitle.trim().slice(0, 200)
+        : typeof existingData?.seoTitle === 'string' && existingData.seoTitle.trim()
+        ? existingData.seoTitle.trim().slice(0, 200)
+        : '';
+    if (preserveSeoTitle) {
+      payload.seoTitle = preserveSeoTitle;
+    }
+
+    const preserveSeoDesc =
+      typeof source.seoDescription === 'string' && source.seoDescription.trim()
+        ? source.seoDescription.trim().slice(0, 400)
+        : typeof existingData?.seoDescription === 'string' && existingData.seoDescription.trim()
+        ? existingData.seoDescription.trim().slice(0, 400)
+        : '';
+    if (preserveSeoDesc) {
+      payload.seoDescription = preserveSeoDesc;
+    }
+
+    const candidateSeoImg =
+      typeof source.seoImage === 'string' &&
+      source.seoImage.trim() &&
+      !isForbiddenInlineImageUrl(source.seoImage)
+        ? source.seoImage.trim()
+        : typeof existingData?.seoImage === 'string' &&
+          existingData.seoImage.trim() &&
+          !isForbiddenInlineImageUrl(existingData.seoImage)
+        ? existingData.seoImage.trim()
+        : '';
+    if (candidateSeoImg && candidateSeoImg.length <= 400000) {
+      payload.seoImage = candidateSeoImg;
+    }
+
+    if (source.deleted && existingData && 'archivedAt' in existingData && existingData.archivedAt !== undefined) {
+      payload.archivedAt = existingData.archivedAt;
+    }
+
     const hasValidOldPrice =
       typeof source.old_price === 'number' &&
       Number.isFinite(source.old_price) &&

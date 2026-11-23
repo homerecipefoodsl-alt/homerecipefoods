@@ -2,7 +2,7 @@
 
 Home Recipe Foods compiles to a static React + Vite single-page application (`dist/`) paired with a lightweight Cloudflare Worker (`worker/index.ts`) for `/api/*` routes (AI concierge via Gemini API, `/api/health`, `/robots.txt`, `/sitemap.xml`) and SPA routing fallback.
 
-All backend data, authentication, and storage remain connected directly to your existing Firebase project **`ai-studio-applet-webapp-e4b0f`** (Firestore DB: `ai-studio-8e160dd1-e90f-4eac-89d5-fbd11fce8ac3`).
+All backend database and authentication remain connected directly to your existing Firebase project **`ai-studio-applet-webapp-e4b0f`** (Firestore DB: `ai-studio-8e160dd1-e90f-4eac-89d5-fbd11fce8ac3`), while product & catalog images are stored in **Cloudflare R2** (`home-recipe-product-images` via the `PRODUCT_IMAGES` Worker binding).
 
 ---
 
@@ -23,7 +23,6 @@ All backend data, authentication, and storage remain connected directly to your 
 VITE_FIREBASE_API_KEY="AIzaSyDyYmuR3DdgwFpLQtAQpkkipq-blq9KsaU"
 VITE_FIREBASE_AUTH_DOMAIN="ai-studio-applet-webapp-e4b0f.firebaseapp.com"
 VITE_FIREBASE_PROJECT_ID="ai-studio-applet-webapp-e4b0f"
-VITE_FIREBASE_STORAGE_BUCKET="ai-studio-applet-webapp-e4b0f.firebasestorage.app"
 VITE_FIREBASE_MESSAGING_SENDER_ID="771532162522"
 VITE_FIREBASE_APP_ID="1:771532162522:web:8dfcecb6033932861cace3"
 VITE_FIREBASE_FIRESTORE_DATABASE_ID="ai-studio-8e160dd1-e90f-4eac-89d5-fbd11fce8ac3"

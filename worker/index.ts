@@ -22,6 +22,7 @@ import {
   deleteObjectFromR2S3,
   extractR2KeyFromInput,
   getObjectFromR2S3,
+  headObjectFromR2S3,
   inspectImageBytes,
   inspectR2S3Credentials,
   isAllowedMediaFolder,
@@ -48,6 +49,7 @@ interface R2ObjectBodyBinding {
 
 interface R2BucketBinding {
   get(key: string): Promise<R2ObjectBodyBinding | null>;
+  head?(key: string): Promise<Omit<R2ObjectBodyBinding, 'body'> | null>;
   put(
     key: string,
     value: ArrayBuffer | ArrayBufferView | string | ReadableStream | null,
@@ -140,7 +142,7 @@ const CORS_HEADERS: Record<string, string> = {
 
 function buildScopedCorsHeaders(corsOrigin: string | null): Record<string, string> {
   const headers: Record<string, string> = {
-    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, HEAD, POST, DELETE, OPTIONS',
     'Access-Control-Allow-Headers':
       'Content-Type, Authorization, X-Chat-Client-Id, X-Upload-Folder, X-Entity-Id, X-File-Name',
     Vary: 'Origin',
@@ -240,9 +242,9 @@ let cachedJwks: { keys: JwkKey[]; expiresAt: number } = {
   expiresAt: 0,
 };
 
-async function getFirebaseJwks(): Promise<JwkKey[]> {
+async function getFirebaseJwks(forceRefresh = false): Promise<JwkKey[]> {
   const now = Date.now();
-  if (now < cachedJwks.expiresAt && cachedJwks.keys.length > 0) {
+  if (!forceRefresh && now < cachedJwks.expiresAt && cachedJwks.keys.length > 0) {
     return cachedJwks.keys;
   }
   const resp = await fetch(FIREBASE_JWK_URL);
@@ -308,8 +310,12 @@ async function verifyFirebaseIdTokenWorker(
     throw new Error('Unsupported token algorithm');
   }
 
-  const jwks = await getFirebaseJwks();
-  const jwk = jwks.find((k) => k.kid === header.kid);
+  let jwks = await getFirebaseJwks();
+  let jwk = jwks.find((k) => k.kid === header.kid);
+  if (!jwk) {
+    jwks = await getFirebaseJwks(true);
+    jwk = jwks.find((k) => k.kid === header.kid);
+  }
   if (!jwk) {
     throw new Error('Unknown signing key');
   }
@@ -2119,9 +2125,15 @@ async function handleMediaFileGetWorker(
     return new Response('Not found', { status: 404 });
   }
 
+  const isHead = request.method === 'HEAD';
+
   if (env.PRODUCT_IMAGES) {
-    const obj = await env.PRODUCT_IMAGES.get(objectKey);
-    if (!obj || !obj.body) {
+    const obj =
+      isHead && typeof env.PRODUCT_IMAGES.head === 'function'
+        ? await env.PRODUCT_IMAGES.head(objectKey)
+        : await env.PRODUCT_IMAGES.get(objectKey);
+    const hasBody = obj && 'body' in obj ? Boolean(obj.body) : Boolean(obj);
+    if (!obj || (!isHead && !hasBody)) {
       return new Response('Image not found', { status: 404 });
     }
 
@@ -2151,30 +2163,50 @@ async function handleMediaFileGetWorker(
       'Cache-Control': 'public, max-age=31536000, immutable',
       'X-Content-Type-Options': 'nosniff',
     };
+    if (typeof obj.size === 'number' && Number.isFinite(obj.size)) {
+      headers['Content-Length'] = String(obj.size);
+    }
     if (etag) {
       headers.ETag = etag;
     }
 
-    return new Response(obj.body, { status: 200, headers });
+    if (isHead) {
+      return new Response(null, { status: 200, headers });
+    }
+
+    return new Response((obj as R2ObjectBodyBinding).body, { status: 200, headers });
   }
 
   const s3Creds = inspectR2S3Credentials(env);
   if (s3Creds.configured) {
-    const s3Resp = await getObjectFromR2S3({
-      creds: s3Creds.creds,
-      objectKey,
-    });
-    if (!s3Resp.ok || !s3Resp.body) {
+    const s3Resp = isHead
+      ? await headObjectFromR2S3({
+          creds: s3Creds.creds,
+          objectKey,
+        })
+      : await getObjectFromR2S3({
+          creds: s3Creds.creds,
+          objectKey,
+        });
+    if (!s3Resp.ok || (!isHead && !s3Resp.body)) {
       return new Response('Image not found', { status: s3Resp.status === 404 ? 404 : 502 });
     }
     const contentType = s3Resp.headers.get('content-type') || 'image/jpeg';
+    const headers: Record<string, string> = {
+      'Content-Type': contentType,
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff',
+    };
+    const contentLength = s3Resp.headers.get('content-length');
+    if (contentLength) {
+      headers['Content-Length'] = contentLength;
+    }
+    if (isHead) {
+      return new Response(null, { status: 200, headers });
+    }
     return new Response(s3Resp.body, {
       status: 200,
-      headers: {
-        'Content-Type': contentType,
-        'Cache-Control': 'public, max-age=31536000, immutable',
-        'X-Content-Type-Options': 'nosniff',
-      },
+      headers,
     });
   }
 
@@ -2194,7 +2226,7 @@ export default {
 
       if (url.pathname.startsWith('/api/media/file/')) {
         const rawKey = url.pathname.slice('/api/media/file/'.length);
-        if (request.method === 'GET') {
+        if (request.method === 'GET' || request.method === 'HEAD') {
           return handleMediaFileGetWorker(request, env, rawKey);
         }
         if (request.method === 'OPTIONS') {

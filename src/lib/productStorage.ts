@@ -257,6 +257,58 @@ function isValidHostedImageUrl(url: string): boolean {
   }
 }
 
+async function verifyUploadedImageAccessible(url: string): Promise<boolean> {
+  if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+    return true;
+  }
+
+  let isSameOrigin = url.startsWith('/');
+  if (!isSameOrigin) {
+    try {
+      isSameOrigin = new URL(url, window.location.origin).origin === window.location.origin;
+    } catch {
+      return false;
+    }
+  }
+
+  if (isSameOrigin) {
+    try {
+      const resp = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+      if (resp.ok) {
+        const mime = (resp.headers.get('content-type') || '').toLowerCase();
+        return !mime || mime.startsWith('image/');
+      }
+      if (resp.status === 405 || resp.status === 501) {
+        const getResp = await fetch(url, { method: 'GET', cache: 'no-store' });
+        return getResp.ok;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  // Cross-origin R2_PUBLIC_URL: verify via browser Image loader (avoids false failures when public CDN omits CORS headers)
+  if (typeof Image === 'undefined') return true;
+  return new Promise<boolean>((resolve) => {
+    const img = new Image();
+    const timer = window.setTimeout(() => {
+      img.onload = null;
+      img.onerror = null;
+      resolve(false);
+    }, 8000);
+    img.onload = () => {
+      window.clearTimeout(timer);
+      resolve(true);
+    };
+    img.onerror = () => {
+      window.clearTimeout(timer);
+      resolve(false);
+    };
+    img.src = url;
+  });
+}
+
 export async function uploadCatalogImageToStorage(params: {
   folder: MediaUploadFolder;
   entityId: string;
@@ -329,6 +381,18 @@ export async function uploadCatalogImageToStorage(params: {
   const storagePath = (response.body.storagePath || '').trim();
   if (!isValidHostedImageUrl(downloadUrl) || !storagePath) {
     throw new Error('ছবি আপলোডের পর বৈধ Cloudflare R2 লিংক পাওয়া যায়নি।');
+  }
+
+  const accessible = await verifyUploadedImageAccessible(downloadUrl);
+  if (!accessible) {
+    try {
+      await deleteCatalogImageFromStorage({ storagePath, downloadUrl });
+    } catch {
+      // Best-effort cleanup of unreachable upload
+    }
+    throw new Error(
+      'ছবি আপলোড হয়েছে কিন্তু পাবলিক URL থেকে লোড করা যাচ্ছে না। অনুগ্রহ করে R2 / Worker রাউট যাচাই করে আবার চেষ্টা করুন।'
+    );
   }
 
   params.onProgress?.(100);

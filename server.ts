@@ -24,6 +24,7 @@ import {
   deleteObjectFromR2S3,
   extractR2KeyFromInput,
   getObjectFromR2S3,
+  headObjectFromR2S3,
   inspectImageBytes,
   inspectR2S3Credentials,
   isAllowedMediaFolder,
@@ -538,13 +539,16 @@ async function verifyCatalogUploadAuthority(
       };
       const role = docData.fields?.role?.stringValue || '';
       const status = docData.fields?.status?.stringValue || '';
+      const hasExplicitPermissions = Boolean(docData.fields && 'permissions' in docData.fields);
       const permissions = (docData.fields?.permissions?.arrayValue?.values || [])
         .map((v) => v.stringValue || '')
         .filter(Boolean);
       const isActive = status === 'active';
       const hasCatalogPerm =
-        CATALOG_UPLOAD_STAFF_ROLES.has(role) ||
-        CATALOG_UPLOAD_PERMISSIONS.some((perm) => permissions.includes(perm));
+        role === 'super_admin' ||
+        (hasExplicitPermissions
+          ? CATALOG_UPLOAD_PERMISSIONS.some((perm) => permissions.includes(perm))
+          : CATALOG_UPLOAD_STAFF_ROLES.has(role));
       return { allowed: isActive && hasCatalogPerm, role: role || 'customer' };
     }
 
@@ -569,13 +573,16 @@ async function verifyCatalogUploadAuthority(
         const role = adminData.fields?.role?.stringValue || '';
         const status = adminData.fields?.status?.stringValue || 'active';
         const active = adminData.fields?.active?.booleanValue === true;
+        const hasExplicitPermissions = Boolean(adminData.fields && 'permissions' in adminData.fields);
         const permissions = (adminData.fields?.permissions?.arrayValue?.values || [])
           .map((v) => v.stringValue || '')
           .filter(Boolean);
         const isActive = active && status === 'active';
         const hasCatalogPerm =
-          CATALOG_UPLOAD_STAFF_ROLES.has(role) ||
-          CATALOG_UPLOAD_PERMISSIONS.some((perm) => permissions.includes(perm));
+          role === 'super_admin' ||
+          (hasExplicitPermissions
+            ? CATALOG_UPLOAD_PERMISSIONS.some((perm) => permissions.includes(perm))
+            : CATALOG_UPLOAD_STAFF_ROLES.has(role));
         return { allowed: isActive && hasCatalogPerm, role: role || 'customer' };
       }
     }
@@ -1767,6 +1774,52 @@ app.get('/api/media/health', (_req, res) => {
     bindingActive: false,
     s3FallbackActive: s3Configured,
   });
+});
+
+app.head('/api/media/file/*', async (req, res) => {
+  try {
+    const rawKey = req.path.replace(/^\/api\/media\/file\//, '');
+    const objectKey = validateR2ReadKey(rawKey);
+    if (!objectKey) {
+      res.status(404).end();
+      return;
+    }
+
+    const s3Creds = inspectR2S3Credentials(process.env);
+    if (!s3Creds.configured) {
+      res.status(503).end();
+      return;
+    }
+
+    const s3Resp = await headObjectFromR2S3({
+      creds: s3Creds.creds,
+      objectKey,
+    });
+    if (!s3Resp.ok) {
+      res.status(s3Resp.status === 404 ? 404 : 502).end();
+      return;
+    }
+
+    const rawMime = (s3Resp.headers.get('content-type') || '').toLowerCase();
+    const safeMime = (ALLOWED_MEDIA_MIME_TYPES as readonly string[]).includes(rawMime)
+      ? rawMime
+      : objectKey.endsWith('.png')
+      ? 'image/png'
+      : objectKey.endsWith('.webp')
+      ? 'image/webp'
+      : 'image/jpeg';
+
+    res.setHeader('Content-Type', safeMime);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    const contentLength = s3Resp.headers.get('content-length');
+    if (contentLength) {
+      res.setHeader('Content-Length', contentLength);
+    }
+    res.status(200).end();
+  } catch {
+    res.status(500).end();
+  }
 });
 
 app.get('/api/media/file/*', async (req, res) => {

@@ -8,7 +8,7 @@ This application connects strictly to the existing Firebase project **`ai-studio
 
 - **Web App**: Configured via `firebase-applet-config.json` (`appId: 1:771532162522:web:8dfcecb6033932861cace3`).
 - **Cloud Firestore**: Active on named database **`ai-studio-8e160dd1-e90f-4eac-89d5-fbd11fce8ac3`** with existing business collections preserved in place.
-- **Firebase Storage**: Configured with bucket `ai-studio-applet-webapp-e4b0f.firebasestorage.app` (stores HTTPS image URLs only; requires Firebase Console → Build → Storage → Get Started to be enabled).
+- **Product & Media Storage (Cloudflare R2)**: Handled exclusively via Cloudflare R2 bucket **`home-recipe-product-images`** (`PRODUCT_IMAGES` Worker binding). Firebase Storage is no longer required or used.
 - **Firebase Realtime Database**: Optional (not enabled by default; set `VITE_FIREBASE_DATABASE_URL` only if RTDB is enabled in the project).
 - **Firebase Authentication**: Required for `/mahmud` Admin Panel login (Email/Password provider).
 
@@ -49,7 +49,6 @@ The repository already includes `firebase-applet-config.json` wired to `ai-studi
 VITE_FIREBASE_API_KEY="AIzaSyDyYmuR3DdgwFpLQtAQpkkipq-blq9KsaU"
 VITE_FIREBASE_AUTH_DOMAIN="ai-studio-applet-webapp-e4b0f.firebaseapp.com"
 VITE_FIREBASE_PROJECT_ID="ai-studio-applet-webapp-e4b0f"
-VITE_FIREBASE_STORAGE_BUCKET="ai-studio-applet-webapp-e4b0f.firebasestorage.app"
 VITE_FIREBASE_MESSAGING_SENDER_ID="771532162522"
 VITE_FIREBASE_APP_ID="1:771532162522:web:8dfcecb6033932861cace3"
 VITE_FIREBASE_FIRESTORE_DATABASE_ID="ai-studio-8e160dd1-e90f-4eac-89d5-fbd11fce8ac3"

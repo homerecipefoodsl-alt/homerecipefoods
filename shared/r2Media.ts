@@ -245,6 +245,8 @@ export function resolveAllowedApiCorsOrigin(
     parsed.protocol === 'https:' &&
     (host === 'homerecipefoods.com' ||
       host === 'www.homerecipefoods.com' ||
+      host === 'homerecipefoods.com.bd' ||
+      host === 'www.homerecipefoods.com.bd' ||
       host.endsWith('.homerecipefoods-l.workers.dev') ||
       host.endsWith('.run.app'))
   ) {
@@ -368,7 +370,7 @@ async function hmacSha256Raw(
 }
 
 async function signR2S3Request(params: {
-  method: 'PUT' | 'GET' | 'DELETE';
+  method: 'PUT' | 'GET' | 'HEAD' | 'DELETE';
   creds: R2S3Credentials;
   objectKey: string;
   payloadHash: string;
@@ -501,6 +503,24 @@ export async function getObjectFromR2S3(params: {
 
   return fetch(signed.url, {
     method: 'GET',
+    headers: signed.headers,
+  });
+}
+
+export async function headObjectFromR2S3(params: {
+  creds: R2S3Credentials;
+  objectKey: string;
+}): Promise<Response> {
+  const emptyHash = await sha256Hex('');
+  const signed = await signR2S3Request({
+    method: 'HEAD',
+    creds: params.creds,
+    objectKey: params.objectKey,
+    payloadHash: emptyHash,
+  });
+
+  return fetch(signed.url, {
+    method: 'HEAD',
     headers: signed.headers,
   });
 }

@@ -32,6 +32,7 @@ import {
   requireDb,
 } from '../../lib/firebase';
 import {
+  deleteCatalogImageFromStorage,
   isForbiddenInlineImageUrl,
   uploadCatalogImageToStorage,
 } from '../../lib/productStorage';
@@ -288,6 +289,7 @@ export function AdminMediaLibraryPanel() {
     setUploading(true);
     setFeedback(null);
 
+    let uploadedStorage: { storagePath: string; downloadUrl: string } | null = null;
     try {
       const firestore = requireDb();
       const mediaId = `med_${Date.now()}`;
@@ -300,6 +302,10 @@ export function AdminMediaLibraryPanel() {
       if (!uploaded.downloadUrl || isForbiddenInlineImageUrl(uploaded.downloadUrl)) {
         throw new Error('ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে পরে আবার চেষ্টা করুন।');
       }
+      uploadedStorage = {
+        storagePath: uploaded.storagePath,
+        downloadUrl: uploaded.downloadUrl,
+      };
 
       const item: MediaItem = {
         id: mediaId,
@@ -317,9 +323,17 @@ export function AdminMediaLibraryPanel() {
         ...item,
         createdAt: serverTimestamp(),
       });
+      uploadedStorage = null;
       await logAdminActivity('upload', 'media', mediaId, file.name, `Folder=${uploadFolder}`);
       setFeedback({ type: 'success', message: 'ছবিটি সফলভাবে সংরক্ষণ হয়েছে।' });
     } catch (err) {
+      if (uploadedStorage) {
+        try {
+          await deleteCatalogImageFromStorage(uploadedStorage);
+        } catch {
+          // Best-effort cleanup of uncommitted R2 image
+        }
+      }
       console.error('[MediaLibrary] Upload failed:', err);
       const message =
         err instanceof Error && err.message
