@@ -991,9 +991,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             c.name === safeStr(docItem.categoryName)
         );
         const docImageCandidates = [
-          ...(Array.isArray(docItem.images) ? docItem.images : []),
-          docItem.image,
           docItem.imageUrl,
+          docItem.image,
+          ...(Array.isArray(docItem.images) ? docItem.images : []),
           ...(Array.isArray(seed?.images) ? seed.images : []),
         ].filter((u): u is string => typeof u === 'string' && u.trim().length > 0);
         const normalizedImages = Array.from(new Set(docImageCandidates));
@@ -1071,7 +1071,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             docItem.description_bn || docItem.description || seed?.description_bn || '',
           description_en:
             docItem.description_en || docItem.descriptionEn || seed?.description_en || '',
-          image: docItem.image || docItem.imageUrl || normalizedImages[0] || '',
+          image: docItem.imageUrl || docItem.image || normalizedImages[0] || '',
+          imageUrl: docItem.imageUrl || docItem.image || normalizedImages[0] || '',
+          imageKey: typeof docItem.imageKey === 'string' ? docItem.imageKey : '',
           images: normalizedImages,
           ingredients: Array.isArray(docItem.ingredients)
             ? docItem.ingredients

@@ -14,7 +14,7 @@ interface ProductCardProps {
 export function ProductCard({ product }: ProductCardProps) {
   const { categories, languageMode } = useStore();
   const [imgError, setImgError] = useState(false);
-  const rawImage = product.images?.[0] || product.image || product.imageUrl || '';
+  const rawImage = product.imageUrl || product.image || product.images?.[0] || '';
   const hasRealImage = Boolean(rawImage);
   const mainImage = hasRealImage ? resolveAssetUrl(rawImage) : '';
   const text = getProductText(product, categories);

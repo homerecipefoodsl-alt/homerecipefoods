@@ -5,12 +5,14 @@ import {
   Camera,
   Check,
   CheckCircle2,
+  Copy,
   Database,
   Edit3,
   Eye,
   EyeOff,
   ImageOff,
   ImagePlus,
+  Link2,
   Loader2,
   Plus,
   RefreshCw,
@@ -25,6 +27,7 @@ import {
   deleteField,
   doc,
   getDoc,
+  getDocFromServer,
   serverTimestamp,
   setDoc,
   updateDoc,
@@ -45,10 +48,12 @@ import {
 import { OperationType, auth, handleFirestoreError, requireDb } from '../../lib/firebase';
 import {
   deleteCatalogImageFromStorage,
+  extractR2ImageKey,
   isForbiddenInlineImageUrl,
   isR2ImageUrl,
   uploadCatalogImageToStorage,
   validateCatalogImageFile,
+  validateProductImageUrl,
 } from '../../lib/productStorage';
 import { formatBdtPrice, toSlug } from '../../lib/utils';
 import {
@@ -95,7 +100,7 @@ const ALLOWED_PRODUCT_KEYS = new Set<string>([
   'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
   'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
   'description', 'descriptionEn', 'description_bn', 'description_en',
-  'image', 'imageUrl', 'images', 'masterKey', 'rating', 'stock', 'sku',
+  'image', 'imageUrl', 'imageKey', 'images', 'masterKey', 'rating', 'stock', 'sku',
   'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
   'availability', 'importantNotes', 'featured', 'popular',
   'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt',
@@ -118,6 +123,7 @@ const PRODUCT_OPTIONAL_STRING_BOUNDS: ReadonlyArray<[string, number]> = [
   ['descriptionEn', 4000],
   ['description_bn', 4000],
   ['description_en', 4000],
+  ['imageKey', 320],
   ['masterKey', 240],
   ['sku', 80],
   ['ingredients_bn', 600],
@@ -858,7 +864,11 @@ function mapCatalogSaveError(
       safeDiag.operation && safeDiag.path ? `${safeDiag.operation} ${safeDiag.path}` : null,
       safeDiag.email ? `user:${safeDiag.email}` : null,
       `verified:${String(safeDiag.emailVerified)}/${String(safeDiag.tokenEmailVerified)}`,
-      safeDiag.rbacSource ? `rbac:${safeDiag.rbacSource}` : null,
+      safeDiag.rbacRole
+        ? `rbac:${safeDiag.rbacRole}(${safeDiag.rbacSource})`
+        : safeDiag.rbacSource
+        ? `rbac:${safeDiag.rbacSource}`
+        : null,
       safeDiag.preflightIssues.length > 0
         ? `preflight:${safeDiag.preflightIssues.slice(0, 3).join(';')}`
         : null,
@@ -866,8 +876,7 @@ function mapCatalogSaveError(
         ? `docIssues:${safeDiag.existingIssues.slice(0, 3).join(';')}`
         : null,
     ].filter(Boolean);
-    const diagSuffix =
-      import.meta.env.DEV && diagParts.length > 0 ? ` [${diagParts.join(' · ')}]` : '';
+    const diagSuffix = diagParts.length > 0 ? ` [${diagParts.join(' · ')}]` : '';
     return `Firestore সংরক্ষণের অনুমতি দেয়নি (permission-denied)। অ্যাডমিন অ্যাকাউন্ট যাচাই, Firestore Security Rules অথবা পণ্যের আবশ্যকীয় ফিল্ড যাচাই করে আবার চেষ্টা করুন।${diagSuffix}`;
   }
   if (rawCode === 'failed-precondition' || rawCode.endsWith('/failed-precondition')) {
@@ -902,9 +911,12 @@ function mapCatalogSaveError(
   return `সংরক্ষণে ত্রুটি হয়েছে (${rawCode || 'unknown'})। অনুগ্রহ করে তথ্যগুলো যাচাই করে আবার চেষ্টা করুন।`;
 }
 
-type EditorImageSlot =
-  | { kind: 'existing'; id: string; url: string }
-  | { kind: 'pending'; id: string; file: File; previewUrl: string };
+interface EditorImageSlot {
+  id: string;
+  url: string;
+  imageKey: string;
+  isSessionUpload?: boolean;
+}
 
 // ========================
 // 1. PRODUCT MANAGEMENT
@@ -928,7 +940,11 @@ export function AdminProductsPanel() {
   const canDelete = hasPermission('products_delete');
   const [editing, setEditing] = useState<Product | null>(null);
   const [editorImageSlots, setEditorImageSlots] = useState<EditorImageSlot[]>([]);
-  const pendingPreviewUrlsRef = useRef<Set<string>>(new Set());
+  const [primaryImageUrlInput, setPrimaryImageUrlInput] = useState('');
+  const [imageUrlCopied, setImageUrlCopied] = useState(false);
+  const [imagePreviewFailed, setImagePreviewFailed] = useState(false);
+  const sessionUploadedR2KeysRef = useRef<Set<string>>(new Set());
+  const copyTimerRef = useRef<number | null>(null);
   const [originalSnapshot, setOriginalSnapshot] = useState<string>('');
   const [isNew, setIsNew] = useState(false);
   const [search, setSearch] = useState('');
@@ -942,6 +958,7 @@ export function AdminProductsPanel() {
   const [editorUploadLabel, setEditorUploadLabel] = useState<string>('');
   const [editorUploadPreviewUrl, setEditorUploadPreviewUrl] = useState<string | null>(null);
   const [editorUploadError, setEditorUploadError] = useState<string | null>(null);
+  const [editorUploadSuccess, setEditorUploadSuccess] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deletingProduct, setDeletingProduct] = useState(false);
@@ -951,16 +968,19 @@ export function AdminProductsPanel() {
     message: string;
   } | null>(null);
 
-  const revokeAllPendingPreviews = () => {
-    for (const url of pendingPreviewUrlsRef.current) {
-      URL.revokeObjectURL(url);
-    }
-    pendingPreviewUrlsRef.current.clear();
+  const cleanupUncommittedSessionUploads = async () => {
+    const keys = Array.from(sessionUploadedR2KeysRef.current);
+    sessionUploadedR2KeysRef.current.clear();
+    if (keys.length === 0) return;
+    await Promise.allSettled(keys.map((key) => deleteCatalogImageFromStorage({ imageKey: key })));
   };
 
   useEffect(() => {
     return () => {
-      revokeAllPendingPreviews();
+      if (copyTimerRef.current) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      void cleanupUncommittedSessionUploads();
     };
   }, []);
 
@@ -1050,28 +1070,41 @@ export function AdminProductsPanel() {
   const [ingredientsText, setIngredientsText] = useState('');
   const [sizesText, setSizesText] = useState('');
 
-  const closeEditor = () => {
-    revokeAllPendingPreviews();
+  const closeEditor = (options?: { skipUncommittedCleanup?: boolean }) => {
+    if (!options?.skipUncommittedCleanup) {
+      void cleanupUncommittedSessionUploads();
+    } else {
+      sessionUploadedR2KeysRef.current.clear();
+    }
     setEditorImageSlots([]);
+    setPrimaryImageUrlInput('');
+    setImageUrlCopied(false);
+    setImagePreviewFailed(false);
     setEditing(null);
     setEditorUploadProgress(null);
     setEditorUploadLabel('');
     setEditorUploadPreviewUrl(null);
     setEditorUploadError(null);
+    setEditorUploadSuccess(null);
   };
 
   const openEditor = (prod: Product | null) => {
-    revokeAllPendingPreviews();
+    void cleanupUncommittedSessionUploads();
     if (prod) {
       const t = getProductText(prod, allCategories);
       const ing = (Array.isArray(prod.ingredients) ? prod.ingredients : []).join(', ');
       const sz = (Array.isArray(prod.sizes) ? prod.sizes : []).join(', ');
-      const normalizedImages =
-        Array.isArray(prod.images) && prod.images.length > 0
-          ? prod.images.filter(Boolean)
-          : prod.image
-          ? [prod.image]
-          : [];
+      const rawCandidates = [
+        prod.imageUrl,
+        prod.image,
+        ...(Array.isArray(prod.images) ? prod.images : []),
+      ].filter((u): u is string => typeof u === 'string' && u.trim().length > 0);
+      const normalizedImages = Array.from(new Set(rawCandidates));
+      const primaryImg = normalizedImages[0] || '';
+      const primaryKey =
+        (typeof prod.imageKey === 'string' && prod.imageKey.trim()) ||
+        extractR2ImageKey(primaryImg);
+
       const prepared: Product = {
         ...prod,
         name: t.nameBn,
@@ -1081,7 +1114,9 @@ export function AdminProductsPanel() {
         name_en: t.nameEn,
         unit: t.unit || prod.priceUnit,
         priceUnit: prod.priceUnit || t.unit || 'Piece',
-        image: prod.image || normalizedImages[0] || '',
+        image: primaryImg,
+        imageUrl: primaryImg,
+        imageKey: primaryKey,
         images: normalizedImages,
         shortDescription: t.shortDescriptionBn,
         shortDescriptionEn: t.shortDescriptionEn,
@@ -1098,11 +1133,14 @@ export function AdminProductsPanel() {
       setEditing(prepared);
       setEditorImageSlots(
         normalizedImages.slice(0, 6).map((url, idx) => ({
-          kind: 'existing',
-          id: `existing-${idx}-${url.slice(0, 16)}`,
+          id: `slot-${idx}-${url.slice(-16)}`,
           url,
+          imageKey:
+            (idx === 0 && typeof prod.imageKey === 'string' && prod.imageKey.trim()) ||
+            extractR2ImageKey(url),
         }))
       );
+      setPrimaryImageUrlInput(primaryImg);
       setIngredientsText(ing);
       setSizesText(sz);
       setOriginalSnapshot(serializeNonImageState(prepared, ing, sz));
@@ -1111,24 +1149,96 @@ export function AdminProductsPanel() {
       setIsNew(true);
       setEditing(fresh);
       setEditorImageSlots([]);
+      setPrimaryImageUrlInput('');
       setIngredientsText('');
       setSizesText('Regular');
       setOriginalSnapshot('');
     }
+    setImageUrlCopied(false);
+    setImagePreviewFailed(false);
     setEditorUploadProgress(null);
     setEditorUploadLabel('');
     setEditorUploadPreviewUrl(null);
     setEditorUploadError(null);
+    setEditorUploadSuccess(null);
     setFeedback(null);
   };
 
-  const queueProductImageFiles = (files: File[]) => {
-    if (!editing || files.length === 0) return;
+  const syncPrimarySlotFromUrl = (rawUrl: string) => {
+    setPrimaryImageUrlInput(rawUrl);
+    setImagePreviewFailed(false);
+    setImageUrlCopied(false);
+    setEditorUploadSuccess(null);
+    const trimmed = rawUrl.trim();
+    if (!editing) return;
 
-    const nonInlineSlotsCount = editorImageSlots.filter(
-      (slot) => slot.kind === 'pending' || !isForbiddenInlineImageUrl(slot.url)
-    ).length;
-    const remainingSlots = Math.max(0, 6 - nonInlineSlotsCount);
+    if (!trimmed) {
+      setEditorUploadError(null);
+      return;
+    }
+
+    const check = validateProductImageUrl(trimmed);
+    if (check.valid === false) {
+      setEditorUploadError(check.message);
+      return;
+    }
+
+    setEditorUploadError(null);
+    const cleanNonInline = editorImageSlots.filter(
+      (s) => !isForbiddenInlineImageUrl(s.url) && s.url !== check.normalizedUrl
+    );
+    const nextSlot: EditorImageSlot = {
+      id: `url-${Date.now()}`,
+      url: check.normalizedUrl,
+      imageKey: check.extractedKey,
+    };
+    const nextSlots = [nextSlot, ...cleanNonInline].slice(0, 6);
+    setEditorImageSlots(nextSlots);
+    const nextUrls = nextSlots.map((s) => s.url);
+    setEditing((prev) =>
+      prev
+        ? {
+            ...prev,
+            image: nextUrls[0] ?? '',
+            imageUrl: nextUrls[0] ?? '',
+            imageKey: nextSlots[0]?.imageKey || '',
+            images: nextUrls,
+          }
+        : null
+    );
+  };
+
+  const handleCopyPrimaryImageUrl = async () => {
+    const val = primaryImageUrlInput.trim();
+    if (!val) return;
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(val);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = val;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setImageUrlCopied(true);
+      if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = window.setTimeout(() => setImageUrlCopied(false), 2200);
+    } catch {
+      setEditorUploadError('ব্রাউজার ক্লিপবোর্ডে URL কপি করা যায়নি। অনুগ্রহ করে ম্যানুয়ালি কপি করুন।');
+    }
+  };
+
+  const uploadProductImageFilesNow = async (files: File[]) => {
+    if (!editing || files.length === 0 || editorUploadProgress !== null) return;
+
+    const cleanExistingSlots = editorImageSlots.filter(
+      (slot) => !isForbiddenInlineImageUrl(slot.url)
+    );
+    const remainingSlots = Math.max(0, 6 - cleanExistingSlots.length);
     if (remainingSlots <= 0) {
       setEditorUploadError('একটি পণ্যে সর্বোচ্চ ৬টি ছবি রাখা যাবে। নতুন ছবি যোগ করতে একটি ছবি সরান।');
       return;
@@ -1144,43 +1254,89 @@ export function AdminProductsPanel() {
     }
 
     setEditorUploadError(null);
+    setEditorUploadSuccess(null);
+    setImagePreviewFailed(false);
 
-    const newPendingSlots: EditorImageSlot[] = queue.map((file, idx) => {
-      const previewUrl = URL.createObjectURL(file);
-      pendingPreviewUrlsRef.current.add(previewUrl);
-      return {
-        kind: 'pending',
-        id: `pending-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 7)}`,
-        file,
-        previewUrl,
-      };
-    });
+    try {
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: isNew ? 'products_add' : 'products_edit',
+      });
 
-    // Drop legacy forbidden inline URLs once the admin provides valid replacement image(s)
-    const cleanExistingAndPending = editorImageSlots.filter(
-      (slot) => slot.kind === 'pending' || !isForbiddenInlineImageUrl(slot.url)
-    );
-    const nextSlots = [...newPendingSlots.reverse(), ...cleanExistingAndPending].slice(0, 6);
-    setEditorImageSlots(nextSlots);
+      const uploadedSlots: EditorImageSlot[] = [];
+      for (let i = 0; i < queue.length; i += 1) {
+        const file = queue[i];
+        const previewObjectUrl = URL.createObjectURL(file);
+        setEditorUploadPreviewUrl(previewObjectUrl);
+        setEditorUploadLabel(
+          queue.length > 1 ? `${file.name} (${i + 1}/${queue.length})` : file.name
+        );
+        setEditorUploadProgress(0);
 
-    const keptExisting = nextSlots
-      .filter((s): s is Extract<EditorImageSlot, { kind: 'existing' }> => s.kind === 'existing')
-      .map((s) => s.url);
-    setEditing((prev) =>
-      prev
-        ? {
-            ...prev,
-            image: keptExisting[0] ?? '',
-            images: keptExisting,
+        try {
+          const res = await uploadCatalogImageToStorage({
+            folder: 'products',
+            entityId: editing.id,
+            file,
+            isPrimary: i === 0,
+            onProgress: (pct) => setEditorUploadProgress(pct),
+          });
+          if (!res.imageUrl || !res.imageKey || isForbiddenInlineImageUrl(res.imageUrl)) {
+            throw new Error('ছবি আপলোড হয়েছে কিন্তু বৈধ Cloudflare R2 URL পাওয়া যায়নি।');
           }
-        : null
-    );
+          sessionUploadedR2KeysRef.current.add(res.imageKey);
+          uploadedSlots.push({
+            id: `r2-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 7)}`,
+            url: res.imageUrl,
+            imageKey: res.imageKey,
+            isSessionUpload: true,
+          });
+        } finally {
+          URL.revokeObjectURL(previewObjectUrl);
+        }
+      }
+
+      const nextSlots = [...uploadedSlots.reverse(), ...cleanExistingSlots].slice(0, 6);
+      const nextUrls = nextSlots.map((s) => s.url);
+      const primarySlot = nextSlots[0];
+
+      setEditorImageSlots(nextSlots);
+      if (primarySlot) {
+        setPrimaryImageUrlInput(primarySlot.url);
+      }
+      setEditing((prev) =>
+        prev
+          ? {
+              ...prev,
+              image: primarySlot?.url ?? '',
+              imageUrl: primarySlot?.url ?? '',
+              imageKey: primarySlot?.imageKey ?? '',
+              images: nextUrls,
+            }
+          : null
+      );
+      setEditorUploadSuccess(
+        `ছবি সফলভাবে Cloudflare R2-তে আপলোড হয়েছে (${uploadedSlots.length}টি)। স্থায়ীভাবে ডাটাবেসে সেভ করতে "সংরক্ষণ করুন" বাটনে ক্লিক করুন।`
+      );
+    } catch (err) {
+      setEditorUploadError(
+        err instanceof CatalogAuthError
+          ? mapCatalogSaveError(err, 'editor_image_upload_auth', { staffRole })
+          : err instanceof Error && err.message
+          ? err.message
+          : 'Cloudflare R2-তে ছবি আপলোড করা যায়নি। অনুগ্রহ করে আবার চেষ্টা করুন।'
+      );
+    } finally {
+      setEditorUploadProgress(null);
+      setEditorUploadLabel('');
+      setEditorUploadPreviewUrl(null);
+    }
   };
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files ? Array.from(e.target.files) : [];
     e.target.value = '';
-    queueProductImageFiles(fileList);
+    void uploadProductImageFilesNow(fileList);
   };
 
   const buildNormalizedProductPayload = (params: {
@@ -1241,6 +1397,11 @@ export function AdminProductsPanel() {
       ? source.availability
       : 'In Showroom';
     const primaryImg = cleanImages[0] ?? '';
+    const resolvedImageKey =
+      (primaryImg ? extractR2ImageKey(primaryImg) : '') ||
+      (primaryImg && typeof source.imageKey === 'string' && source.imageKey.trim()
+        ? source.imageKey.trim().slice(0, 320)
+        : '');
 
     const payload: Record<string, unknown> = {
       id: preservedValidId,
@@ -1275,6 +1436,7 @@ export function AdminProductsPanel() {
       description_en: fullDescEn,
       image: primaryImg,
       imageUrl: primaryImg,
+      imageKey: resolvedImageKey,
       images: cleanImages,
       ingredients: ingredientsList
         .map((s) => String(s).trim().slice(0, 120))
@@ -1611,6 +1773,7 @@ export function AdminProductsPanel() {
         const fastUpdatePayload = {
           image: uploadedResult.downloadUrl,
           imageUrl: uploadedResult.downloadUrl,
+          imageKey: uploadedResult.storagePath.slice(0, 320),
           images: nextImages,
           updatedBy: authSession.uid,
           updatedAt: serverTimestamp(),
@@ -1632,6 +1795,7 @@ export function AdminProductsPanel() {
           id: prod.id,
           image: uploadedResult.downloadUrl,
           imageUrl: uploadedResult.downloadUrl,
+          imageKey: uploadedResult.storagePath.slice(0, 320),
           images: nextImages,
         };
         const ingList = Array.isArray(mergedSource.ingredients) ? mergedSource.ingredients : [];
@@ -1673,9 +1837,15 @@ export function AdminProductsPanel() {
         }
       }
 
-      uploadedResult = null; // Persisted in Firestore; do not roll back
+      // Verify Firestore server state before marking upload committed & cleaning replaced R2 files
+      const verifiedSnap = await getDocFromServer(productRef).catch(() => getDoc(productRef));
+      if (!verifiedSnap.exists()) {
+        throw new Error('Firestore-এ ছবির তথ্য সংরক্ষণ যাচাই করা যায়নি।');
+      }
 
-      // Best-effort delete any R2 images that fell off the 6-image list AFTER Firestore commit succeeds
+      uploadedResult = null; // Persisted & verified in Firestore; do not roll back
+
+      // Best-effort delete any R2 images that fell off the 6-image list AFTER Firestore verification
       const evictedR2Urls = previousR2Urls.filter((oldUrl) => !nextImages.includes(oldUrl));
       if (evictedR2Urls.length > 0) {
         await Promise.allSettled(
@@ -1761,9 +1931,9 @@ export function AdminProductsPanel() {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editing || saving) return;
+    if (!editing || saving || editorUploadProgress !== null) return;
 
-    // 1. Product data validation BEFORE any R2 upload or Firestore write
+    // 1. Product data validation BEFORE any Firestore write
     const nameBn = editing.name.trim();
     const nameEn = editing.nameEn.trim();
     if (!nameBn) {
@@ -1795,19 +1965,28 @@ export function AdminProductsPanel() {
       return;
     }
 
-    const pendingSlots = editorImageSlots.filter(
-      (s): s is Extract<EditorImageSlot, { kind: 'pending' }> => s.kind === 'pending'
-    );
+    const trimmedPrimaryUrl = primaryImageUrlInput.trim();
+    let validatedManualUrl = '';
+    let validatedManualKey = '';
+    if (trimmedPrimaryUrl) {
+      const urlCheck = validateProductImageUrl(trimmedPrimaryUrl);
+      if (urlCheck.valid === false) {
+        setEditorUploadError(urlCheck.message);
+        setFeedback({ type: 'error', message: urlCheck.message });
+        return;
+      }
+      validatedManualUrl = urlCheck.normalizedUrl;
+      validatedManualKey = urlCheck.extractedKey;
+    }
+
     const hasLegacyInlineExistingOnly =
-      pendingSlots.length === 0 &&
-      editorImageSlots.some(
-        (s) => s.kind === 'existing' && isForbiddenInlineImageUrl(s.url)
-      );
+      !validatedManualUrl &&
+      editorImageSlots.some((s) => isForbiddenInlineImageUrl(s.url));
     if (hasLegacyInlineExistingOnly) {
       setFeedback({
         type: 'error',
         message:
-          'এই পণ্যটিতে পুরোনো ইনলাইন (base64) ছবি রয়েছে। অনুগ্রহ করে ছবিটি সরিয়ে নতুন JPG/PNG/WEBP/GIF ছবি নির্বাচন করুন অথবা ছবিটি তালিকা থেকে রিমুভ করে সংরক্ষণ করুন।',
+          'এই পণ্যটিতে পুরোনো ইনলাইন (base64) ছবি রয়েছে। অনুগ্রহ করে ছবিটি সরিয়ে নতুন JPG/PNG/WEBP/GIF ছবি আপলোড করুন অথবা ছবিটি তালিকা থেকে রিমুভ করে সংরক্ষণ করুন।',
       });
       return;
     }
@@ -1820,8 +1999,6 @@ export function AdminProductsPanel() {
     let existingIssues: string[] = [];
     const preflightIssues: string[] = [];
     let operationLabel = isNew ? 'CREATE' : 'UPDATE';
-    let failedDuringImageUpload = false;
-    const uploadedR2Results: Array<{ slotId: string; downloadUrl: string; storagePath: string }> = [];
 
     try {
       // 2. Firebase Auth + Admin authorization verification
@@ -1847,60 +2024,22 @@ export function AdminProductsPanel() {
         });
       }
 
-      // 3. R2 image upload (ONLY if new pending image(s) were selected)
-      if (pendingSlots.length > 0) {
-        for (let i = 0; i < pendingSlots.length; i += 1) {
-          const slot = pendingSlots[i];
-          const slotIndex = editorImageSlots.findIndex((s) => s.id === slot.id);
-          setEditorUploadPreviewUrl(slot.previewUrl);
-          setEditorUploadLabel(
-            pendingSlots.length > 1
-              ? `${slot.file.name} (${i + 1}/${pendingSlots.length})`
-              : slot.file.name
-          );
-          setEditorUploadProgress(0);
-
-          try {
-            const res = await uploadCatalogImageToStorage({
-              folder: 'products',
-              entityId: editing.id,
-              file: slot.file,
-              isPrimary: slotIndex === 0,
-              onProgress: (pct) => setEditorUploadProgress(pct),
-            });
-            if (!res.downloadUrl || isForbiddenInlineImageUrl(res.downloadUrl)) {
-              throw new Error('ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে পরে আবার চেষ্টা করুন।');
-            }
-            uploadedR2Results.push({
-              slotId: slot.id,
-              downloadUrl: res.downloadUrl,
-              storagePath: res.storagePath,
-            });
-          } catch (uploadErr) {
-            failedDuringImageUpload = true;
-            throw uploadErr;
-          }
-        }
-      }
-
-      // 4. Build final image list (preserve existing URLs unchanged when no new image is given)
-      const uploadedUrlBySlot = new Map(
-        uploadedR2Results.map((item) => [item.slotId, item.downloadUrl])
-      );
-      const rawOrderedUrls: string[] = [];
-      for (const slot of editorImageSlots) {
-        if (slot.kind === 'pending') {
-          const uploadedUrl = uploadedUrlBySlot.get(slot.id);
-          if (uploadedUrl) rawOrderedUrls.push(uploadedUrl);
-        } else if (!isForbiddenInlineImageUrl(slot.url)) {
-          rawOrderedUrls.push(slot.url);
-        }
-      }
+      // 3. Build final image list (prioritizing validated primary Image URL input + gallery slots)
+      const slotUrls = editorImageSlots
+        .filter((slot) => !isForbiddenInlineImageUrl(slot.url))
+        .map((slot) => slot.url);
+      const rawOrderedUrls = validatedManualUrl
+        ? [validatedManualUrl, ...slotUrls.filter((u) => u !== validatedManualUrl)]
+        : trimmedPrimaryUrl === '' && editorImageSlots.length === 1 && slotUrls.length === 1
+        ? []
+        : slotUrls;
       const nextImages = sanitizeStoredImageUrls(rawOrderedUrls);
       const primaryImage = nextImages[0] ?? '';
+      const primaryImageKey = primaryImage
+        ? validatedManualKey || extractR2ImageKey(primaryImage) || ''
+        : '';
 
-      // 5. Firestore Product create/update
-      // Safe image-only fast update ONLY when existing Firestore doc already satisfies complete schema
+      // 4. Firestore Product create/update
       if (
         !isNew &&
         existingSnap.exists() &&
@@ -1911,6 +2050,7 @@ export function AdminProductsPanel() {
         const fastUpdatePayload = {
           image: primaryImage,
           imageUrl: primaryImage,
+          imageKey: primaryImageKey,
           images: nextImages,
           updatedBy: authSession.uid,
           updatedAt: serverTimestamp(),
@@ -1941,6 +2081,7 @@ export function AdminProductsPanel() {
               ...editing,
               image: primaryImage,
               imageUrl: primaryImage,
+              imageKey: primaryImageKey,
               images: nextImages,
             },
             ingredientsList: ingredients,
@@ -1970,6 +2111,7 @@ export function AdminProductsPanel() {
               ...editing,
               image: primaryImage,
               imageUrl: primaryImage,
+              imageKey: primaryImageKey,
               images: nextImages,
             },
             ingredientsList: ingredients,
@@ -1981,23 +2123,36 @@ export function AdminProductsPanel() {
         }
       }
 
-      // Commit succeeded in Firestore; do NOT roll back newly uploaded R2 images
-      const committedOperation = !existingSnap.exists() ? 'create' : 'update';
-      uploadedR2Results.length = 0;
+      // 5. Verify Firestore write persisted before cleaning replaced R2 files
+      const verifiedSnap = await getDocFromServer(productRef).catch(() => getDoc(productRef));
+      if (!verifiedSnap.exists()) {
+        throw new Error('Firestore-এ পণ্য সংরক্ষণ যাচাই করা যায়নি।');
+      }
 
-      // Safe cleanup: delete ONLY replaced/removed old R2 images AFTER Firestore commit succeeded
-      // (Legacy Firebase Storage URLs and bundled assets are never touched)
+      // Identify any session-uploaded R2 keys that were NOT saved into nextImages (e.g., user uploaded A then replaced with B before Save)
+      const retainedR2Keys = new Set(nextImages.map((u) => extractR2ImageKey(u)).filter(Boolean));
+      const discardedSessionKeys = Array.from(sessionUploadedR2KeysRef.current).filter(
+        (key) => !retainedR2Keys.has(key)
+      );
+      sessionUploadedR2KeysRef.current.clear();
+
+      // Safe cleanup: delete replaced/removed old R2 images + discarded session uploads ONLY AFTER Firestore verify succeeds
+      // (Legacy Firebase Storage URLs and external HTTPS URLs are never touched)
       const replacedOrRemovedR2Urls = previousR2Urls.filter(
         (oldUrl) => !nextImages.includes(oldUrl)
       );
-      if (replacedOrRemovedR2Urls.length > 0) {
-        await Promise.allSettled(
-          replacedOrRemovedR2Urls.map((oldUrl) =>
+      if (replacedOrRemovedR2Urls.length > 0 || discardedSessionKeys.length > 0) {
+        await Promise.allSettled([
+          ...replacedOrRemovedR2Urls.map((oldUrl) =>
             deleteCatalogImageFromStorage({ imageUrl: oldUrl })
-          )
-        );
+          ),
+          ...discardedSessionKeys.map((key) =>
+            deleteCatalogImageFromStorage({ imageKey: key })
+          ),
+        ]);
       }
 
+      const committedOperation = !existingSnap.exists() ? 'create' : 'update';
       try {
         await logAdminActivity(
           committedOperation,
@@ -2010,22 +2165,10 @@ export function AdminProductsPanel() {
         // Non-blocking audit log
       }
 
-      // 6. Save Success only after real Firestore write completes
-      closeEditor();
+      // 6. Save Success only after real Firestore write & verification complete
+      closeEditor({ skipUncommittedCleanup: true });
       setFeedback({ type: 'success', message: 'পণ্য সফলভাবে সংরক্ষণ হয়েছে।' });
     } catch (err) {
-      // Clean up any newly uploaded R2 objects from this failed save attempt
-      if (uploadedR2Results.length > 0) {
-        await Promise.allSettled(
-          uploadedR2Results.map((item) =>
-            deleteCatalogImageFromStorage({
-              storagePath: item.storagePath,
-              downloadUrl: item.downloadUrl,
-            })
-          )
-        );
-      }
-
       const mappedMessage = mapCatalogSaveError(err, 'product_save', {
         path: `products/${editing.id}`,
         operation: operationLabel,
@@ -2035,9 +2178,6 @@ export function AdminProductsPanel() {
         authSession,
       });
 
-      if (failedDuringImageUpload) {
-        setEditorUploadError(mappedMessage);
-      }
       setFeedback({
         type: 'error',
         message: mappedMessage,
@@ -2050,9 +2190,6 @@ export function AdminProductsPanel() {
         }
       }
     } finally {
-      setEditorUploadProgress(null);
-      setEditorUploadLabel('');
-      setEditorUploadPreviewUrl(null);
       setSaving(false);
     }
   };
@@ -2368,7 +2505,9 @@ export function AdminProductsPanel() {
       if (filterMode === 'hidden' && (p.deleted || p.visible !== false)) return false;
       if (filterMode === 'archived' && !p.deleted) return false;
       if (selectedCategoryFilter !== 'all' && p.category !== selectedCategoryFilter) return false;
-      const hasImage = Boolean(p.image || (Array.isArray(p.images) && p.images.length > 0));
+      const hasImage = Boolean(
+        p.imageUrl || p.image || (Array.isArray(p.images) && p.images.length > 0)
+      );
       if (missingImageOnly && hasImage) return false;
 
       if (!q) return true;
@@ -2496,7 +2635,7 @@ export function AdminProductsPanel() {
             </h3>
             <button
               type="button"
-              onClick={closeEditor}
+              onClick={() => closeEditor()}
               className="cursor-pointer rounded-lg p-1.5 text-[#78716C] hover:bg-[#F5F4F0]"
             >
               <X className="h-4 w-4" />
@@ -2913,13 +3052,15 @@ export function AdminProductsPanel() {
               </div>
             </div>
 
-            {/* Product Images */}
-            <div className="sm:col-span-2 lg:col-span-3 rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-4">
+            {/* Product Images & R2 URL Manager */}
+            <div className="sm:col-span-2 lg:col-span-3 rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-4 space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <p className="text-xs font-bold text-[#1C1917]">পণ্যের ছবি (Cloudflare R2)</p>
+                  <p className="text-xs font-bold text-[#1C1917]">
+                    পণ্যের ছবি ও URL ব্যবস্থাপনা (Cloudflare R2)
+                  </p>
                   <p className="text-[11px] text-[#57534E]">
-                    JPG, JPEG, PNG, WEBP বা GIF ফরম্যাট · সর্বোচ্চ ৫ এমবি (সর্বোচ্চ ৬টি ছবি)। সংরক্ষণ বাটনে চাপ দিলে ছবি Cloudflare R2-তে আপলোড হয়ে ডাটাবেসে সেভ হবে।
+                    JPG, PNG, WEBP বা GIF ফাইল নির্বাচন/ড্র্যাগ করুন (সরাসরি R2-তে আপলোড হয়ে নিচের Image URL ঘরে স্বয়ংক্রিয়ভাবে যুক্ত হবে), অথবা বাহ্যিক HTTPS ছবির লিংক দিন।
                   </p>
                 </div>
                 <span className="font-mono text-[11px] font-semibold text-[#57534E]">
@@ -2927,26 +3068,9 @@ export function AdminProductsPanel() {
                 </span>
               </div>
 
-              {editorUploadError && (
-                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-800">
-                  <div className="flex items-start gap-2">
-                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                    <span>{editorUploadError}</span>
-                  </div>
-                  {editorImageSlots.some((s) => s.kind === 'pending') && !saving && (
-                    <button
-                      type="submit"
-                      className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-red-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-red-800 hover:bg-red-100"
-                    >
-                      <RefreshCw className="h-3 w-3" />
-                      <span>আবার চেষ্টা করুন</span>
-                    </button>
-                  )}
-                </div>
-              )}
-
+              {/* Upload Progress */}
               {editorUploadProgress !== null && (
-                <div className="mt-3 flex items-center gap-3 rounded-lg border border-[#E7E5E4] bg-white p-3">
+                <div className="flex items-center gap-3 rounded-lg border border-[#E7E5E4] bg-white p-3">
                   {editorUploadPreviewUrl && (
                     <img
                       src={editorUploadPreviewUrl}
@@ -2961,7 +3085,7 @@ export function AdminProductsPanel() {
                         <span className="truncate">
                           {editorUploadProgress === 0
                             ? `প্রস্তুত হচ্ছে: ${editorUploadLabel}`
-                            : `R2-তে আপলোড হচ্ছে: ${editorUploadLabel}`}
+                            : `Cloudflare R2-তে আপলোড হচ্ছে: ${editorUploadLabel}`}
                         </span>
                       </span>
                       <span className="font-mono tabular-nums text-[#DC1F26]">
@@ -2978,12 +3102,136 @@ export function AdminProductsPanel() {
                 </div>
               )}
 
-              <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              {/* Upload Success / Failure Banners */}
+              {editorUploadSuccess && (
+                <div className="flex items-start gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-800">
+                  <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>{editorUploadSuccess}</span>
+                </div>
+              )}
+
+              {editorUploadError && (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-800">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>{editorUploadError}</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Primary Preview + Image URL Input & Copy URL */}
+              {(() => {
+                const trimmedUrl = primaryImageUrlInput.trim();
+                const urlCheck = trimmedUrl ? validateProductImageUrl(trimmedUrl) : null;
+                const activePrimaryKey =
+                  (urlCheck && urlCheck.valid ? urlCheck.extractedKey : '') ||
+                  editing.imageKey ||
+                  '';
+                return (
+                  <div className="grid grid-cols-1 gap-4 rounded-xl border border-[#E7E5E4] bg-white p-3.5 md:grid-cols-12">
+                    <div className="md:col-span-4">
+                      <p className="mb-1.5 text-[11px] font-semibold text-[#57534E]">
+                        প্রধান ছবির প্রিভিউ (Preview)
+                      </p>
+                      <div className="relative aspect-[4/3] w-full overflow-hidden rounded-lg border border-[#E7E5E4] bg-[#F5F4F0]">
+                        {trimmedUrl && !imagePreviewFailed && !isForbiddenInlineImageUrl(trimmedUrl) ? (
+                          <img
+                            src={resolveAssetUrl(trimmedUrl)}
+                            alt={editing.nameEn || editing.name || 'Product preview'}
+                            onError={() => setImagePreviewFailed(true)}
+                            className="h-full w-full object-cover"
+                          />
+                        ) : (
+                          <div className="flex h-full w-full flex-col items-center justify-center gap-1 p-3 text-center text-[#78716C]">
+                            <ImageOff className="h-5 w-5" />
+                            <span className="text-[11px]">
+                              {imagePreviewFailed
+                                ? 'URL থেকে ছবি লোড করা যায়নি'
+                                : 'কোনো ছবি নির্বাচন করা হয়নি'}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="md:col-span-8 flex flex-col justify-between gap-3">
+                      <div>
+                        <label
+                          htmlFor="product-primary-image-url"
+                          className="mb-1 flex items-center justify-between gap-2 text-xs font-semibold text-[#1C1917]"
+                        >
+                          <span className="inline-flex items-center gap-1.5">
+                            <Link2 className="h-3.5 w-3.5 text-[#DC1F26]" />
+                            <span>Product Image URL (স্বয়ংক্রিয় R2 অথবা বাহ্যিক HTTPS লিংক)</span>
+                          </span>
+                          {urlCheck && (
+                            <span
+                              className={`text-[10px] font-semibold ${
+                                urlCheck.valid ? 'text-emerald-700' : 'text-red-700'
+                              }`}
+                            >
+                              {urlCheck.valid
+                                ? urlCheck.isR2
+                                  ? '✓ Cloudflare R2 যাচাইকৃত'
+                                  : '✓ বৈধ HTTPS URL'
+                                : '✕ অবৈধ URL'}
+                            </span>
+                          )}
+                        </label>
+                        <div className="flex flex-wrap gap-2">
+                          <input
+                            id="product-primary-image-url"
+                            type="url"
+                            value={primaryImageUrlInput}
+                            onChange={(e) => syncPrimarySlotFromUrl(e.target.value)}
+                            disabled={saving || editorUploadProgress !== null}
+                            placeholder="https://images.homerecipefoods.com.bd/products/..."
+                            className={`min-w-0 flex-1 rounded-lg border px-3 py-2 font-mono text-xs focus:outline-none ${
+                              urlCheck && !urlCheck.valid
+                                ? 'border-red-400 bg-red-50/40 focus:border-red-600'
+                                : 'border-[#D6D3D1] bg-[#FAFAF8] focus:border-[#DC1F26]'
+                            }`}
+                          />
+                          <button
+                            type="button"
+                            disabled={!trimmedUrl}
+                            onClick={() => void handleCopyPrimaryImageUrl()}
+                            className="inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-[#D6D3D1] bg-white px-3 py-2 text-xs font-semibold text-[#1C1917] transition-colors hover:border-[#1C1917] disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {imageUrlCopied ? (
+                              <>
+                                <Check className="h-3.5 w-3.5 text-emerald-700" />
+                                <span className="text-emerald-700">কপি হয়েছে</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="h-3.5 w-3.5" />
+                                <span>URL কপি</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                        <p className="mt-1.5 text-[11px] text-[#57534E]">
+                          ফাইল আপলোড করলে এই ঘরে R2 URL স্বয়ংক্রিয়ভাবে বসে যাবে—আলাদাভাবে URL লেখা বাধ্যতামূলক নয়।
+                        </p>
+                      </div>
+
+                      {activePrimaryKey && (
+                        <div className="rounded-lg border border-[#E7E5E4] bg-[#FAFAF8] px-3 py-1.5 text-[11px] text-[#57534E]">
+                          <span className="font-semibold text-[#1C1917]">R2 Object Key: </span>
+                          <span className="font-mono break-all">{activePrimaryKey}</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Gallery Thumbnails + Dropzone Upload */}
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
                 {editorImageSlots.map((slot, i) => {
-                  const previewSrc =
-                    slot.kind === 'pending' ? slot.previewUrl : resolveAssetUrl(slot.url);
-                  const isLegacyInline =
-                    slot.kind === 'existing' && isForbiddenInlineImageUrl(slot.url);
+                  const previewSrc = resolveAssetUrl(slot.url);
+                  const isLegacyInline = isForbiddenInlineImageUrl(slot.url);
                   return (
                     <div
                       key={slot.id}
@@ -3006,9 +3254,9 @@ export function AdminProductsPanel() {
                             প্রধান ছবি
                           </span>
                         )}
-                        {slot.kind === 'pending' && (
-                          <span className="absolute inset-x-1.5 bottom-1.5 rounded bg-[#DC1F26]/90 px-1.5 py-0.5 text-center text-[9px] font-bold text-white">
-                            সেভ করলে আপলোড হবে
+                        {slot.isSessionUpload && (
+                          <span className="absolute inset-x-1.5 bottom-1.5 rounded bg-emerald-700/90 px-1.5 py-0.5 text-center text-[9px] font-bold text-white">
+                            R2 আপলোডকৃত · সেভ বাকি
                           </span>
                         )}
                         {isLegacyInline && (
@@ -3018,25 +3266,28 @@ export function AdminProductsPanel() {
                         )}
                         <button
                           type="button"
-                          disabled={saving}
+                          disabled={saving || editorUploadProgress !== null}
                           title="তালিকা থেকে সরান"
                           onClick={() => {
-                            if (slot.kind === 'pending') {
-                              URL.revokeObjectURL(slot.previewUrl);
-                              pendingPreviewUrlsRef.current.delete(slot.previewUrl);
+                            if (slot.isSessionUpload && slot.imageKey) {
+                              sessionUploadedR2KeysRef.current.delete(slot.imageKey);
+                              void deleteCatalogImageFromStorage({
+                                imageKey: slot.imageKey,
+                                imageUrl: slot.url,
+                              }).catch(() => undefined);
                             }
                             const nextSlots = editorImageSlots.filter((_, idx) => idx !== i);
                             setEditorImageSlots(nextSlots);
-                            const keptUrls = nextSlots
-                              .filter(
-                                (s): s is Extract<EditorImageSlot, { kind: 'existing' }> =>
-                                  s.kind === 'existing'
-                              )
-                              .map((s) => s.url);
+                            const nextUrls = nextSlots.map((s) => s.url);
+                            const nextPrimary = nextSlots[0];
+                            setPrimaryImageUrlInput(nextPrimary?.url ?? '');
+                            setImagePreviewFailed(false);
                             setEditing({
                               ...editing,
-                              image: keptUrls[0] ?? '',
-                              images: keptUrls,
+                              image: nextPrimary?.url ?? '',
+                              imageUrl: nextPrimary?.url ?? '',
+                              imageKey: nextPrimary?.imageKey ?? '',
+                              images: nextUrls,
                             });
                           }}
                           className="absolute right-1.5 top-1.5 cursor-pointer rounded-full bg-black/75 p-1 text-white transition-colors hover:bg-[#DC1F26] disabled:opacity-40"
@@ -3047,23 +3298,23 @@ export function AdminProductsPanel() {
                       {i > 0 && (
                         <button
                           type="button"
-                          disabled={saving}
+                          disabled={saving || editorUploadProgress !== null}
                           onClick={() => {
                             const reordered = [
                               slot,
                               ...editorImageSlots.filter((_, idx) => idx !== i),
                             ];
                             setEditorImageSlots(reordered);
-                            const keptUrls = reordered
-                              .filter(
-                                (s): s is Extract<EditorImageSlot, { kind: 'existing' }> =>
-                                  s.kind === 'existing'
-                              )
-                              .map((s) => s.url);
+                            const nextUrls = reordered.map((s) => s.url);
+                            const nextPrimary = reordered[0];
+                            setPrimaryImageUrlInput(nextPrimary?.url ?? '');
+                            setImagePreviewFailed(false);
                             setEditing({
                               ...editing,
-                              image: keptUrls[0] ?? '',
-                              images: keptUrls,
+                              image: nextPrimary?.url ?? '',
+                              imageUrl: nextPrimary?.url ?? '',
+                              imageKey: nextPrimary?.imageKey ?? '',
+                              images: nextUrls,
                             });
                           }}
                           className="cursor-pointer border-t border-[#F5F4F0] bg-white px-2 py-1 text-[10px] font-semibold text-[#57534E] hover:bg-[#FAFAF8] hover:text-[#DC1F26] disabled:opacity-40"
@@ -3085,11 +3336,11 @@ export function AdminProductsPanel() {
                     onDrop={(ev) => {
                       ev.preventDefault();
                       setDragActive(false);
-                      if (saving) return;
+                      if (saving || editorUploadProgress !== null) return;
                       const dropped = ev.dataTransfer.files
                         ? Array.from(ev.dataTransfer.files)
                         : [];
-                      queueProductImageFiles(dropped);
+                      void uploadProductImageFilesNow(dropped);
                     }}
                     className={`flex aspect-[4/3] cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border-2 border-dashed px-3 text-center text-[11px] font-semibold transition-colors ${
                       dragActive
@@ -3103,7 +3354,7 @@ export function AdminProductsPanel() {
                       <ImagePlus className="h-5 w-5 text-[#DC1F26]" />
                     )}
                     <span>
-                      {editorUploadProgress !== null ? 'আপলোড হচ্ছে...' : 'ছবি যোগ / টেনে আনুন'}
+                      {editorUploadProgress !== null ? 'R2-তে আপলোড হচ্ছে...' : 'ছবি আপলোড / টেনে আনুন'}
                     </span>
                     <input
                       type="file"
@@ -3150,8 +3401,8 @@ export function AdminProductsPanel() {
           <div className="mt-5 flex justify-end gap-3 border-t border-[#F5F4F0] pt-4">
             <button
               type="button"
-              disabled={saving}
-              onClick={closeEditor}
+              disabled={saving || editorUploadProgress !== null}
+              onClick={() => closeEditor()}
               className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold text-[#44403C] disabled:opacity-50"
             >
               বাতিল
@@ -3254,7 +3505,7 @@ export function AdminProductsPanel() {
                 </tr>
               ) : (
                 paginated.map((p) => {
-                  const thumbSrc = p.images?.[0] || p.image || '';
+                  const thumbSrc = p.imageUrl || p.image || p.images?.[0] || '';
                   const pt = getProductText(p, allCategories);
                   return (
                     <tr key={p.id} className="hover:bg-[#FAFAF8]">

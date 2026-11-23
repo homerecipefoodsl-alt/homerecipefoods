@@ -73,9 +73,9 @@ export function ProductDetailPage() {
   const gallery = Array.from(
     new Set(
       [
-        ...(Array.isArray(product.images) ? product.images : []),
-        product.image,
         product.imageUrl,
+        product.image,
+        ...(Array.isArray(product.images) ? product.images : []),
       ].filter((u): u is string => typeof u === 'string' && u.trim().length > 0)
     )
   );

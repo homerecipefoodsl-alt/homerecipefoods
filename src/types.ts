@@ -304,6 +304,7 @@ export interface Product {
   description_en?: string;
   image?: string;
   imageUrl?: string;
+  imageKey?: string;
   images: string[];
   masterKey?: string;
   rating?: number;

@@ -69,7 +69,8 @@ service cloud.firestore {
         && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
         && (!('email' in adminDoc()) || (adminDoc().email is string && adminDoc().email.lower() == authEmail()))
         && (('active' in adminDoc() && adminDoc().active == true)
-          || ('isActive' in adminDoc() && adminDoc().isActive == true))
+          || ('isActive' in adminDoc() && adminDoc().isActive == true)
+          || ('status' in adminDoc() && adminDoc().status == 'active'))
         && !('active' in adminDoc() && adminDoc().active == false)
         && !('isActive' in adminDoc() && adminDoc().isActive == false)
         && (!('status' in adminDoc()) || adminDoc().status == 'active')
@@ -83,6 +84,7 @@ service cloud.firestore {
       return hasVerifiedEmail()
         && !exists(/databases/$(database)/documents/admins/$(request.auth.uid))
         && exists(/databases/$(database)/documents/rbac_roles/$(authEmail()))
+        && (!('email' in rbacDoc()) || (rbacDoc().email is string && rbacDoc().email.lower() == authEmail()))
         && ('status' in rbacDoc())
         && rbacDoc().status == 'active'
         && ('role' in rbacDoc())
@@ -335,7 +337,7 @@ service cloud.firestore {
           'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
           'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
           'description', 'descriptionEn', 'description_bn', 'description_en',
-          'image', 'imageUrl', 'images', 'masterKey', 'rating', 'stock', 'sku',
+          'image', 'imageUrl', 'imageKey', 'images', 'masterKey', 'rating', 'stock', 'sku',
           'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
           'availability', 'importantNotes', 'featured', 'popular',
           'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription', 'seoImage',
@@ -369,6 +371,7 @@ service cloud.firestore {
         && (!('description_en' in data) || (data.description_en is string && data.description_en.size() <= 4000))
         && (!('image' in data) || (data.image is string && data.image.size() <= 400000))
         && (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 400000))
+        && (!('imageKey' in data) || (data.imageKey is string && data.imageKey.size() <= 320))
         && isBoundedStringList(data.images, 6, 400000)
         && (!('masterKey' in data) || (data.masterKey is string && data.masterKey.size() <= 240))
         && (!('rating' in data) || (data.rating is number && data.rating >= 0 && data.rating <= 5))
@@ -1290,7 +1293,11 @@ service cloud.firestore {
           ('id' in existing() && isValidId(existing().id) && incoming().id == existing().id)
           || ((!('id' in existing()) || !isValidId(existing().id)) && incoming().id == productId)
         )
-        && (!('createdBy' in existing()) || (('createdBy' in incoming()) && incoming().createdBy == existing().createdBy))
+        && (
+          !('createdBy' in existing())
+          || (existing().createdBy is string && existing().createdBy == '')
+          || (('createdBy' in incoming()) && incoming().createdBy == existing().createdBy)
+        )
         && incoming().updatedAt == request.time
         && (
           ('createdAt' in existing()
@@ -1302,7 +1309,7 @@ service cloud.firestore {
               'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
               'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
               'description', 'descriptionEn', 'description_bn', 'description_en',
-              'image', 'imageUrl', 'images', 'masterKey', 'rating', 'stock', 'sku',
+              'image', 'imageUrl', 'imageKey', 'images', 'masterKey', 'rating', 'stock', 'sku',
               'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
               'availability', 'importantNotes', 'featured', 'popular',
               'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription', 'seoImage',
@@ -1314,11 +1321,11 @@ service cloud.firestore {
               'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
               'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
               'description', 'descriptionEn', 'description_bn', 'description_en',
-              'image', 'imageUrl', 'images', 'masterKey', 'rating', 'stock', 'sku',
+              'image', 'imageUrl', 'imageKey', 'images', 'masterKey', 'rating', 'stock', 'sku',
               'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
               'availability', 'importantNotes', 'featured', 'popular',
               'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription', 'seoImage',
-              'updatedBy', 'updatedAt'
+              'createdBy', 'updatedBy', 'updatedAt'
             ]))
           ||
           ((!('createdAt' in existing()) || !(existing().createdAt is timestamp))
@@ -1329,7 +1336,7 @@ service cloud.firestore {
               'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
               'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
               'description', 'descriptionEn', 'description_bn', 'description_en',
-              'image', 'imageUrl', 'images', 'masterKey', 'rating', 'stock', 'sku',
+              'image', 'imageUrl', 'imageKey', 'images', 'masterKey', 'rating', 'stock', 'sku',
               'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
               'availability', 'importantNotes', 'featured', 'popular',
               'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription', 'seoImage',
@@ -1341,11 +1348,11 @@ service cloud.firestore {
               'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
               'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
               'description', 'descriptionEn', 'description_bn', 'description_en',
-              'image', 'imageUrl', 'images', 'masterKey', 'rating', 'stock', 'sku',
+              'image', 'imageUrl', 'imageKey', 'images', 'masterKey', 'rating', 'stock', 'sku',
               'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
               'availability', 'importantNotes', 'featured', 'popular',
               'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription', 'seoImage',
-              'updatedBy', 'createdAt', 'updatedAt'
+              'createdBy', 'updatedBy', 'createdAt', 'updatedAt'
             ]))
         );
       allow delete: if hasPermission('products_delete') && isValidId(productId);

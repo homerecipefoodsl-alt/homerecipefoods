@@ -45,23 +45,125 @@ export function isForbiddenInlineImageUrl(url: string | null | undefined): boole
   return normalized.startsWith('data:') || normalized.startsWith('blob:');
 }
 
-export function isR2ImageUrl(url: string | null | undefined): boolean {
-  if (typeof url !== 'string') return false;
+export function extractR2ImageKey(url: string | null | undefined): string {
+  if (typeof url !== 'string') return '';
   const raw = url.trim();
-  if (!raw || isForbiddenInlineImageUrl(raw)) return false;
-  if (raw.startsWith('/api/media/file/')) return true;
+  if (!raw || isForbiddenInlineImageUrl(raw)) return '';
+  const apiPrefix = '/api/media/file/';
+  if (raw.startsWith(apiPrefix)) {
+    const key = raw.slice(apiPrefix.length).replace(/^\/+/, '');
+    return /^(products|categories|media|banners|showrooms)\//.test(key) ? key : '';
+  }
   try {
     const parsed = new URL(raw);
     const host = parsed.hostname.toLowerCase();
+    const pathKey = parsed.pathname.replace(/^\/+/, '');
     if (host === PRODUCTION_R2_IMAGE_HOST) {
-      return /^\/(products|categories|media|banners|showrooms)\//.test(parsed.pathname);
+      return /^(products|categories|media|banners|showrooms)\//.test(pathKey) ? pathKey : '';
     }
-    if (parsed.pathname.startsWith('/api/media/file/')) {
-      return true;
+    const idx = parsed.pathname.indexOf(apiPrefix);
+    if (idx !== -1) {
+      const key = parsed.pathname.slice(idx + apiPrefix.length).replace(/^\/+/, '');
+      return /^(products|categories|media|banners|showrooms)\//.test(key) ? key : '';
     }
-    return false;
+    return '';
   } catch {
-    return false;
+    return '';
+  }
+}
+
+export function isR2ImageUrl(url: string | null | undefined): boolean {
+  return Boolean(extractR2ImageKey(url));
+}
+
+export type ImageUrlValidationResult =
+  | {
+      valid: true;
+      normalizedUrl: string;
+      isR2: boolean;
+      extractedKey: string;
+    }
+  | {
+      valid: false;
+      message: string;
+    };
+
+export function validateProductImageUrl(url: string | null | undefined): ImageUrlValidationResult {
+  const raw = typeof url === 'string' ? url.trim() : '';
+  if (!raw) {
+    return {
+      valid: false,
+      message: 'অনুগ্রহ করে একটি বৈধ ছবির URL দিন।',
+    };
+  }
+  if (raw.length > 2048) {
+    return {
+      valid: false,
+      message: 'ছবির URL অনেক দীর্ঘ (সর্বোচ্চ ২,০৪৮ অক্ষর)।',
+    };
+  }
+  const lower = raw.toLowerCase();
+  if (
+    lower.startsWith('data:') ||
+    lower.startsWith('blob:') ||
+    lower.startsWith('javascript:') ||
+    lower.startsWith('vbscript:') ||
+    lower.startsWith('file:')
+  ) {
+    return {
+      valid: false,
+      message: 'অবৈধ URL প্রোটোকল (data/blob/javascript অনুমোদিত নয়)।',
+    };
+  }
+  if (raw.startsWith('/api/media/file/')) {
+    const extractedKey = extractR2ImageKey(raw);
+    if (!extractedKey) {
+      return {
+        valid: false,
+        message: 'অবৈধ Cloudflare R2 মিডিয়া পাথ।',
+      };
+    }
+    return {
+      valid: true,
+      normalizedUrl: raw,
+      isR2: true,
+      extractedKey,
+    };
+  }
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase();
+    if (host.endsWith('.r2.cloudflarestorage.com') || host.endsWith('.r2.dev')) {
+      return {
+        valid: false,
+        message: 'প্রাইভেট S3 বা .r2.dev ডেভেলপমেন্ট লিংক গ্রহণযোগ্য নয়। https://images.homerecipefoods.com.bd/... ব্যবহার করুন।',
+      };
+    }
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return {
+        valid: false,
+        message: 'শুধুমাত্র HTTPS অথবা বৈধ মিডিয়া URL ব্যবহার করুন।',
+      };
+    }
+    const isLocalHost = host === 'localhost' || host === '127.0.0.1';
+    if (parsed.protocol === 'http:' && !isLocalHost) {
+      return {
+        valid: false,
+        message: 'নিরাপত্তার জন্য বাহ্যিক ছবির লিংক অবশ্যই https:// দিয়ে শুরু হতে হবে।',
+      };
+    }
+    const extractedKey = extractR2ImageKey(raw);
+    return {
+      valid: true,
+      normalizedUrl: raw,
+      isR2: Boolean(extractedKey),
+      extractedKey,
+    };
+  } catch {
+    return {
+      valid: false,
+      message: 'সঠিক ছবির URL ফরম্যাট নয় (যেমন: https://images.homerecipefoods.com.bd/...)।',
+    };
   }
 }
 
