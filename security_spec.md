@@ -1,38 +1,39 @@
-# Security Specification — Home Recipe Foods RBAC
+# Security Specification — Home Recipe Foods RBAC & Media Architecture
 
-## 1. Role Hierarchy & Data Invariants
-1. **Super Admin (`super_admin`)**:
-   - Exclusively anchored to `mdmahmudulhashan0@gmail.com` (`request.auth.token.email_verified == true`).
-   - Full access to all collections, role assignments (`/rbac_roles`), user management (`/users`), catalog, banners, greetings, site settings, AI support config, complaints, and live support chat.
-   - Immutable: Cannot be demoted, disabled, or removed by any user (including Admin or self).
+## 1. Authoritative RBAC Model (`/admins/{uid}` Primary + `/rbac_roles/{email}` Fallback)
+1. **Primary Authority (`/admins/{uid}`)**:
+   - All backend routes (`/api/*`), Firestore Security Rules, and frontend RBAC checks evaluate `/admins/{request.auth.uid}` FIRST.
+   - An admin document is valid ONLY when:
+     - `request.auth != null` and `request.auth.token.email_verified == true`
+     - `email` field (if present on `admins/{uid}`) matches the verified token email (`request.auth.token.email.lower()`)
+     - Active flag is enabled (`active == true` or `isActive == true`) and `status != 'disabled'` and `status != 'suspended'`
+     - `role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent']`
+2. **Legacy Fallback (`/rbac_roles/{email}`)**:
+   - Evaluated when `/admins/{uid}` is absent (e.g., pending first-login staff accounts).
+   - Never blocks or overrides an active `/admins/{uid}` record.
+3. **Zero Email-Only Privilege Bypass**:
+   - No client component, Cloudflare Worker endpoint, Express server route, or Firestore Security Rule may grant administrative privilege solely from `email == 'mdmahmudulhashan0@gmail.com'` without a verified active Firestore `/admins/{uid}` (or fallback `/rbac_roles/{email}`) record.
+   - Clients can never self-create `/admins/{uid}` (`adminUid != request.auth.uid`). Server-side Admin SDK bootstrap (via `/api/auth/session-init` when `FIREBASE_SERVICE_ACCOUNT_JSON` is configured) or direct Firebase Console provisioning creates missing primary Super Admin `/admins/{uid}` documents safely.
+
+## 2. Role Hierarchy & Data Invariants
+1. **Primary Super Admin / Super Admin (`primary_super_admin`, `super_admin`)**:
+   - Full access to all collections, role assignments (`/rbac_roles`, `/admins`), user management (`/users`), catalog, banners, greetings, site settings, AI support config, complaints, and live support chat.
+   - `mdmahmudulhashan0@gmail.com` / `primary_super_admin` is immutable and cannot be demoted, disabled, or deleted by any user.
 2. **Admin (`admin`)**:
-   - Authorized in `/rbac_roles/{email}` with `role == 'admin'` and `status == 'active'`.
-   - Can manage `/products`, `/categories`, `/occasions`, `/showrooms`, `/greetings`, and ONLY `heroSlides` on `/site_settings/main`.
-   - Strictly DENIED from managing `/rbac_roles`, `/users`, full `/site_settings` / AI support config, `/complaints`, or `/chat_sessions`.
-3. **Support Agent (`support_agent`)**:
-   - Authorized in `/rbac_roles/{email}` with `role == 'support_agent'` and `status == 'active'`.
-   - Can manage `/complaints` (`get`, `list`, update `status` & `adminNote`), `/chat_sessions` & `messages` (view, reply, assign, close), and toggle `supportOnline` on `/site_settings/main`.
-   - Strictly DENIED from modifying `/products`, `/categories`, `/occasions`, `/showrooms`, `/greetings`, `heroSlides`, `/rbac_roles`, `/users`, or site/AI settings.
-4. **Customer (`customer`)**:
-   - Default role on `/users/{uid}`. Can never self-assign `admin`, `support_agent`, or `super_admin`.
-   - Can create complaints and read ONLY complaints where `submittedByUid == request.auth.uid` (cannot read another customer's complaints).
-   - Can never list `/chat_sessions` or access another customer's authenticated chat session/messages.
+   - Full Catalog & CMS management (`/products`, `/categories`, `/occasions`, `/showrooms`, `/hero_banners`, `/homepage_sections`, `/greetings`, `/media_library`, `/jobPostings`) plus delegated Manager management where granted.
+   - Strictly denied from managing `/users` or modifying Super Admin records.
+3. **Manager (`manager`)**:
+   - Granular permission-checked access (e.g., `products_add`, `products_edit`, `categories_manage`, `showrooms_manage`, `complaints_manage`, `recruitment_manage`).
+4. **Support Agent (`support_agent`)**:
+   - Strictly scoped to `/complaints`, `/chat_sessions` & `messages`, and `supportOnline` status. Denied catalog, role, or settings writes.
+5. **Customer (`customer`)**:
+   - Default role on `/users/{uid}`. Can never self-assign elevated roles or access admin collections.
 
-## 2. Verification Matrix (Must All Enforce Strictly)
-1. `mdmahmudulhashan0@gmail.com` (verified) -> `super_admin`
-2. Normal customer -> Denied `/admin`, denied catalog writes, denied role escalation
-3. Support Agent -> Allowed `/complaints` & `/chat_sessions` only; denied catalog/role/settings writes
-4. Admin -> Allowed catalog, banners (`heroSlides`), & greetings; denied `/rbac_roles`, `/users`, AI/site settings
-5. Admin cannot modify or delete Super Admin `/rbac_roles/mdmahmudulhashan0@gmail.com` or `/users/{superAdminUid}`
-6. Admin cannot promote self or others to `super_admin`
-7. Customer cannot modify `role` or `status` on `/users/{uid}` or create `/rbac_roles/*`
-8. Customer cannot `get` or `list` another customer's complaint
-9. Customer cannot `list` `/chat_sessions` or `get`/`list` another authenticated customer's chat session/messages
-10. Super Admin can add, change role (`admin` <-> `support_agent`), disable/enable, and remove non-Super-Admin roles
-
-## 3. Recruitment Module Privacy & Role Boundary
-1. **`/jobPostings`**: Public visitors can only `get` or `list` documents where `status == 'Published'`. `Draft`, `Hidden`, and `Closed` circulars are readable/writable strictly by `Super Admin`, `Admin`, or staff with `recruitment_manage`. Hard deletion is strictly `Super Admin` only.
-2. **`/jobApplications`**: Strictly private. Unauthenticated visitors can `create` with initial `status == 'Submitted'` and `adminNotes == ''` targeting an active `Published` circular. Public `get` and `list` are strictly `false`. Authorized recruitment staff can review, shortlist, schedule exams/interviews, add notes/reviewedBy/reviewedAt, and archive. Permanent `delete` is strictly `Super Admin` only.
-3. **`/jobApplicationLocks`, `/jobApplicationCounters` & `/jobApplicationStatuses`**: Zero-PII helper collections (`allow list: if false` for public) enabling monotonic `SN-JOB-YYYY-00001` ID reservation, atomic duplicate prevention per job + mobile/NID SHA-256 hash, and mobile-hash-verified Application ID status tracking without exposing any candidate personal details or admin notes.
-4. **`/jobExams`**: Strictly staff-only (`isRecruitmentStaff()` read/create/update, `isSuperAdmin()` delete).
-5. **Firebase Storage (`job-applications/{applicationId}/photo/*` & `job-applications/{applicationId}/documents/*`)**: Public uploads restricted by MIME type (`JPG/JPEG/PNG` for photos <= 2MB, `JPG/JPEG/PNG/PDF/DOC/DOCX` for documents <= 5MB); reads/deletes restricted exclusively to verified staff/Super Admin.
+## 3. Product Catalog & Media Architecture (Cloudflare R2)
+1. **Product Catalog (`/products/{productId}`)**:
+   - Writes validate `hasPermission('products_add')` (create), `hasPermission('products_edit')` (update), and `hasPermission('products_delete')` (delete) backed by `/admins/{uid}` / `/rbac_roles/{email}`.
+   - Optional audit fields `createdBy` (immutable once set) and `updatedBy` (set on create/update) are permitted and bounded in `isValidProduct(data)` and update diff allowlists.
+2. **Product & Catalog Media Storage (Cloudflare R2)**:
+   - Firebase Storage (`getStorage`, `uploadBytes`, `getDownloadURL`) is completely removed from catalog/CMS uploads.
+   - Images upload through `/api/r2/upload` (bound to Worker R2 binding `PRODUCT_IMAGES` / bucket `home-recipe-product-images`), protected by verified Firebase ID Token + verified Firestore `/admins/{uid}` (or fallback `/rbac_roles/{email}`) catalog authority.
+   - Uploaded assets are served publicly via `/api/r2/file/{key}` (or configured `R2_PUBLIC_URL`) and cleaned up cleanly on rollback via `/api/r2/delete`.

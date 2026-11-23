@@ -174,6 +174,11 @@ const ROLE_DISPLAY: Record<
   StaffRole,
   { label: string; scope: string; badgeClass: string }
 > = {
+  primary_super_admin: {
+    label: 'Primary Super Admin',
+    scope: 'Full Administrative Access · All Modules, CMS, Roles & Security',
+    badgeClass: 'bg-[#DC1F26] text-white',
+  },
   super_admin: {
     label: 'Super Admin',
     scope: 'Full Administrative Access · All Modules, CMS, Roles & Security',

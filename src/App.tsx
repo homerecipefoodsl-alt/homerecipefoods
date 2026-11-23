@@ -129,14 +129,18 @@ function PageLoader() {
 
 function UnauthorizedAdminCard({
   email,
+  uid,
   disabled,
+  adminDocMissing,
   needsVerification,
   onResendVerification,
   onRefreshVerification,
   onSignOut,
 }: {
   email?: string | null;
+  uid?: string | null;
   disabled: boolean;
+  adminDocMissing?: boolean;
   needsVerification?: boolean;
   onResendVerification?: () => Promise<void>;
   onRefreshVerification?: () => Promise<void>;
@@ -179,6 +183,8 @@ function UnauthorizedAdminCard({
         <h1 className="font-display mt-2 text-2xl font-bold text-[#1C1917]">
           {needsVerification
             ? 'ইমেইল ভেরিফাই করুন'
+            : adminDocMissing
+            ? 'অ্যাডমিন রেকর্ড পাওয়া যায়নি'
             : disabled
             ? 'অ্যাকাউন্ট নিষ্ক্রিয় রয়েছে'
             : 'অ্যাডমিন প্যানেল সংরক্ষিত'}
@@ -186,6 +192,8 @@ function UnauthorizedAdminCard({
         <p className="mt-2 text-xs leading-relaxed text-[#57534E]">
           {needsVerification
             ? `${email || 'Your account'} ইমেইলটি Firebase Authentication-এ এখনো verified নয়। অ্যাডমিন ড্যাশবোর্ডে প্রবেশের আগে ইমেইল ভেরিফিকেশন সম্পন্ন করুন।`
+            : adminDocMissing
+            ? `Firestore-এ admins/${uid || 'uid'} ডকুমেন্টটি পাওয়া যায়নি বা সক্রিয় নয়।`
             : `${email || 'Current session'} অ্যাকাউন্টটির জন্য কোনো অনুমোদিত অ্যাডমিন বা সাপোর্ট অনুমতি নেই।`}
         </p>
         {notice && (
@@ -239,6 +247,7 @@ function MahmudLoginRoute() {
     user,
     authReady,
     adminCheckLoading,
+    adminDocMissing,
     staffRole,
     accountStatus,
     emailVerificationRequired,
@@ -264,7 +273,9 @@ function MahmudLoginRoute() {
     return (
       <UnauthorizedAdminCard
         email={user.email}
+        uid={user.uid}
         disabled={accountStatus !== 'active'}
+        adminDocMissing={adminDocMissing}
         needsVerification={emailVerificationRequired}
         onResendVerification={resendAdminVerificationEmail}
         onRefreshVerification={refreshAdminSession}
@@ -282,6 +293,7 @@ function ProtectedMahmudRoute() {
     user,
     authReady,
     adminCheckLoading,
+    adminDocMissing,
     staffRole,
     accountStatus,
     emailVerificationRequired,
@@ -307,7 +319,9 @@ function ProtectedMahmudRoute() {
     return (
       <UnauthorizedAdminCard
         email={user.email}
+        uid={user.uid}
         disabled={accountStatus !== 'active'}
+        adminDocMissing={adminDocMissing}
         needsVerification={emailVerificationRequired}
         onResendVerification={resendAdminVerificationEmail}
         onRefreshVerification={refreshAdminSession}

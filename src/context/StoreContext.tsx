@@ -52,6 +52,7 @@ import {
 } from '../lib/firebase';
 import {
   DEFAULT_ROLE_PERMISSIONS,
+  isSuperAdminRole,
   type AccountStatus,
   type AdminRecord,
   type AdminUsernameMapping,
@@ -185,6 +186,7 @@ interface StoreContextValue {
   isCatalogAdmin: boolean;
   isSupportStaff: boolean;
   adminCheckLoading: boolean;
+  adminDocMissing: boolean;
   emailVerificationRequired: boolean;
   loginLockoutRemainingSec: number;
 
@@ -254,6 +256,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [adminProfile, setAdminProfile] = useState<AdminRecord | null>(null);
   const [accountStatus, setAccountStatus] = useState<AccountStatus>('active');
   const [adminCheckLoading, setAdminCheckLoading] = useState(isFirebaseConfigured);
+  const [adminDocMissing, setAdminDocMissing] = useState(false);
   const [emailVerificationRequired, setEmailVerificationRequired] = useState(false);
   const [authRefreshTick, setAuthRefreshTick] = useState(0);
   const [loginLockoutUntil, setLoginLockoutUntil] = useState<number>(
@@ -345,6 +348,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setRbacPermissions(null);
         setAdminProfile(null);
         setAccountStatus('active');
+        setAdminDocMissing(false);
         setEmailVerificationRequired(false);
         setAdminCheckLoading(false);
         return;
@@ -360,6 +364,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setRbacPermissions(null);
         setAdminProfile(null);
         setAccountStatus('active');
+        setAdminDocMissing(false);
         setEmailVerificationRequired(false);
         setAdminCheckLoading(false);
         return;
@@ -370,6 +375,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setRbacPermissions(null);
         setAdminProfile(null);
         setAccountStatus('active');
+        setAdminDocMissing(false);
         setEmailVerificationRequired(true);
         setAdminCheckLoading(false);
         return;
@@ -379,267 +385,230 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       setAdminCheckLoading(true);
       const emailLower = currentUser.email.trim().toLowerCase();
 
+      const isValidStaffRoleValue = (r: unknown): r is StaffRole =>
+        r === 'primary_super_admin' ||
+        r === 'super_admin' ||
+        r === 'admin' ||
+        r === 'manager' ||
+        r === 'support_agent';
+
+      const evaluateAuthorityDocs = (
+        adminDocData: AdminRecord | null,
+        rbacDocData: RbacRoleEntry | null,
+        userStatusValue: AccountStatus
+      ): {
+        role: UserRole;
+        permissions: PermissionKey[];
+        status: AccountStatus;
+        docMissing: boolean;
+      } => {
+        if (userStatusValue === 'disabled' || userStatusValue === 'suspended') {
+          return {
+            role: 'customer',
+            permissions: [],
+            status: userStatusValue,
+            docMissing: false,
+          };
+        }
+
+        // Primary Authority: /admins/{uid}
+        if (adminDocData) {
+          const docEmail =
+            typeof adminDocData.email === 'string'
+              ? adminDocData.email.trim().toLowerCase()
+              : '';
+          if (docEmail && docEmail !== emailLower) {
+            return {
+              role: 'customer',
+              permissions: [],
+              status: 'disabled',
+              docMissing: false,
+            };
+          }
+          const isExplicitlyInactive =
+            adminDocData.active === false ||
+            adminDocData.isActive === false ||
+            adminDocData.status === 'disabled' ||
+            adminDocData.status === 'suspended';
+          const isExplicitlyActive =
+            adminDocData.active === true ||
+            adminDocData.isActive === true ||
+            adminDocData.status === 'active';
+          if (isExplicitlyInactive || !isExplicitlyActive) {
+            return {
+              role: 'customer',
+              permissions: [],
+              status: adminDocData.status === 'suspended' ? 'suspended' : 'disabled',
+              docMissing: false,
+            };
+          }
+          if (!isValidStaffRoleValue(adminDocData.role)) {
+            return {
+              role: 'customer',
+              permissions: [],
+              status: 'disabled',
+              docMissing: false,
+            };
+          }
+          return {
+            role: adminDocData.role,
+            permissions: Array.isArray(adminDocData.permissions)
+              ? adminDocData.permissions
+              : DEFAULT_ROLE_PERMISSIONS[adminDocData.role] ?? [],
+            status: 'active',
+            docMissing: false,
+          };
+        }
+
+        // Fallback Authority: /rbac_roles/{email} ONLY if /admins/{uid} does not exist
+        if (rbacDocData) {
+          const rbacEmail =
+            typeof rbacDocData.email === 'string'
+              ? rbacDocData.email.trim().toLowerCase()
+              : '';
+          if (rbacEmail && rbacEmail !== emailLower) {
+            return {
+              role: 'customer',
+              permissions: [],
+              status: 'disabled',
+              docMissing: false,
+            };
+          }
+          if (rbacDocData.status !== 'active') {
+            return {
+              role: 'customer',
+              permissions: [],
+              status: rbacDocData.status === 'suspended' ? 'suspended' : 'disabled',
+              docMissing: false,
+            };
+          }
+          if (!isValidStaffRoleValue(rbacDocData.role)) {
+            return {
+              role: 'customer',
+              permissions: [],
+              status: 'disabled',
+              docMissing: false,
+            };
+          }
+          return {
+            role: rbacDocData.role,
+            permissions: Array.isArray(rbacDocData.permissions)
+              ? rbacDocData.permissions
+              : DEFAULT_ROLE_PERMISSIONS[rbacDocData.role] ?? [],
+            status: 'active',
+            docMissing: false,
+          };
+        }
+
+        return {
+          role: 'customer',
+          permissions: [],
+          status: 'active',
+          docMissing: true,
+        };
+      };
+
       try {
         const rbacRef = doc(activeDb, 'rbac_roles', emailLower);
         const adminRef = doc(activeDb, 'admins', currentUser.uid);
         const userRef = doc(activeDb, 'users', currentUser.uid);
         const now = serverTimestamp();
 
-        const isPrimarySuperAdminEmail =
-          emailLower === PRIMARY_SUPER_ADMIN_EMAIL && currentUser.emailVerified;
-
-        // Ensure primary Super Admin RBAC & Admin records exist on first verified password login
-        if (isPrimarySuperAdminEmail) {
-          try {
-            const rbacSnap = await getDoc(rbacRef);
-            if (!rbacSnap.exists()) {
-              await setDoc(rbacRef, {
-                email: emailLower,
-                uid: currentUser.uid,
-                username: PRIMARY_SUPER_ADMIN_USERNAME,
-                displayName: currentUser.displayName || 'Mahmud (Super Admin)',
-                role: 'super_admin',
-                status: 'active',
-                addedByEmail: 'system-bootstrap',
-                createdAt: now,
-                updatedAt: now,
-              });
-            } else {
-              const rbacData = rbacSnap.data() as RbacRoleEntry;
-              if (!rbacData.uid || !rbacData.username) {
-                await updateDoc(rbacRef, {
-                  uid: currentUser.uid,
-                  username: rbacData.username || PRIMARY_SUPER_ADMIN_USERNAME,
-                  displayName:
-                    currentUser.displayName || rbacData.displayName || 'Super Admin',
-                  updatedAt: now,
-                });
-              }
-            }
-          } catch (bootstrapErr) {
-            console.warn('Super Admin RBAC bootstrap sync warning:', bootstrapErr);
-          }
-
-          try {
-            const adminSnap = await getDoc(adminRef);
-            if (!adminSnap.exists()) {
-              await setDoc(adminRef, {
-                uid: currentUser.uid,
-                email: emailLower,
-                username: PRIMARY_SUPER_ADMIN_USERNAME,
-                display_name: currentUser.displayName || 'Mahmud (Super Admin)',
-                role: 'super_admin',
-                active: true,
-                created_at: now,
-                updated_at: now,
-                last_login_at: now,
-              });
-            } else {
-              await updateDoc(adminRef, {
-                last_login_at: now,
-                updated_at: now,
-              });
-            }
-          } catch (adminSyncErr) {
-            console.warn('Super Admin profile sync warning:', adminSyncErr);
-          }
-
-          try {
-            const usernameRef = doc(
-              activeDb,
-              'admin_usernames',
-              PRIMARY_SUPER_ADMIN_USERNAME
-            );
-            const usernameSnap = await getDoc(usernameRef);
-            if (!usernameSnap.exists()) {
-              await setDoc(usernameRef, {
-                username: PRIMARY_SUPER_ADMIN_USERNAME,
-                email: emailLower,
-                active: true,
-                updatedAt: now,
-              });
-            }
-          } catch (usernameSyncErr) {
-            console.warn('Super Admin username sync warning:', usernameSyncErr);
-          }
-        }
-
-        // Read authoritative RBAC + admin profile
-        let resolvedRole: UserRole = isPrimarySuperAdminEmail ? 'super_admin' : 'customer';
-        let resolvedStatus: AccountStatus = 'active';
-        let resolvedPermissions: PermissionKey[] | null = isPrimarySuperAdminEmail
-          ? DEFAULT_ROLE_PERMISSIONS.super_admin
-          : null;
-        let resolvedAdminRecord: AdminRecord | null = null;
+        let adminSnapDataCache: AdminRecord | null = null;
         let rbacSnapDataCache: RbacRoleEntry | null = null;
+        let userStatusCache: AccountStatus = 'active';
 
-        try {
-          const activeRbacSnap = await getDoc(rbacRef);
-          if (activeRbacSnap.exists()) {
-            const rbacData = activeRbacSnap.data() as RbacRoleEntry;
-            rbacSnapDataCache = rbacData;
-            if (rbacData.status === 'active') {
-              resolvedRole = rbacData.role;
-              resolvedPermissions = Array.isArray(rbacData.permissions)
-                ? rbacData.permissions
-                : DEFAULT_ROLE_PERMISSIONS[rbacData.role] ?? [];
-              if (!rbacData.uid) {
-                try {
-                  await updateDoc(rbacRef, {
-                    uid: currentUser.uid,
-                    displayName:
-                      currentUser.displayName || rbacData.displayName || emailLower,
-                    updatedAt: now,
-                  });
-                } catch {
-                  // Ignore if disallowed
-                }
-              }
-            } else {
-              resolvedRole = 'customer';
-              resolvedStatus = rbacData.status === 'suspended' ? 'suspended' : 'disabled';
-              resolvedPermissions = [];
-            }
-          }
-        } catch {
-          // If unverified email prevents rbac read, inspect admins/{uid}
-        }
-
+        // 1. Read Primary Authority: admins/{uid}
         try {
           const adminSnap = await getDoc(adminRef);
           if (adminSnap.exists()) {
-            const aData = adminSnap.data() as AdminRecord;
-            resolvedAdminRecord = aData;
-            const adminNonActive =
-              !aData.active || aData.status === 'disabled' || aData.status === 'suspended';
-            if (!adminNonActive && resolvedStatus === 'active' && !rbacSnapDataCache) {
-              resolvedRole = aData.role;
-              if (!resolvedPermissions) {
-                resolvedPermissions = Array.isArray(aData.permissions)
-                  ? aData.permissions
-                  : DEFAULT_ROLE_PERMISSIONS[aData.role] ?? [];
-              }
+            adminSnapDataCache = adminSnap.data() as AdminRecord;
+          }
+        } catch {
+          // Will inspect fallback or fail closed cleanly
+        }
+
+        // 2. Fallback read: rbac_roles/{email} only if admins/{uid} does not exist
+        if (!adminSnapDataCache) {
+          try {
+            const activeRbacSnap = await getDoc(rbacRef);
+            if (activeRbacSnap.exists()) {
+              rbacSnapDataCache = activeRbacSnap.data() as RbacRoleEntry;
             }
-            if (!adminNonActive && resolvedStatus === 'active' && !isPrimarySuperAdminEmail) {
-              try {
-                await updateDoc(adminRef, {
-                  last_login_at: now,
-                  updated_at: now,
-                });
-              } catch {
-                // Ignore if disallowed
-              }
-            } else if (adminNonActive && !isPrimarySuperAdminEmail) {
-              resolvedRole = 'customer';
-              resolvedStatus = aData.status === 'suspended' ? 'suspended' : 'disabled';
-              resolvedPermissions = [];
-            }
-          } else if (
-            !isPrimarySuperAdminEmail &&
-            resolvedStatus === 'active' &&
-            (resolvedRole === 'super_admin' ||
-              resolvedRole === 'admin' ||
-              resolvedRole === 'manager' ||
-              resolvedRole === 'support_agent')
-          ) {
-            try {
-              const staffUsername =
-                rbacSnapDataCache?.username || emailLower.split('@')[0];
-              const newAdminDoc: AdminRecord = {
-                uid: currentUser.uid,
-                email: emailLower,
-                username: staffUsername,
-                display_name:
-                  currentUser.displayName ||
-                  rbacSnapDataCache?.displayName ||
-                  emailLower.split('@')[0],
-                ...(rbacSnapDataCache?.phone ? { phone: rbacSnapDataCache.phone } : {}),
-                ...(rbacSnapDataCache?.managerId
-                  ? { manager_id: rbacSnapDataCache.managerId }
-                  : {}),
-                ...(rbacSnapDataCache?.managerTitle
-                  ? { manager_title: rbacSnapDataCache.managerTitle }
-                  : {}),
-                permissions:
-                  resolvedPermissions ?? DEFAULT_ROLE_PERMISSIONS[resolvedRole] ?? [],
-                role: resolvedRole,
-                active: true,
-                status: 'active',
-                created_at: now,
-                updated_at: now,
-                last_login_at: now,
-              };
-              await setDoc(adminRef, newAdminDoc);
-              resolvedAdminRecord = newAdminDoc;
-            } catch {
-              // Non-blocking sync
+          } catch {
+            // Fails closed cleanly
+          }
+        }
+
+        // 3. Check user profile status (never promotes role; only tracks account suspension/profile)
+        try {
+          const userSnap = await getDoc(userRef);
+          if (userSnap.exists()) {
+            const existingUser = userSnap.data() as UserAccount;
+            if (existingUser.status === 'disabled' || existingUser.status === 'suspended') {
+              userStatusCache = existingUser.status;
             }
           }
         } catch {
-          // Not an admin doc
+          // Non-fatal
         }
 
-        // Sync user profile if email verified
-        if (currentUser.emailVerified) {
-          try {
-            const userSnap = await getDoc(userRef);
-            if (!userSnap.exists()) {
-              await setDoc(userRef, {
-                uid: currentUser.uid,
-                email: emailLower,
-                displayName: currentUser.displayName || emailLower.split('@')[0],
-                photoUrl: currentUser.photoURL || '',
-                role: resolvedRole,
-                status: resolvedStatus,
-                createdAt: now,
-                updatedAt: now,
-                lastLoginAt: now,
-              });
-            } else {
-              const existingUser = userSnap.data() as UserAccount;
-              if (
-                (existingUser.status === 'disabled' ||
-                  existingUser.status === 'suspended') &&
-                !isPrimarySuperAdminEmail
-              ) {
-                resolvedStatus = existingUser.status;
-                resolvedRole = 'customer';
-                resolvedPermissions = [];
-              }
-              await updateDoc(userRef, {
-                displayName:
-                  currentUser.displayName || existingUser.displayName || emailLower,
-                photoUrl: currentUser.photoURL || existingUser.photoUrl || '',
-                role: resolvedRole,
-                updatedAt: now,
-                lastLoginAt: now,
-              });
-            }
-          } catch {
-            // Safe fallback
+        const initialAuth = evaluateAuthorityDocs(
+          adminSnapDataCache,
+          rbacSnapDataCache,
+          userStatusCache
+        );
+
+        // Non-elevating user profile metadata sync only when a profile doc doesn't conflict
+        try {
+          const userSnap = await getDoc(userRef);
+          if (!userSnap.exists()) {
+            await setDoc(userRef, {
+              uid: currentUser.uid,
+              email: emailLower,
+              displayName: currentUser.displayName || emailLower.split('@')[0],
+              photoUrl: currentUser.photoURL || '',
+              role: initialAuth.role,
+              status: initialAuth.status,
+              createdAt: now,
+              updatedAt: now,
+              lastLoginAt: now,
+            });
+          } else {
+            const existingUser = userSnap.data() as UserAccount;
+            await updateDoc(userRef, {
+              displayName:
+                currentUser.displayName || existingUser.displayName || emailLower,
+              photoUrl: currentUser.photoURL || existingUser.photoUrl || '',
+              role: initialAuth.role,
+              updatedAt: now,
+              lastLoginAt: now,
+            });
           }
+        } catch {
+          // Non-blocking profile sync
         }
 
-        setUserRole(resolvedRole);
-        setRbacPermissions(resolvedPermissions);
-        setAdminProfile(resolvedAdminRecord);
-        setAccountStatus(resolvedStatus);
+        setUserRole(initialAuth.role);
+        setRbacPermissions(initialAuth.permissions);
+        setAdminProfile(adminSnapDataCache);
+        setAccountStatus(initialAuth.status);
+        setAdminDocMissing(initialAuth.docMissing);
 
-        if (currentUser.emailVerified) {
-          try {
-            const tokenResult = await currentUser.getIdTokenResult();
-            if (tokenResult.claims.email_verified !== true) {
-              await currentUser.getIdToken(true);
-            }
-          } catch {
-            // Non-blocking token refresh check
+        try {
+          const tokenResult = await currentUser.getIdTokenResult();
+          if (tokenResult.claims.email_verified !== true) {
+            await currentUser.getIdToken(true);
           }
+        } catch {
+          // Non-blocking token refresh check
         }
 
+        // Server-side session-init: syncs custom claims for active staff or server-bootstraps
+        // primary super admin admins/{uid} via Admin SDK if FIREBASE_SERVICE_ACCOUNT_JSON is configured
         if (
-          currentUser.emailVerified &&
-          resolvedStatus === 'active' &&
-          resolvedRole !== 'customer'
+          (initialAuth.status === 'active' && initialAuth.role !== 'customer') ||
+          (initialAuth.docMissing && emailLower === PRIMARY_SUPER_ADMIN_EMAIL)
         ) {
           void (async () => {
             try {
@@ -649,104 +618,36 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                 headers: { Authorization: `Bearer ${idToken}` },
               });
               if (resp.ok) {
-                const payload = (await resp.json()) as { claimsSynced?: boolean };
+                const payload = (await resp.json()) as {
+                  claimsSynced?: boolean;
+                  adminDocCreated?: boolean;
+                };
                 if (payload.claimsSynced) {
                   await currentUser.getIdToken(true);
                 }
+                if (payload.adminDocCreated) {
+                  setAuthRefreshTick((t) => t + 1);
+                }
               }
             } catch {
-              // Non-blocking claims sync
+              // Non-blocking claims/bootstrap sync
             }
           })();
         }
 
         let liveRbacDoc: RbacRoleEntry | null = rbacSnapDataCache;
-        let liveAdminDoc: AdminRecord | null = resolvedAdminRecord;
-        let liveUserStatus: AccountStatus = resolvedStatus;
+        let liveAdminDoc: AdminRecord | null = adminSnapDataCache;
+        let liveUserStatus: AccountStatus = userStatusCache;
 
         const syncEffectiveAuthority = () => {
-          if (
-            (liveUserStatus === 'disabled' || liveUserStatus === 'suspended') &&
-            !isPrimarySuperAdminEmail
-          ) {
-            setUserRole('customer');
-            setRbacPermissions([]);
-            setAccountStatus(liveUserStatus);
-            return;
-          }
-
-          if (liveRbacDoc) {
-            if (liveRbacDoc.status === 'active') {
-              setUserRole(liveRbacDoc.role);
-              setRbacPermissions(
-                Array.isArray(liveRbacDoc.permissions)
-                  ? liveRbacDoc.permissions
-                  : DEFAULT_ROLE_PERMISSIONS[liveRbacDoc.role] ?? []
-              );
-              setAccountStatus('active');
-            } else if (isPrimarySuperAdminEmail) {
-              setUserRole('super_admin');
-              setRbacPermissions(DEFAULT_ROLE_PERMISSIONS.super_admin);
-              setAccountStatus('active');
-            } else {
-              setUserRole('customer');
-              setRbacPermissions([]);
-              setAccountStatus(
-                liveRbacDoc.status === 'suspended' ? 'suspended' : 'disabled'
-              );
-            }
-            return;
-          }
-
-          if (liveAdminDoc) {
-            const adminNonActive =
-              !liveAdminDoc.active ||
-              liveAdminDoc.status === 'disabled' ||
-              liveAdminDoc.status === 'suspended';
-            if (!adminNonActive) {
-              setUserRole(liveAdminDoc.role);
-              setRbacPermissions(
-                Array.isArray(liveAdminDoc.permissions)
-                  ? liveAdminDoc.permissions
-                  : DEFAULT_ROLE_PERMISSIONS[liveAdminDoc.role] ?? []
-              );
-              setAccountStatus('active');
-            } else if (isPrimarySuperAdminEmail) {
-              setUserRole('super_admin');
-              setRbacPermissions(DEFAULT_ROLE_PERMISSIONS.super_admin);
-              setAccountStatus('active');
-            } else {
-              setUserRole('customer');
-              setRbacPermissions([]);
-              setAccountStatus(
-                liveAdminDoc.status === 'suspended' ? 'suspended' : 'disabled'
-              );
-            }
-            return;
-          }
-
-          if (isPrimarySuperAdminEmail) {
-            setUserRole('super_admin');
-            setRbacPermissions(DEFAULT_ROLE_PERMISSIONS.super_admin);
-            setAccountStatus('active');
-            return;
-          }
-
-          setUserRole('customer');
-          setRbacPermissions([]);
-          setAccountStatus('disabled');
+          const next = evaluateAuthorityDocs(liveAdminDoc, liveRbacDoc, liveUserStatus);
+          setUserRole(next.role);
+          setRbacPermissions(next.permissions);
+          setAccountStatus(next.status);
+          setAdminDocMissing(next.docMissing);
         };
 
-        // Live subscriptions so role/status/permission changes apply immediately
-        unsubRbac = onSnapshot(
-          rbacRef,
-          (snap) => {
-            liveRbacDoc = snap.exists() ? (snap.data() as RbacRoleEntry) : null;
-            syncEffectiveAuthority();
-          },
-          () => {}
-        );
-
+        // Live subscriptions so admins/{uid} or rbac_roles/{email} changes apply immediately
         unsubAdminDoc = onSnapshot(
           adminRef,
           (snap) => {
@@ -757,10 +658,19 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           () => {}
         );
 
+        unsubRbac = onSnapshot(
+          rbacRef,
+          (snap) => {
+            liveRbacDoc = snap.exists() ? (snap.data() as RbacRoleEntry) : null;
+            syncEffectiveAuthority();
+          },
+          () => {}
+        );
+
         unsubUserDoc = onSnapshot(
           userRef,
           (snap) => {
-            if (snap.exists() && !isPrimarySuperAdminEmail) {
+            if (snap.exists()) {
               const u = snap.data() as UserAccount;
               liveUserStatus =
                 u.status === 'disabled' || u.status === 'suspended' ? u.status : 'active';
@@ -772,9 +682,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       } catch (err) {
         console.error('Admin verification error:', err);
         setUserRole('customer');
-        setRbacPermissions(null);
+        setRbacPermissions([]);
         setAdminProfile(null);
-        setAccountStatus('active');
+        setAccountStatus('disabled');
+        setAdminDocMissing(false);
       } finally {
         setAdminCheckLoading(false);
       }
@@ -1396,6 +1307,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const staffRole: StaffRole | null = useMemo(() => {
     if (accountStatus !== 'active') return null;
     if (
+      userRole === 'primary_super_admin' ||
       userRole === 'super_admin' ||
       userRole === 'admin' ||
       userRole === 'manager' ||
@@ -1408,7 +1320,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   const permissions: PermissionKey[] = useMemo(() => {
     if (!staffRole || accountStatus !== 'active') return [];
-    if (staffRole === 'super_admin') {
+    if (isSuperAdminRole(staffRole)) {
       return DEFAULT_ROLE_PERMISSIONS.super_admin;
     }
     if (rbacPermissions !== null) {
@@ -1420,25 +1332,25 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const hasPermission = useCallback(
     (perm: PermissionKey): boolean => {
       if (!staffRole || accountStatus !== 'active') return false;
-      if (staffRole === 'super_admin') return true;
+      if (isSuperAdminRole(staffRole)) return true;
       return permissions.includes(perm);
     },
     [staffRole, accountStatus, permissions]
   );
 
-  const isSuperAdmin = staffRole === 'super_admin';
+  const isSuperAdmin = isSuperAdminRole(staffRole);
   const isPrimarySuperAdmin =
     isSuperAdmin &&
     Boolean(user?.emailVerified) &&
     user?.email?.trim().toLowerCase() === PRIMARY_SUPER_ADMIN_EMAIL;
   const isCatalogAdmin =
-    staffRole === 'super_admin' ||
+    isSuperAdmin ||
     hasPermission('products_view') ||
     hasPermission('categories_manage') ||
     hasPermission('showrooms_manage') ||
     hasPermission('banners_manage');
   const isSupportStaff =
-    staffRole === 'super_admin' ||
+    isSuperAdmin ||
     hasPermission('complaints_manage') ||
     hasPermission('chat_manage');
   const isAdmin = staffRole !== null;
@@ -1641,7 +1553,6 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     setLoginLockoutUntil(0);
 
     const emailLower = (cred.user.email || resolvedEmail).trim().toLowerCase();
-    const isBootstrapSuperAdmin = emailLower === PRIMARY_SUPER_ADMIN_EMAIL;
 
     // If email is not yet verified, allow MahmudLoginRoute to present the verification screen
     // (onAuthStateChanged keeps staffRole = null until emailVerified === true).
@@ -1649,17 +1560,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    let rbacEntry: RbacRoleEntry | null = null;
     let adminEntry: AdminRecord | null = null;
-
-    try {
-      const rbacSnap = await getDoc(doc(db, 'rbac_roles', emailLower));
-      if (rbacSnap.exists()) {
-        rbacEntry = rbacSnap.data() as RbacRoleEntry;
-      }
-    } catch {
-      // Non-fatal: inspect admins/{uid} fallback
-    }
+    let rbacEntry: RbacRoleEntry | null = null;
 
     try {
       const adminSnap = await getDoc(doc(db, 'admins', cred.user.uid));
@@ -1670,32 +1572,84 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       // Non-fatal
     }
 
-    const isSuspended =
-      rbacEntry?.status === 'suspended' || adminEntry?.status === 'suspended';
-    const isDisabled =
-      rbacEntry?.status === 'disabled' ||
-      rbacEntry?.status === 'suspended' ||
-      adminEntry?.active === false ||
-      adminEntry?.status === 'disabled' ||
-      adminEntry?.status === 'suspended';
-    const hasActiveRbac = rbacEntry?.status === 'active';
-    const hasActiveAdmin = adminEntry?.active === true && adminEntry?.status !== 'suspended';
+    // Attempt server-side bootstrap via Admin SDK if admins/{uid} is missing for verified primary super admin
+    if (!adminEntry && emailLower === PRIMARY_SUPER_ADMIN_EMAIL) {
+      try {
+        const idToken = await cred.user.getIdToken();
+        const initResp = await fetch('/api/auth/session-init', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
+        if (initResp.ok) {
+          const initJson = (await initResp.json()) as { adminDocCreated?: boolean };
+          if (initJson.adminDocCreated) {
+            await cred.user.getIdToken(true);
+            const recheckSnap = await getDoc(doc(db, 'admins', cred.user.uid));
+            if (recheckSnap.exists()) {
+              adminEntry = recheckSnap.data() as AdminRecord;
+            }
+          }
+        }
+      } catch {
+        // Non-fatal
+      }
+    }
 
-    if (!isBootstrapSuperAdmin) {
-      if (isDisabled) {
-        await signOut(auth);
-        throw new Error(
-          isSuspended
-            ? 'This staff account has been suspended. Contact the Super Admin.'
-            : 'This administrator account has been disabled. Contact the Super Admin.'
-        );
+    if (!adminEntry) {
+      try {
+        const rbacSnap = await getDoc(doc(db, 'rbac_roles', emailLower));
+        if (rbacSnap.exists()) {
+          rbacEntry = rbacSnap.data() as RbacRoleEntry;
+        }
+      } catch {
+        // Non-fatal
       }
-      if (!hasActiveRbac && !hasActiveAdmin) {
-        await signOut(auth);
-        throw new Error(
-          `Signed in as ${emailLower}, but this account is not registered as an active Admin, Manager, or Support Agent.`
-        );
-      }
+    }
+
+    const adminEmailMatches =
+      !adminEntry?.email || adminEntry.email.trim().toLowerCase() === emailLower;
+    const isAdminInactive =
+      adminEntry !== null &&
+      (!adminEmailMatches ||
+        adminEntry.active === false ||
+        adminEntry.isActive === false ||
+        adminEntry.status === 'disabled' ||
+        adminEntry.status === 'suspended');
+    const isAdminActive =
+      adminEntry !== null &&
+      adminEmailMatches &&
+      (adminEntry.active === true ||
+        adminEntry.isActive === true ||
+        adminEntry.status === 'active') &&
+      !isAdminInactive;
+
+    const isRbacInactive =
+      !adminEntry &&
+      rbacEntry !== null &&
+      (rbacEntry.status === 'disabled' || rbacEntry.status === 'suspended');
+    const isRbacActive =
+      !adminEntry &&
+      rbacEntry !== null &&
+      rbacEntry.status === 'active' &&
+      (!rbacEntry.email || rbacEntry.email.trim().toLowerCase() === emailLower);
+
+    const isSuspended =
+      adminEntry?.status === 'suspended' || (!adminEntry && rbacEntry?.status === 'suspended');
+
+    if (isAdminInactive || isRbacInactive) {
+      await signOut(auth);
+      throw new Error(
+        isSuspended
+          ? 'This staff account has been suspended. Contact the Super Admin.'
+          : 'This administrator account has been disabled. Contact the Super Admin.'
+      );
+    }
+
+    if (!isAdminActive && !isRbacActive) {
+      await signOut(auth);
+      throw new Error(
+        `Signed in as ${emailLower}, but no active admins/${cred.user.uid} (or fallback rbac_roles) record was found in Firestore.`
+      );
     }
 
     await writeActivityLogInternal(
@@ -2212,6 +2166,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         isCatalogAdmin,
         isSupportStaff,
         adminCheckLoading,
+        adminDocMissing,
         emailVerificationRequired,
         loginLockoutRemainingSec,
         signInAdminWithCredentials,

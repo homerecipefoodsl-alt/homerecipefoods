@@ -29,7 +29,7 @@ import {
   setDoc,
   updateDoc,
 } from 'firebase/firestore';
-import { PRIMARY_SUPER_ADMIN_EMAIL, useStore } from '../../context/StoreContext';
+import { useStore } from '../../context/StoreContext';
 import {
   CHATTOGRAM_OUTLETS,
   CONFIRMED_DEMO_SHOWROOM_IDS,
@@ -52,6 +52,7 @@ import {
 import { formatBdtPrice, toSlug } from '../../lib/utils';
 import {
   DEFAULT_ROLE_PERMISSIONS,
+  isSuperAdminRole,
   type AdminRecord,
   type Category,
   type Occasion,
@@ -98,7 +99,7 @@ const ALLOWED_PRODUCT_KEYS = new Set<string>([
   'availability', 'importantNotes', 'featured', 'popular',
   'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt',
   'seoTitle', 'seoDescription', 'seoImage',
-  'createdAt', 'updatedAt',
+  'createdBy', 'updatedBy', 'createdAt', 'updatedAt',
 ]);
 
 const PRODUCT_OPTIONAL_STRING_BOUNDS: ReadonlyArray<[string, number]> = [
@@ -122,6 +123,8 @@ const PRODUCT_OPTIONAL_STRING_BOUNDS: ReadonlyArray<[string, number]> = [
   ['ingredients_en', 600],
   ['seoTitle', 200],
   ['seoDescription', 400],
+  ['createdBy', 254],
+  ['updatedBy', 254],
 ];
 
 const PRODUCT_OPTIONAL_BOOL_KEYS = ['visible', 'active', 'isActive', 'deleted'] as const;
@@ -169,13 +172,13 @@ interface VerifiedWriteSession {
   tokenEmail: string;
   claimsRole: string | null;
   hrfStaffClaim: boolean;
-  rbacSource: 'primary_super_admin' | 'rbac_roles' | 'admins' | 'client_context';
+  rbacSource: 'admins' | 'rbac_roles';
   rbacRole: string | null;
   rbacStatus: string | null;
 }
 
 function hasRolePermissionFallback(role: string | undefined, perm: PermissionKey): boolean {
-  if (role === 'super_admin') return true;
+  if (isSuperAdminRole(role)) return true;
   if (role === 'admin' || role === 'manager' || role === 'support_agent') {
     return (DEFAULT_ROLE_PERMISSIONS[role as StaffRole] ?? []).includes(perm);
   }
@@ -260,78 +263,113 @@ async function ensureVerifiedAdminWriteSession(params: {
     );
   }
 
-  const isPrimarySuperAdmin =
-    emailLower === PRIMARY_SUPER_ADMIN_EMAIL &&
-    refreshedUser.emailVerified &&
-    tokenEmailVerified;
+  const firestore = requireDb();
+  let rbacSource: VerifiedWriteSession['rbacSource'] = 'admins';
+  let rbacRole: string | null = null;
+  let rbacStatus: string | null = null;
+  let serverRecordVerified = false;
 
-  let rbacSource: VerifiedWriteSession['rbacSource'] = isPrimarySuperAdmin
-    ? 'primary_super_admin'
-    : 'client_context';
-  let rbacRole: string | null = isPrimarySuperAdmin ? 'super_admin' : claimsRole;
-  let rbacStatus: string | null = isPrimarySuperAdmin ? 'active' : null;
-  let serverRecordVerified = isPrimarySuperAdmin;
+  // Primary Authority: /admins/{uid}
+  let adminSnap;
+  try {
+    adminSnap = await getDoc(doc(firestore, 'admins', refreshedUser.uid));
+  } catch {
+    throw new CatalogAuthError(
+      'rbac/read-failed',
+      `Firestore থেকে অ্যাডমিন অথরিটি ডকুমেন্ট (admins/${refreshedUser.uid}) যাচাই করা যায়নি।`
+    );
+  }
 
-  if (!isPrimarySuperAdmin) {
-    const firestore = requireDb();
+  if (adminSnap.exists()) {
+    const adminData = adminSnap.data() as AdminRecord & { isActive?: boolean };
+    rbacSource = 'admins';
+    rbacRole = adminData.role || null;
+
+    if (
+      typeof adminData.email === 'string' &&
+      adminData.email.trim() &&
+      adminData.email.trim().toLowerCase() !== emailLower
+    ) {
+      throw new CatalogAuthError(
+        'rbac/account-mismatch',
+        'অ্যাডমিন ডকুমেন্টের ইমেইলের সাথে বর্তমান লগইন ইমেইল মিলছে না।'
+      );
+    }
+
+    const hasActiveTrue =
+      adminData.active === true ||
+      adminData.isActive === true ||
+      adminData.status === 'active';
+    const hasExplicitInactive =
+      adminData.active === false ||
+      adminData.isActive === false ||
+      adminData.status === 'disabled' ||
+      adminData.status === 'suspended';
+    const isAdminRecordActive = hasActiveTrue && !hasExplicitInactive;
+    rbacStatus = isAdminRecordActive
+      ? adminData.status || 'active'
+      : adminData.status || 'disabled';
+
+    if (!isAdminRecordActive) {
+      throw new CatalogAuthError(
+        'rbac/account-inactive',
+        'আপনার অ্যাডমিন অ্যাকাউন্টটি নিষ্ক্রিয় বা সাসপেন্ড অবস্থায় রয়েছে।'
+      );
+    }
+
+    const allowedByAdmin =
+      isSuperAdminRole(adminData.role) ||
+      (Array.isArray(adminData.permissions)
+        ? adminData.permissions.includes(params.requiredPermission)
+        : hasRolePermissionFallback(adminData.role, params.requiredPermission));
+
+    if (!allowedByAdmin) {
+      throw new CatalogAuthError(
+        'rbac/missing-permission',
+        `আপনার "${adminData.role}" অ্যাকাউন্টে "${params.requiredPermission}" অনুমতি নেই।`
+      );
+    }
+    serverRecordVerified = true;
+  } else {
+    // Fallback Authority ONLY when /admins/{uid} does not exist: /rbac_roles/{emailLower}
+    let rbacSnap;
     try {
-      const rbacSnap = await getDoc(doc(firestore, 'rbac_roles', emailLower));
-      if (rbacSnap.exists()) {
-        const rbacData = rbacSnap.data() as RbacRoleEntry;
-        rbacSource = 'rbac_roles';
-        rbacRole = rbacData.role || null;
-        rbacStatus = rbacData.status || 'disabled';
-        if (rbacData.status !== 'active') {
-          throw new CatalogAuthError(
-            'rbac/account-inactive',
-            'আপনার অ্যাডমিন/স্টাফ অ্যাকাউন্টটি সক্রিয় নয় বা সাসপেন্ড করা হয়েছে।'
-          );
-        }
-        const allowedByRbac =
-          rbacData.role === 'super_admin' ||
-          (Array.isArray(rbacData.permissions)
-            ? rbacData.permissions.includes(params.requiredPermission)
-            : hasRolePermissionFallback(rbacData.role, params.requiredPermission));
-        if (!allowedByRbac) {
-          throw new CatalogAuthError(
-            'rbac/missing-permission',
-            `আপনার "${rbacData.role}" রোলে "${params.requiredPermission}" অনুমতি নেই।`
-          );
-        }
-        serverRecordVerified = true;
-      } else {
-        const adminSnap = await getDoc(doc(firestore, 'admins', refreshedUser.uid));
-        if (adminSnap.exists()) {
-          const adminData = adminSnap.data() as AdminRecord;
-          rbacSource = 'admins';
-          rbacRole = adminData.role || null;
-          const adminStatus = adminData.status || (adminData.active ? 'active' : 'disabled');
-          rbacStatus = adminStatus;
-          if (!adminData.active || adminStatus !== 'active') {
-            throw new CatalogAuthError(
-              'rbac/account-inactive',
-              'আপনার অ্যাডমিন অ্যাকাউন্টটি নিষ্ক্রিয় অবস্থায় রয়েছে।'
-            );
-          }
-          const allowedByAdmin =
-            adminData.role === 'super_admin' ||
-            (Array.isArray(adminData.permissions)
-              ? adminData.permissions.includes(params.requiredPermission)
-              : hasRolePermissionFallback(adminData.role, params.requiredPermission));
-          if (!allowedByAdmin) {
-            throw new CatalogAuthError(
-              'rbac/missing-permission',
-              `আপনার "${adminData.role}" অ্যাকাউন্টে "${params.requiredPermission}" অনুমতি নেই।`
-            );
-          }
-          serverRecordVerified = true;
-        }
+      rbacSnap = await getDoc(doc(firestore, 'rbac_roles', emailLower));
+    } catch {
+      throw new CatalogAuthError(
+        'rbac/read-failed',
+        'Firestore থেকে অ্যাডমিন রোল ডকুমেন্ট যাচাই করা যায়নি। অনুগ্রহ করে পরে আবার চেষ্টা করুন।'
+      );
+    }
+
+    if (rbacSnap.exists()) {
+      const rbacData = rbacSnap.data() as RbacRoleEntry;
+      rbacSource = 'rbac_roles';
+      rbacRole = rbacData.role || null;
+      rbacStatus = rbacData.status || 'disabled';
+      if (rbacData.status !== 'active') {
+        throw new CatalogAuthError(
+          'rbac/account-inactive',
+          'আপনার অ্যাডমিন/স্টাফ অ্যাকাউন্টটি সক্রিয় নয় বা সাসপেন্ড করা হয়েছে।'
+        );
       }
-    } catch (rbacErr) {
-      if (rbacErr instanceof CatalogAuthError) {
-        throw rbacErr;
+      const allowedByRbac =
+        isSuperAdminRole(rbacData.role) ||
+        (Array.isArray(rbacData.permissions)
+          ? rbacData.permissions.includes(params.requiredPermission)
+          : hasRolePermissionFallback(rbacData.role, params.requiredPermission));
+      if (!allowedByRbac) {
+        throw new CatalogAuthError(
+          'rbac/missing-permission',
+          `আপনার "${rbacData.role}" রোলে "${params.requiredPermission}" অনুমতি নেই।`
+        );
       }
-      // If reading rbac_roles/admins itself fails or is unavailable offline, fall through to client permission check
+      serverRecordVerified = true;
+    } else {
+      throw new CatalogAuthError(
+        'rbac/admin-record-missing',
+        `Firestore-এ আপনার অ্যাডমিন অথরিটি ডকুমেন্ট (admins/${refreshedUser.uid}) পাওয়া যায়নি। অনুগ্রহ করে সক্রিয় Super Admin রেকর্ড নিশ্চিত করুন।`
+      );
     }
   }
 
@@ -764,6 +802,19 @@ function mapCatalogSaveError(
   if (rawCode === 'auth/token-refresh-failed') {
     return 'লগইন টোকেন যাচাই করা যায়নি (auth/token-refresh-failed)। অনুগ্রহ করে সাইন আউট করে পুনরায় লগইন করুন।';
   }
+  if (rawCode === 'rbac/admin-record-missing') {
+    return err instanceof Error && err.message
+      ? `${err.message} (rbac/admin-record-missing)`
+      : 'Firestore-এ আপনার সক্রিয় অ্যাডমিন অথরিটি ডকুমেন্ট (admins/{uid}) পাওয়া যায়নি (rbac/admin-record-missing)।';
+  }
+  if (rawCode === 'rbac/read-failed') {
+    return err instanceof Error && err.message
+      ? `${err.message} (rbac/read-failed)`
+      : 'Firestore থেকে অ্যাডমিন অথরিটি যাচাই করা যায়নি (rbac/read-failed)।';
+  }
+  if (rawCode === 'rbac/account-mismatch') {
+    return 'অ্যাডমিন রেকর্ডের ইমেইলের সাথে বর্তমান সেশনের ইমেইল মেলেনি (rbac/account-mismatch)।';
+  }
   if (rawCode === 'rbac/account-inactive') {
     return 'আপনার অ্যাডমিন অ্যাকাউন্টটি নিষ্ক্রিয় বা সাসপেন্ড অবস্থায় আছে (rbac/account-inactive)।';
   }
@@ -792,7 +843,8 @@ function mapCatalogSaveError(
         ? `docIssues:${safeDiag.existingIssues.slice(0, 3).join(';')}`
         : null,
     ].filter(Boolean);
-    const diagSuffix = diagParts.length > 0 ? ` [${diagParts.join(' · ')}]` : '';
+    const diagSuffix =
+      import.meta.env.DEV && diagParts.length > 0 ? ` [${diagParts.join(' · ')}]` : '';
     return `Firestore সংরক্ষণের অনুমতি দেয়নি (permission-denied)। অ্যাডমিন অ্যাকাউন্ট যাচাই, Firestore Security Rules অথবা পণ্যের আবশ্যকীয় ফিল্ড যাচাই করে আবার চেষ্টা করুন।${diagSuffix}`;
   }
   if (rawCode === 'failed-precondition' || rawCode.endsWith('/failed-precondition')) {
@@ -1115,8 +1167,17 @@ export function AdminProductsPanel() {
     cleanImages: string[];
     existingData?: Record<string, unknown>;
     forFullSet?: boolean;
+    actorUid?: string;
   }): Record<string, unknown> => {
-    const { source, ingredientsList, sizesList, cleanImages, existingData, forFullSet } = params;
+    const {
+      source,
+      ingredientsList,
+      sizesList,
+      cleanImages,
+      existingData,
+      forFullSet,
+      actorUid,
+    } = params;
     const preservedValidId =
       existingData &&
       typeof existingData.id === 'string' &&
@@ -1348,6 +1409,24 @@ export function AdminProductsPanel() {
       payload.price_label = '';
     }
 
+    const existingCreatedBy =
+      typeof existingData?.createdBy === 'string' && existingData.createdBy.trim()
+        ? existingData.createdBy.trim().slice(0, 254)
+        : typeof source.createdBy === 'string' && source.createdBy.trim()
+        ? source.createdBy.trim().slice(0, 254)
+        : '';
+    if (existingCreatedBy) {
+      payload.createdBy = existingCreatedBy;
+    } else if (actorUid) {
+      payload.createdBy = actorUid.slice(0, 254);
+    }
+
+    if (actorUid) {
+      payload.updatedBy = actorUid.slice(0, 254);
+    } else if (typeof existingData?.updatedBy === 'string' && existingData.updatedBy.trim()) {
+      payload.updatedBy = existingData.updatedBy.trim().slice(0, 254);
+    }
+
     if (!forFullSet && existingData) {
       for (const badKey of getInvalidOptionalProductFieldsToDelete(existingData)) {
         if (!(badKey in payload)) {
@@ -1366,6 +1445,7 @@ export function AdminProductsPanel() {
     ingredientsList: string[];
     sizesList: string[];
     cleanImages: string[];
+    actorUid?: string;
     preflightIssuesOut?: string[];
   }) => {
     const {
@@ -1375,6 +1455,7 @@ export function AdminProductsPanel() {
       ingredientsList,
       sizesList,
       cleanImages,
+      actorUid,
       preflightIssuesOut,
     } = params;
     const unknownKeys = existingData ? getUnknownKeys(existingData, ALLOWED_PRODUCT_KEYS) : [];
@@ -1388,6 +1469,7 @@ export function AdminProductsPanel() {
         cleanImages,
         existingData,
         forFullSet: true,
+        actorUid,
       });
       const replacePayload = {
         ...fullPayload,
@@ -1414,6 +1496,7 @@ export function AdminProductsPanel() {
       cleanImages,
       existingData,
       forFullSet: false,
+      actorUid,
     });
     const finalUpdatePayload = hasValidCreated
       ? updatePayload
@@ -1504,6 +1587,7 @@ export function AdminProductsPanel() {
           image: uploadedResult.downloadUrl,
           imageUrl: uploadedResult.downloadUrl,
           images: nextImages,
+          updatedBy: authSession.uid,
           updatedAt: serverTimestamp(),
         };
         assertValidProductWritePreflight(
@@ -1535,6 +1619,7 @@ export function AdminProductsPanel() {
             sizesList: szList,
             cleanImages: nextImages,
             forFullSet: true,
+            actorUid: authSession.uid,
           });
           const createPayload = {
             ...fullPayload,
@@ -1557,6 +1642,7 @@ export function AdminProductsPanel() {
             ingredientsList: ingList,
             sizesList: szList,
             cleanImages: nextImages,
+            actorUid: authSession.uid,
             preflightIssuesOut: preflightIssues,
           });
         }
@@ -1784,6 +1870,7 @@ export function AdminProductsPanel() {
           image: primaryImage,
           imageUrl: primaryImage,
           images: nextImages,
+          updatedBy: authSession.uid,
           updatedAt: serverTimestamp(),
         };
         assertValidProductWritePreflight(
@@ -1818,6 +1905,7 @@ export function AdminProductsPanel() {
             sizesList: sizes,
             cleanImages: nextImages,
             forFullSet: true,
+            actorUid: authSession.uid,
           });
           const createPayload = {
             ...payload,
@@ -1845,6 +1933,7 @@ export function AdminProductsPanel() {
             ingredientsList: ingredients,
             sizesList: sizes,
             cleanImages: nextImages,
+            actorUid: authSession.uid,
             preflightIssuesOut: preflightIssues,
           });
         }
@@ -1929,6 +2018,7 @@ export function AdminProductsPanel() {
         await updateDoc(productRef, {
           visible: nextVis,
           status: nextVis ? 'published' : 'draft',
+          updatedBy: authSession.uid,
           updatedAt: serverTimestamp(),
         });
       } else {
@@ -1948,6 +2038,7 @@ export function AdminProductsPanel() {
             sizesList: szList,
             cleanImages,
             forFullSet: true,
+            actorUid: authSession.uid,
           });
           const createPayload = { ...payload, createdAt: serverTimestamp() };
           assertValidProductWritePreflight(
@@ -1963,6 +2054,7 @@ export function AdminProductsPanel() {
             ingredientsList: ingList,
             sizesList: szList,
             cleanImages,
+            actorUid: authSession.uid,
             preflightIssuesOut: preflightIssues,
           });
         }
@@ -2009,6 +2101,7 @@ export function AdminProductsPanel() {
         await updateDoc(productRef, {
           deleted: nextDeleted,
           status: nextDeleted ? 'archived' : 'published',
+          updatedBy: authSession.uid,
           updatedAt: serverTimestamp(),
         });
       } else {
@@ -2028,6 +2121,7 @@ export function AdminProductsPanel() {
             sizesList: szList,
             cleanImages,
             forFullSet: true,
+            actorUid: authSession.uid,
           });
           const createPayload = { ...payload, createdAt: serverTimestamp() };
           assertValidProductWritePreflight(
@@ -2043,6 +2137,7 @@ export function AdminProductsPanel() {
             ingredientsList: ingList,
             sizesList: szList,
             cleanImages,
+            actorUid: authSession.uid,
             preflightIssuesOut: preflightIssues,
           });
         }
@@ -2130,6 +2225,7 @@ export function AdminProductsPanel() {
       if (existingSnap.exists() && isExistingProductDocRuleReady(existingData)) {
         await updateDoc(productRef, {
           featured: nextFeatured,
+          updatedBy: authSession.uid,
           updatedAt: serverTimestamp(),
         });
       } else {
@@ -2149,6 +2245,7 @@ export function AdminProductsPanel() {
             sizesList: szList,
             cleanImages,
             forFullSet: true,
+            actorUid: authSession.uid,
           });
           const createPayload = { ...payload, createdAt: serverTimestamp() };
           assertValidProductWritePreflight(
@@ -2164,6 +2261,7 @@ export function AdminProductsPanel() {
             ingredientsList: ingList,
             sizesList: szList,
             cleanImages,
+            actorUid: authSession.uid,
             preflightIssuesOut: preflightIssues,
           });
         }
@@ -3962,7 +4060,7 @@ export function AdminOccasionsPanel() {
       ? product.occasions.filter((o) => o !== occSlug)
       : [...product.occasions, occSlug];
     try {
-      await ensureVerifiedAdminWriteSession({
+      const authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'products_edit',
       });
@@ -3975,6 +4073,7 @@ export function AdminOccasionsPanel() {
       if (existingSnap.exists() && isExistingProductDocRuleReady(existingData)) {
         await updateDoc(prodRef, {
           occasions: next.slice(0, 15),
+          updatedBy: authSession.uid,
           updatedAt: serverTimestamp(),
         });
       } else {

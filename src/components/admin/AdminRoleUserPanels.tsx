@@ -42,6 +42,7 @@ import {
 import {
   ALL_PERMISSION_DEFINITIONS,
   DEFAULT_ROLE_PERMISSIONS,
+  isSuperAdminRole,
   type AccountStatus,
   type PermissionKey,
   type RbacRoleEntry,
@@ -51,6 +52,7 @@ import {
 } from '../../types';
 
 const ROLE_LABEL: Record<UserRole, string> = {
+  primary_super_admin: 'Primary Super Admin',
   super_admin: 'Super Admin',
   admin: 'Admin',
   manager: 'Manager',
@@ -658,8 +660,8 @@ export function AdminRoleManagementPanel() {
 
     let targetRole: StaffRole = isSuperAdmin ? editRole : 'manager';
     if (
-      targetRole === 'super_admin' &&
-      editingEntry.role !== 'super_admin' &&
+      isSuperAdminRole(targetRole) &&
+      !isSuperAdminRole(editingEntry.role) &&
       !isPrimarySuperAdmin
     ) {
       targetRole = 'admin';
@@ -1015,7 +1017,7 @@ export function AdminRoleManagementPanel() {
     (r) => r.role === 'support_agent' && r.status === 'active'
   ).length;
   const superAdminCount = roles.filter(
-    (r) => r.role === 'super_admin' && r.status === 'active'
+    (r) => isSuperAdminRole(r.role) && r.status === 'active'
   ).length;
 
   const passwordMismatch =
@@ -1521,7 +1523,7 @@ export function AdminRoleManagementPanel() {
             <div className="mt-4 rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-3.5">
               <p className="mb-2 text-xs font-bold text-[#1C1917]">Assigned Permissions</p>
               <div className="flex flex-wrap gap-1.5">
-                {(viewingEntry.role === 'super_admin'
+                {(isSuperAdminRole(viewingEntry.role)
                   ? ALL_PERMISSION_DEFINITIONS.map((p) => p.key)
                   : Array.isArray(viewingEntry.permissions)
                   ? viewingEntry.permissions
@@ -1856,12 +1858,13 @@ export function AdminRoleManagementPanel() {
                 </tr>
               ) : (
                 filteredRoles.map((r) => {
-                  const isPrimary = r.email === PRIMARY_SUPER_ADMIN_EMAIL;
+                  const isPrimary =
+                    r.email === PRIMARY_SUPER_ADMIN_EMAIL || r.role === 'primary_super_admin';
                   const isSelf = r.uid && user?.uid === r.uid;
                   const canEditRow =
                     !isPrimary && (isSuperAdmin || r.role === 'manager');
                   const permCount =
-                    r.role === 'super_admin'
+                    isSuperAdminRole(r.role)
                       ? ALL_PERMISSION_DEFINITIONS.length
                       : Array.isArray(r.permissions)
                       ? r.permissions.length
@@ -1904,10 +1907,10 @@ export function AdminRoleManagementPanel() {
                       </td>
 
                       <td className="px-4 py-3">
-                        {r.role === 'super_admin' ? (
+                        {isSuperAdminRole(r.role) ? (
                           <span className="inline-flex items-center gap-1 rounded bg-[#1C1917] px-2.5 py-1 text-[11px] font-bold text-[#FACC15]">
                             <Shield className="h-3 w-3" />
-                            <span>Super Admin</span>
+                            <span>{ROLE_LABEL[r.role] || 'Super Admin'}</span>
                           </span>
                         ) : (
                           <div className="space-y-1">
@@ -2175,7 +2178,7 @@ export function AdminUserManagementPanel() {
         updatedAt: serverTimestamp(),
       });
       if (
-        target.role === 'super_admin' ||
+        isSuperAdminRole(target.role) ||
         target.role === 'admin' ||
         target.role === 'manager' ||
         target.role === 'support_agent'
@@ -2658,7 +2661,7 @@ export function AdminUserManagementPanel() {
 
                           {!isPrimary && !isSelf ? (
                             <>
-                              {u.role !== 'customer' && u.role !== 'super_admin' && (
+                              {u.role !== 'customer' && !isSuperAdminRole(u.role) && (
                                 <button
                                   type="button"
                                   onClick={() => {

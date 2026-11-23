@@ -1,5 +1,8 @@
-export type StaffRole = 'super_admin' | 'admin' | 'manager' | 'support_agent';
+export type StaffRole = 'primary_super_admin' | 'super_admin' | 'admin' | 'manager' | 'support_agent';
 export type UserRole = StaffRole | 'customer';
+export function isSuperAdminRole(role?: string | null): boolean {
+  return role === 'primary_super_admin' || role === 'super_admin';
+}
 export type AccountStatus = 'active' | 'disabled' | 'suspended';
 export type PublishStatus = 'draft' | 'published' | 'archived';
 
@@ -46,6 +49,7 @@ export const ALL_PERMISSION_DEFINITIONS: ReadonlyArray<{
 ];
 
 export const DEFAULT_ROLE_PERMISSIONS: Record<StaffRole, PermissionKey[]> = {
+  primary_super_admin: ALL_PERMISSION_DEFINITIONS.map((p) => p.key),
   super_admin: ALL_PERMISSION_DEFINITIONS.map((p) => p.key),
   admin: [
     'dashboard_view',
@@ -108,6 +112,7 @@ export interface AdminRecord {
   permissions?: PermissionKey[];
   role: StaffRole;
   active: boolean;
+  isActive?: boolean;
   status?: AccountStatus;
   created_by?: string;
   created_at?: unknown;
@@ -325,6 +330,8 @@ export interface Product {
   seoTitle?: string;
   seoDescription?: string;
   seoImage?: string;
+  createdBy?: string;
+  updatedBy?: string;
   createdAt?: unknown;
   updatedAt?: unknown;
 }

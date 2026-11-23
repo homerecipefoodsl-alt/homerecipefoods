@@ -104,9 +104,14 @@ const VALID_PERMISSIONS = [
   'manager_manage',
 ] as const;
 
-type StaffRole = 'super_admin' | 'admin' | 'manager' | 'support_agent';
+type StaffRole = 'primary_super_admin' | 'super_admin' | 'admin' | 'manager' | 'support_agent';
+
+function isSuperAdminRole(role?: string | null): boolean {
+  return role === 'primary_super_admin' || role === 'super_admin';
+}
 
 const DEFAULT_ROLE_PERMISSIONS: Record<StaffRole, string[]> = {
+  primary_super_admin: [...VALID_PERMISSIONS],
   super_admin: [...VALID_PERMISSIONS],
   admin: [
     'dashboard_view',
@@ -482,55 +487,13 @@ async function verifyCallerStaffAuthorityWorker(
   canManageManagers: boolean;
   role: string;
   status: string;
+  adminDocExists: boolean;
 }> {
-  if (callerEmail === PRIMARY_SUPER_ADMIN_EMAIL) {
-    return {
-      allowed: true,
-      isPrimarySuperAdmin: true,
-      isSuperAdmin: true,
-      canManageManagers: true,
-      role: 'super_admin',
-      status: 'active',
-    };
-  }
+  const emailLower = callerEmail.trim().toLowerCase();
 
   try {
-    const docUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
-      projectId
-    )}/databases/${encodeURIComponent(
-      firestoreDatabaseId
-    )}/documents/rbac_roles/${encodeURIComponent(callerEmail)}`;
-    const resp = await fetch(docUrl, {
-      headers: { Authorization: `Bearer ${idToken}` },
-    });
-    if (resp.ok) {
-      const docData = (await resp.json()) as {
-        fields?: {
-          role?: { stringValue?: string };
-          status?: { stringValue?: string };
-          permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
-        };
-      };
-      const role = docData.fields?.role?.stringValue || '';
-      const status = docData.fields?.status?.stringValue || '';
-      const permissions = (docData.fields?.permissions?.arrayValue?.values || [])
-        .map((v) => v.stringValue || '')
-        .filter(Boolean);
-
-      const isActive = status === 'active';
-      const isSuper = isActive && role === 'super_admin';
-      const canManageManagers = isActive && (isSuper || permissions.includes('manager_manage'));
-      return {
-        allowed: isSuper || canManageManagers,
-        isPrimarySuperAdmin: false,
-        isSuperAdmin: isSuper,
-        canManageManagers,
-        role: role || 'customer',
-        status: status || 'disabled',
-      };
-    }
-
-    if (resp.status === 404 && callerUid) {
+    // 1. Primary Authority: /admins/{uid}
+    if (callerUid) {
       const adminUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
         projectId
       )}/databases/${encodeURIComponent(
@@ -539,34 +502,104 @@ async function verifyCallerStaffAuthorityWorker(
       const adminResp = await fetch(adminUrl, {
         headers: { Authorization: `Bearer ${idToken}` },
       });
+
       if (adminResp.ok) {
         const adminData = (await adminResp.json()) as {
           fields?: {
+            email?: { stringValue?: string };
             role?: { stringValue?: string };
             active?: { booleanValue?: boolean };
+            isActive?: { booleanValue?: boolean };
             status?: { stringValue?: string };
             permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
           };
         };
+        const docEmail = (adminData.fields?.email?.stringValue || '').trim().toLowerCase();
         const role = adminData.fields?.role?.stringValue || '';
-        const status = adminData.fields?.status?.stringValue || 'active';
-        const active = adminData.fields?.active?.booleanValue === true;
+        const status = adminData.fields?.status?.stringValue || '';
+        const hasActiveField = Boolean(adminData.fields && 'active' in adminData.fields);
+        const hasIsActiveField = Boolean(adminData.fields && 'isActive' in adminData.fields);
+        const activeFlag = adminData.fields?.active?.booleanValue;
+        const isActiveFlag = adminData.fields?.isActive?.booleanValue;
+        const emailMatches = !docEmail || docEmail === emailLower;
+        const explicitlyInactive =
+          activeFlag === false ||
+          isActiveFlag === false ||
+          status === 'disabled' ||
+          status === 'suspended';
+        const explicitlyActive =
+          (hasActiveField && activeFlag === true) ||
+          (hasIsActiveField && isActiveFlag === true) ||
+          status === 'active';
+        const isActive = emailMatches && !explicitlyInactive && explicitlyActive;
+
         const permissions = (adminData.fields?.permissions?.arrayValue?.values || [])
           .map((v) => v.stringValue || '')
           .filter(Boolean);
-        const isActive = active && status === 'active';
-        const isSuper = isActive && role === 'super_admin';
+        const isSuper = isActive && isSuperAdminRole(role);
         const canManageManagers =
           isActive && (isSuper || permissions.includes('manager_manage'));
         return {
           allowed: isSuper || canManageManagers,
-          isPrimarySuperAdmin: false,
+          isPrimarySuperAdmin: isSuper && emailLower === PRIMARY_SUPER_ADMIN_EMAIL,
           isSuperAdmin: isSuper,
           canManageManagers,
           role: role || 'customer',
           status: isActive ? 'active' : status || 'disabled',
+          adminDocExists: true,
         };
       }
+
+      if (adminResp.status !== 404) {
+        return {
+          allowed: false,
+          isPrimarySuperAdmin: false,
+          isSuperAdmin: false,
+          canManageManagers: false,
+          role: 'customer',
+          status: 'disabled',
+          adminDocExists: false,
+        };
+      }
+    }
+
+    // 2. Fallback Authority: /rbac_roles/{email} ONLY when /admins/{uid} does not exist (404)
+    const docUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+      projectId
+    )}/databases/${encodeURIComponent(
+      firestoreDatabaseId
+    )}/documents/rbac_roles/${encodeURIComponent(emailLower)}`;
+    const resp = await fetch(docUrl, {
+      headers: { Authorization: `Bearer ${idToken}` },
+    });
+    if (resp.ok) {
+      const docData = (await resp.json()) as {
+        fields?: {
+          email?: { stringValue?: string };
+          role?: { stringValue?: string };
+          status?: { stringValue?: string };
+          permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
+        };
+      };
+      const docEmail = (docData.fields?.email?.stringValue || '').trim().toLowerCase();
+      const role = docData.fields?.role?.stringValue || '';
+      const status = docData.fields?.status?.stringValue || '';
+      const permissions = (docData.fields?.permissions?.arrayValue?.values || [])
+        .map((v) => v.stringValue || '')
+        .filter(Boolean);
+
+      const isActive = (!docEmail || docEmail === emailLower) && status === 'active';
+      const isSuper = isActive && isSuperAdminRole(role);
+      const canManageManagers = isActive && (isSuper || permissions.includes('manager_manage'));
+      return {
+        allowed: isSuper || canManageManagers,
+        isPrimarySuperAdmin: isSuper && emailLower === PRIMARY_SUPER_ADMIN_EMAIL,
+        isSuperAdmin: isSuper,
+        canManageManagers,
+        role: role || 'customer',
+        status: isActive ? 'active' : status || 'disabled',
+        adminDocExists: false,
+      };
     }
 
     return {
@@ -576,6 +609,7 @@ async function verifyCallerStaffAuthorityWorker(
       canManageManagers: false,
       role: 'customer',
       status: 'disabled',
+      adminDocExists: false,
     };
   } catch {
     return {
@@ -585,6 +619,7 @@ async function verifyCallerStaffAuthorityWorker(
       canManageManagers: false,
       role: 'customer',
       status: 'disabled',
+      adminDocExists: false,
     };
   }
 }
@@ -596,44 +631,11 @@ async function verifyCatalogUploadAuthorityWorker(
   projectId: string,
   firestoreDatabaseId: string
 ): Promise<{ allowed: boolean; role: string }> {
-  if (callerEmail === PRIMARY_SUPER_ADMIN_EMAIL) {
-    return { allowed: true, role: 'super_admin' };
-  }
+  const emailLower = callerEmail.trim().toLowerCase();
 
   try {
-    const rbacUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
-      projectId
-    )}/databases/${encodeURIComponent(
-      firestoreDatabaseId
-    )}/documents/rbac_roles/${encodeURIComponent(callerEmail)}`;
-    const rbacResp = await fetch(rbacUrl, {
-      headers: { Authorization: `Bearer ${idToken}` },
-    });
-
-    if (rbacResp.ok) {
-      const docData = (await rbacResp.json()) as {
-        fields?: {
-          role?: { stringValue?: string };
-          status?: { stringValue?: string };
-          permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
-        };
-      };
-      const role = docData.fields?.role?.stringValue || '';
-      const status = docData.fields?.status?.stringValue || '';
-      const hasExplicitPermissions = Boolean(docData.fields && 'permissions' in docData.fields);
-      const permissions = (docData.fields?.permissions?.arrayValue?.values || [])
-        .map((v) => v.stringValue || '')
-        .filter(Boolean);
-      const isActive = status === 'active';
-      const hasCatalogPerm =
-        role === 'super_admin' ||
-        (hasExplicitPermissions
-          ? CATALOG_UPLOAD_PERMISSIONS.some((perm) => permissions.includes(perm))
-          : CATALOG_UPLOAD_STAFF_ROLES.has(role));
-      return { allowed: isActive && hasCatalogPerm, role: role || 'customer' };
-    }
-
-    if (rbacResp.status === 404 && callerUid) {
+    // 1. Primary Authority: /admins/{uid}
+    if (callerUid) {
       const adminUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
         projectId
       )}/databases/${encodeURIComponent(
@@ -642,30 +644,87 @@ async function verifyCatalogUploadAuthorityWorker(
       const adminResp = await fetch(adminUrl, {
         headers: { Authorization: `Bearer ${idToken}` },
       });
+
       if (adminResp.ok) {
         const adminData = (await adminResp.json()) as {
           fields?: {
+            email?: { stringValue?: string };
             role?: { stringValue?: string };
             active?: { booleanValue?: boolean };
+            isActive?: { booleanValue?: boolean };
             status?: { stringValue?: string };
             permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
           };
         };
+        const docEmail = (adminData.fields?.email?.stringValue || '').trim().toLowerCase();
         const role = adminData.fields?.role?.stringValue || '';
-        const status = adminData.fields?.status?.stringValue || 'active';
-        const active = adminData.fields?.active?.booleanValue === true;
+        const status = adminData.fields?.status?.stringValue || '';
+        const hasActiveField = Boolean(adminData.fields && 'active' in adminData.fields);
+        const hasIsActiveField = Boolean(adminData.fields && 'isActive' in adminData.fields);
+        const activeFlag = adminData.fields?.active?.booleanValue;
+        const isActiveFlag = adminData.fields?.isActive?.booleanValue;
+        const emailMatches = !docEmail || docEmail === emailLower;
+        const explicitlyInactive =
+          activeFlag === false ||
+          isActiveFlag === false ||
+          status === 'disabled' ||
+          status === 'suspended';
+        const explicitlyActive =
+          (hasActiveField && activeFlag === true) ||
+          (hasIsActiveField && isActiveFlag === true) ||
+          status === 'active';
+        const isActive = emailMatches && !explicitlyInactive && explicitlyActive;
+
         const hasExplicitPermissions = Boolean(adminData.fields && 'permissions' in adminData.fields);
         const permissions = (adminData.fields?.permissions?.arrayValue?.values || [])
           .map((v) => v.stringValue || '')
           .filter(Boolean);
-        const isActive = active && status === 'active';
         const hasCatalogPerm =
-          role === 'super_admin' ||
+          isSuperAdminRole(role) ||
           (hasExplicitPermissions
             ? CATALOG_UPLOAD_PERMISSIONS.some((perm) => permissions.includes(perm))
             : CATALOG_UPLOAD_STAFF_ROLES.has(role));
         return { allowed: isActive && hasCatalogPerm, role: role || 'customer' };
       }
+
+      if (adminResp.status !== 404) {
+        return { allowed: false, role: 'customer' };
+      }
+    }
+
+    // 2. Fallback Authority: /rbac_roles/{email} ONLY when /admins/{uid} is missing (404)
+    const rbacUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+      projectId
+    )}/databases/${encodeURIComponent(
+      firestoreDatabaseId
+    )}/documents/rbac_roles/${encodeURIComponent(emailLower)}`;
+    const rbacResp = await fetch(rbacUrl, {
+      headers: { Authorization: `Bearer ${idToken}` },
+    });
+
+    if (rbacResp.ok) {
+      const docData = (await rbacResp.json()) as {
+        fields?: {
+          email?: { stringValue?: string };
+          role?: { stringValue?: string };
+          status?: { stringValue?: string };
+          permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
+        };
+      };
+      const docEmail = (docData.fields?.email?.stringValue || '').trim().toLowerCase();
+      const role = docData.fields?.role?.stringValue || '';
+      const status = docData.fields?.status?.stringValue || '';
+      const hasExplicitPermissions = Boolean(docData.fields && 'permissions' in docData.fields);
+      const permissions = (docData.fields?.permissions?.arrayValue?.values || [])
+        .map((v) => v.stringValue || '')
+        .filter(Boolean);
+      const isActive = (!docEmail || docEmail === emailLower) && status === 'active';
+      const hasCatalogPerm =
+        isSuperAdminRole(role) ||
+        (hasExplicitPermissions
+          ? CATALOG_UPLOAD_PERMISSIONS.some((perm) => permissions.includes(perm))
+          : CATALOG_UPLOAD_STAFF_ROLES.has(role));
+      return { allowed: isActive && hasCatalogPerm, role: role || 'customer' };
     }
   } catch {
     // Deny on verification failure
@@ -684,7 +743,7 @@ async function syncFirebaseStaffCustomClaimsWorker(params: {
   if (!params.uid) return false;
   const isCatalogStaff =
     params.status === 'active' &&
-    ['super_admin', 'admin', 'manager'].includes(params.role);
+    ['primary_super_admin', 'super_admin', 'admin', 'manager'].includes(params.role);
   try {
     const resp = await fetch(
       `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(
@@ -1059,7 +1118,7 @@ async function handleSessionInit(request: Request, env: Env): Promise<Response> 
       );
     }
 
-    const authority = await verifyCallerStaffAuthorityWorker(
+    let authority = await verifyCallerStaffAuthorityWorker(
       token,
       decoded.email,
       projectId,
@@ -1087,15 +1146,100 @@ async function handleSessionInit(request: Request, env: Env): Promise<Response> 
       ? 'Admin SDK Status: Ready'
       : 'Firebase Admin private key could not be initialized by Cloudflare Worker WebCrypto.';
 
-    let claimsSynced = false;
+    let adminDocExists = authority.adminDocExists;
+    let adminDocCreated = false;
+    const adminDocPath = `admins/${decoded.uid}`;
+
+    let adminToken: string | null = null;
+    if (saCheck.ok && cryptoInitialized) {
+      try {
+        adminToken = await getGoogleAdminAccessTokenWorker(saCheck.config);
+      } catch {
+        adminToken = null;
+      }
+    }
+
+    // Server-side Admin SDK check & one-time missing primary super admin bootstrap ONLY if missing
     if (
-      saCheck.ok &&
-      cryptoInitialized &&
-      authority.status === 'active' &&
-      ['super_admin', 'admin', 'manager', 'support_agent'].includes(authority.role)
+      adminToken &&
+      !adminDocExists &&
+      decoded.email.trim().toLowerCase() === PRIMARY_SUPER_ADMIN_EMAIL &&
+      decoded.emailVerified
     ) {
       try {
-        const adminToken = await getGoogleAdminAccessTokenWorker(saCheck.config);
+        const targetProject = saCheck.ok ? saCheck.config.project_id : projectId;
+        const adminGetUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+          targetProject
+        )}/databases/${encodeURIComponent(
+          firestoreDatabaseId
+        )}/documents/admins/${encodeURIComponent(decoded.uid)}`;
+        const existingCheck = await fetch(adminGetUrl, {
+          headers: { Authorization: `Bearer ${adminToken}` },
+        });
+        if (existingCheck.ok) {
+          adminDocExists = true;
+        } else if (existingCheck.status === 404) {
+          const nowIso = new Date().toISOString();
+          const createUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+            targetProject
+          )}/databases/${encodeURIComponent(
+            firestoreDatabaseId
+          )}/documents/admins?documentId=${encodeURIComponent(decoded.uid)}`;
+          const createResp = await fetch(createUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${adminToken}`,
+            },
+            body: JSON.stringify({
+              fields: {
+                uid: { stringValue: decoded.uid },
+                email: { stringValue: decoded.email.trim().toLowerCase() },
+                username: { stringValue: 'mahmud' },
+                display_name: { stringValue: 'Mahmud (Primary Super Admin)' },
+                role: { stringValue: 'primary_super_admin' },
+                active: { booleanValue: true },
+                isActive: { booleanValue: true },
+                status: { stringValue: 'active' },
+                permissions: {
+                  arrayValue: {
+                    values: VALID_PERMISSIONS.map((p) => ({ stringValue: p })),
+                  },
+                },
+                created_by: { stringValue: 'server-session-init' },
+                created_at: { timestampValue: nowIso },
+                updated_at: { timestampValue: nowIso },
+                last_login_at: { timestampValue: nowIso },
+              },
+            }),
+          });
+          if (createResp.ok) {
+            adminDocCreated = true;
+            adminDocExists = true;
+            authority = await verifyCallerStaffAuthorityWorker(
+              token,
+              decoded.email,
+              projectId,
+              firestoreDatabaseId,
+              decoded.uid
+            );
+          }
+        }
+      } catch {
+        // Non-blocking bootstrap attempt
+      }
+    }
+
+    let claimsSynced = false;
+    if (
+      adminToken &&
+      saCheck.ok &&
+      authority.status === 'active' &&
+      ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent'].includes(
+        authority.role
+      )
+    ) {
+      try {
         claimsSynced = await syncFirebaseStaffCustomClaimsWorker({
           adminToken,
           projectId: saCheck.config.project_id,
@@ -1116,12 +1260,16 @@ async function handleSessionInit(request: Request, env: Env): Promise<Response> 
       email: decoded.email,
       isPrimarySuperAdmin: authority.isPrimarySuperAdmin,
       authorizedSuperAdmin: authority.isSuperAdmin,
+      adminDocExists,
+      adminDocCreated,
+      adminDocPath,
+      adminRole: authority.role,
       hasAdminCredentials: saCheck.ok && cryptoInitialized,
       claimsSynced,
       serviceAccountStatus,
       serviceAccountMessage,
-      role: authority.isSuperAdmin
-        ? 'super_admin'
+      role: isSuperAdminRole(authority.role) && authority.status === 'active'
+        ? authority.role
         : ['admin', 'manager', 'support_agent'].includes(authority.role) && authority.status === 'active'
         ? authority.role
         : authority.canManageManagers
@@ -1612,7 +1760,7 @@ async function handleAdminUpdateUserStatus(request: Request, env: Env): Promise<
                 customAttributes: JSON.stringify({
                   hrf_staff:
                     !Boolean(body.disabled) &&
-                    ['super_admin', 'admin', 'manager'].includes(body.role),
+                    ['primary_super_admin', 'super_admin', 'admin', 'manager'].includes(body.role),
                   role: body.role,
                   staff_status: Boolean(body.disabled) ? 'disabled' : 'active',
                 }),
