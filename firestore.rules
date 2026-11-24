@@ -73,7 +73,15 @@ service cloud.firestore {
           || ('status' in adminDoc() && adminDoc().status == 'active'))
         && !('active' in adminDoc() && adminDoc().active == false)
         && !('isActive' in adminDoc() && adminDoc().isActive == false)
-        && (!('status' in adminDoc()) || adminDoc().status == 'active')
+        && (
+          !('status' in adminDoc())
+          || adminDoc().status == 'active'
+          || (
+            (('active' in adminDoc() && adminDoc().active == true)
+              || ('isActive' in adminDoc() && adminDoc().isActive == true))
+            && !(adminDoc().status in ['disabled', 'suspended', 'inactive', 'revoked'])
+          )
+        )
         && ('role' in adminDoc())
         && adminDoc().role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent'];
     }
@@ -1295,7 +1303,8 @@ service cloud.firestore {
         )
         && (
           !('createdBy' in existing())
-          || (existing().createdBy is string && existing().createdBy == '')
+          || !(existing().createdBy is string)
+          || existing().createdBy == ''
           || (('createdBy' in incoming()) && incoming().createdBy == existing().createdBy)
         )
         && incoming().updatedAt == request.time

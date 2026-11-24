@@ -130,6 +130,19 @@ export function validateProductImageUrl(url: string | null | undefined): ImageUr
       extractedKey,
     };
   }
+  if (
+    (raw.startsWith('/src/assets/') || raw.startsWith('/assets/')) &&
+    !raw.includes('..') &&
+    !raw.includes('\\') &&
+    !/\s/.test(raw)
+  ) {
+    return {
+      valid: true,
+      normalizedUrl: raw,
+      isR2: false,
+      extractedKey: '',
+    };
+  }
   try {
     const parsed = new URL(raw);
     const host = parsed.hostname.toLowerCase();
