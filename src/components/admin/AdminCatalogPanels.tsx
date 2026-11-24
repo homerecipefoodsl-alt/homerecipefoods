@@ -1594,9 +1594,12 @@ export function AdminProductsPanel() {
       payload.price_label = '';
     }
 
+    const rawExistingCreatedBy = existingData?.createdBy;
     const existingCreatedBy =
-      typeof existingData?.createdBy === 'string' && existingData.createdBy.trim()
-        ? existingData.createdBy.trim().slice(0, 254)
+      typeof rawExistingCreatedBy === 'string' &&
+      rawExistingCreatedBy.trim().length > 0 &&
+      rawExistingCreatedBy.length <= 254
+        ? rawExistingCreatedBy
         : typeof source.createdBy === 'string' && source.createdBy.trim()
         ? source.createdBy.trim().slice(0, 254)
         : '';

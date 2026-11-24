@@ -48,7 +48,7 @@ service cloud.firestore {
     }
 
     function authEmail() {
-      return request.auth.token.email.lower();
+      return request.auth.token.email.trim().lower();
     }
 
     function adminDoc() {
@@ -67,7 +67,8 @@ service cloud.firestore {
     function hasActiveAdminDoc() {
       return hasVerifiedEmail()
         && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
-        && (!('email' in adminDoc()) || (adminDoc().email is string && adminDoc().email.lower() == authEmail()))
+        && (!('uid' in adminDoc()) || (adminDoc().uid is string && adminDoc().uid == request.auth.uid))
+        && (!('email' in adminDoc()) || (adminDoc().email is string && adminDoc().email.trim().lower() == authEmail()))
         && (('active' in adminDoc() && adminDoc().active == true)
           || ('isActive' in adminDoc() && adminDoc().isActive == true)
           || ('status' in adminDoc() && adminDoc().status == 'active'))
@@ -92,7 +93,7 @@ service cloud.firestore {
       return hasVerifiedEmail()
         && !exists(/databases/$(database)/documents/admins/$(request.auth.uid))
         && exists(/databases/$(database)/documents/rbac_roles/$(authEmail()))
-        && (!('email' in rbacDoc()) || (rbacDoc().email is string && rbacDoc().email.lower() == authEmail()))
+        && (!('email' in rbacDoc()) || (rbacDoc().email is string && rbacDoc().email.trim().lower() == authEmail()))
         && ('status' in rbacDoc())
         && rbacDoc().status == 'active'
         && ('role' in rbacDoc())
@@ -1304,7 +1305,7 @@ service cloud.firestore {
         && (
           !('createdBy' in existing())
           || !(existing().createdBy is string)
-          || existing().createdBy == ''
+          || existing().createdBy.trim() == ''
           || (('createdBy' in incoming()) && incoming().createdBy == existing().createdBy)
         )
         && incoming().updatedAt == request.time
