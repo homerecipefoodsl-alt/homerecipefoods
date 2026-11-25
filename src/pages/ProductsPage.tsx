@@ -56,9 +56,9 @@ export function ProductsPage() {
 
   useEffect(() => {
     if (activeCatText) {
-      document.title = `${activeCatText.nameBn} (${activeCatText.nameEn}) – Home Recipe Foods`;
+      document.title = `${activeCatText.nameEn || activeCatText.nameBn} – Home Recipe Foods`;
     } else if (activeOccText) {
-      document.title = `${activeOccText.nameBn} (${activeOccText.nameEn}) – Home Recipe Foods`;
+      document.title = `${activeOccText.nameEn || activeOccText.nameBn} – Home Recipe Foods`;
     } else {
       document.title = 'All Products & Menu Showcase – Home Recipe Foods';
     }
@@ -134,40 +134,39 @@ export function ProductsPage() {
 
   return (
     <div className="mx-auto max-w-7xl px-3 py-6 sm:px-6 sm:py-10 lg:px-8">
-      {/* Compact Header */}
+      {/* Compact Editorial Header */}
       <div className="border-b border-[#E7E5E4] pb-4">
-        <p className="text-[11px] font-semibold tracking-wider text-[#DC1F26] sm:text-xs">
-          প্রোডাক্ট শো-কেস ও মেনু · Product Showcase
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-[#B91C1C] sm:text-xs">
+          Product Showcase &amp; Menu
         </p>
-        <h1 className="font-display mt-1 text-2xl font-bold text-[#1C1917] sm:text-4xl">
+        <h1 className="font-display mt-1 text-3xl font-semibold text-[#1C1917] sm:text-4xl">
           {activeCatText
-            ? `${activeCatText.nameBn}`
-            : activeOccasionObj && activeOccText
-            ? `${activeOccasionObj.icon} ${activeOccText.nameBn}`
-            : 'আমাদের সকল পণ্যসমূহ'}
-        </h1>
-        <p className="mt-0.5 text-xs font-medium text-[#78716C] sm:text-sm">
-          {activeCatText
-            ? activeCatText.nameEn
+            ? activeCatText.nameEn || activeCatText.nameBn
             : activeOccText
-            ? activeOccText.nameEn
-            : 'বাংলা বা ইংরেজিতে পছন্দের খাবার খুঁজুন এবং নিকটস্থ শোরুম থেকে সংগ্রহ করুন।'}
+            ? activeOccText.nameEn || activeOccText.nameBn
+            : 'Our Complete Menu'}
+        </h1>
+        <p className="font-bn mt-0.5 text-xs font-normal text-[#57534E] sm:text-sm">
+          {activeCatText
+            ? activeCatText.nameBn
+            : activeOccText
+            ? activeOccText.nameBn
+            : 'আমাদের সকল পণ্যসমূহ · Explore freshly prepared cakes, pastries, sweets & savories across our showrooms.'}
         </p>
       </div>
 
-      {/* Compact Search & Horizontal Filter Toolbar (hidden on category pages) */}
+      {/* Search & Horizontal Filter Toolbar */}
       {!categorySlug && (
         <div className="mt-4 space-y-2.5">
           <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
-            {/* Slim Search Bar (44px mobile, bounded desktop width) */}
             <div className="mx-auto flex h-[44px] w-full max-w-md items-center rounded-xl border border-[#D6D3D1] bg-white pl-3.5 pr-2 transition-colors focus-within:border-[#DC1F26] lg:mx-0 lg:h-10 lg:max-w-sm">
               <Search className="mr-2 h-4 w-4 shrink-0 text-[#78716C]" aria-hidden="true" />
               <input
                 type="search"
                 value={queryText}
                 onChange={(e) => setQueryText(e.target.value)}
-                placeholder="পণ্য খুঁজুন..."
-                aria-label="পণ্য খুঁজুন"
+                placeholder="Search cakes, sweets, pastries..."
+                aria-label="Search products"
                 className="min-w-0 flex-1 bg-transparent text-sm text-[#1C1917] placeholder:text-[#78716C] focus:outline-none"
               />
               {queryText && (
@@ -182,143 +181,148 @@ export function ProductsPage() {
               )}
             </div>
 
-            {/* Compact Horizontal Filter Controls (scroll smoothly on mobile, 1 row on desktop) */}
-          <div className="no-scrollbar -mx-3 flex items-center gap-2 overflow-x-auto px-3 pb-0.5 lg:mx-0 lg:flex-wrap lg:overflow-visible lg:px-0 lg:pb-0">
-            <span className="inline-flex shrink-0 items-center gap-1 text-[11px] font-medium text-[#78716C]">
-              <Filter className="h-3.5 w-3.5" />
+            <div className="no-scrollbar -mx-3 flex items-center gap-2 overflow-x-auto px-3 pb-0.5 lg:mx-0 lg:flex-wrap lg:overflow-visible lg:px-0 lg:pb-0">
+              <span className="inline-flex shrink-0 items-center gap-1 text-[11px] font-medium text-[#78716C]">
+                <Filter className="h-3.5 w-3.5" />
+              </span>
+
+              <select
+                aria-label="Filter by Category"
+                value={selectedCategory}
+                onChange={(e) => setSelectedCategory(e.target.value)}
+                className={`h-9 shrink-0 cursor-pointer rounded-lg border px-3 text-xs font-medium transition-colors focus:border-[#DC1F26] focus:outline-none ${
+                  selectedCategory !== 'all'
+                    ? 'border-[#1C1917] bg-[#1C1917] text-white'
+                    : 'border-[#D6D3D1] bg-white text-[#1C1917] hover:border-[#1C1917]/40'
+                }`}
+              >
+                <option value="all">All Categories</option>
+                {categories.map((cat) => {
+                  const ct = getCategoryText(cat);
+                  return (
+                    <option key={cat.id} value={cat.slug} className="bg-white text-[#1C1917]">
+                      {ct.nameEn || ct.nameBn}
+                    </option>
+                  );
+                })}
+              </select>
+
+              <select
+                aria-label="Filter by Occasion"
+                value={selectedOccasion}
+                onChange={(e) => setSelectedOccasion(e.target.value)}
+                className={`h-9 shrink-0 cursor-pointer rounded-lg border px-3 text-xs font-medium transition-colors focus:border-[#DC1F26] focus:outline-none ${
+                  selectedOccasion !== 'all'
+                    ? 'border-[#1C1917] bg-[#1C1917] text-white'
+                    : 'border-[#D6D3D1] bg-white text-[#1C1917] hover:border-[#1C1917]/40'
+                }`}
+              >
+                <option value="all">All Occasions</option>
+                {occasions.map((occ) => {
+                  const ot = getOccasionText(occ);
+                  return (
+                    <option key={occ.id} value={occ.slug} className="bg-white text-[#1C1917]">
+                      {ot.nameEn || ot.nameBn}
+                    </option>
+                  );
+                })}
+              </select>
+
+              <select
+                aria-label="Filter by Price Range"
+                value={priceBucket}
+                onChange={(e) => setPriceBucket(e.target.value as PriceBucket)}
+                className={`h-9 shrink-0 cursor-pointer rounded-lg border px-3 text-xs font-medium transition-colors focus:border-[#DC1F26] focus:outline-none ${
+                  priceBucket !== 'all'
+                    ? 'border-[#1C1917] bg-[#1C1917] text-white'
+                    : 'border-[#D6D3D1] bg-white text-[#1C1917] hover:border-[#1C1917]/40'
+                }`}
+              >
+                <option value="all">All Prices</option>
+                <option value="under-300" className="bg-white text-[#1C1917]">Under ৳ 300</option>
+                <option value="300-800" className="bg-white text-[#1C1917]">৳ 300 – ৳ 800</option>
+                <option value="800-2000" className="bg-white text-[#1C1917]">৳ 800 – ৳ 2,000</option>
+                <option value="above-2000" className="bg-white text-[#1C1917]">Above ৳ 2,000</option>
+              </select>
+
+              <select
+                aria-label="Filter by Product Type"
+                value={selectedType}
+                onChange={(e) => setSelectedType(e.target.value)}
+                className={`h-9 shrink-0 cursor-pointer rounded-lg border px-3 text-xs font-medium transition-colors focus:border-[#DC1F26] focus:outline-none ${
+                  selectedType !== 'all'
+                    ? 'border-[#1C1917] bg-[#1C1917] text-white'
+                    : 'border-[#D6D3D1] bg-white text-[#1C1917] hover:border-[#1C1917]/40'
+                }`}
+              >
+                <option value="all">All Types</option>
+                {productTypes.map((pt) => (
+                  <option key={pt} value={pt} className="bg-white text-[#1C1917]">
+                    {pt}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between text-xs text-[#57534E]">
+            <span className="tabular-nums font-medium">
+              {filteredProducts.length} {filteredProducts.length === 1 ? 'item' : 'items'} available
             </span>
-
-            <select
-              aria-label="Filter by Category"
-              value={selectedCategory}
-              onChange={(e) => setSelectedCategory(e.target.value)}
-              className={`h-9 shrink-0 cursor-pointer rounded-lg border px-3 text-xs font-medium transition-colors focus:border-[#DC1F26] focus:outline-none ${
-                selectedCategory !== 'all'
-                  ? 'border-[#1C1917] bg-[#1C1917] text-white'
-                  : 'border-[#D6D3D1] bg-white text-[#1C1917] hover:border-[#1C1917]/40'
-              }`}
-            >
-              <option value="all">Category</option>
-              {categories.map((cat) => {
-                const ct = getCategoryText(cat);
-                return (
-                  <option key={cat.id} value={cat.slug} className="bg-white text-[#1C1917]">
-                    {ct.nameBn}
-                  </option>
-                );
-              })}
-            </select>
-
-            <select
-              aria-label="Filter by Occasion"
-              value={selectedOccasion}
-              onChange={(e) => setSelectedOccasion(e.target.value)}
-              className={`h-9 shrink-0 cursor-pointer rounded-lg border px-3 text-xs font-medium transition-colors focus:border-[#DC1F26] focus:outline-none ${
-                selectedOccasion !== 'all'
-                  ? 'border-[#1C1917] bg-[#1C1917] text-white'
-                  : 'border-[#D6D3D1] bg-white text-[#1C1917] hover:border-[#1C1917]/40'
-              }`}
-            >
-              <option value="all">Occasion</option>
-              {occasions.map((occ) => {
-                const ot = getOccasionText(occ);
-                return (
-                  <option key={occ.id} value={occ.slug} className="bg-white text-[#1C1917]">
-                    {occ.icon} {ot.nameBn}
-                  </option>
-                );
-              })}
-            </select>
-
-            <select
-              aria-label="Filter by Price Range"
-              value={priceBucket}
-              onChange={(e) => setPriceBucket(e.target.value as PriceBucket)}
-              className={`h-9 shrink-0 cursor-pointer rounded-lg border px-3 text-xs font-medium transition-colors focus:border-[#DC1F26] focus:outline-none ${
-                priceBucket !== 'all'
-                  ? 'border-[#1C1917] bg-[#1C1917] text-white'
-                  : 'border-[#D6D3D1] bg-white text-[#1C1917] hover:border-[#1C1917]/40'
-              }`}
-            >
-              <option value="all">Price</option>
-              <option value="under-300" className="bg-white text-[#1C1917]">৳ ৩০০ এর নিচে</option>
-              <option value="300-800" className="bg-white text-[#1C1917]">৳ ৩০০ – ৳ ৮০০</option>
-              <option value="800-2000" className="bg-white text-[#1C1917]">৳ ৮০০ – ৳ ২,০০০</option>
-              <option value="above-2000" className="bg-white text-[#1C1917]">৳ ২,০০০+</option>
-            </select>
-
-            <select
-              aria-label="Filter by Product Type"
-              value={selectedType}
-              onChange={(e) => setSelectedType(e.target.value)}
-              className={`h-9 shrink-0 cursor-pointer rounded-lg border px-3 text-xs font-medium transition-colors focus:border-[#DC1F26] focus:outline-none ${
-                selectedType !== 'all'
-                  ? 'border-[#1C1917] bg-[#1C1917] text-white'
-                  : 'border-[#D6D3D1] bg-white text-[#1C1917] hover:border-[#1C1917]/40'
-              }`}
-            >
-              <option value="all">Type</option>
-              {productTypes.map((pt) => (
-                <option key={pt} value={pt} className="bg-white text-[#1C1917]">
-                  {pt}
-                </option>
-              ))}
-            </select>
+            {hasActiveFilters && (
+              <button
+                type="button"
+                onClick={resetFilters}
+                className="inline-flex cursor-pointer items-center gap-1 font-semibold text-[#B91C1C] hover:underline"
+              >
+                <RotateCcw className="h-3 w-3" />
+                <span>Reset filters</span>
+              </button>
+            )}
           </div>
         </div>
-
-        {/* Slim Result Summary Row */}
-        <div className="flex items-center justify-between text-xs text-[#57534E]">
-          <span className="font-mono tabular-nums font-medium">
-            {filteredProducts.length}টি পণ্য পাওয়া গেছে
-          </span>
-          {hasActiveFilters && (
-            <button
-              type="button"
-              onClick={resetFilters}
-              className="inline-flex cursor-pointer items-center gap-1 font-semibold text-[#DC1F26] hover:underline"
-            >
-              <RotateCcw className="h-3 w-3" />
-              <span>রিসেট</span>
-            </button>
-          )}
-        </div>
-      </div>
       )}
 
       {/* Results Grid */}
       {productsLoading ? (
-        <div className="mt-8 grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-4 lg:gap-6">
-          {Array.from({ length: 8 }).map((_, i) => (
-            <div
-              key={i}
-              className="h-80 animate-pulse rounded-xl border border-[#E7E5E4] bg-[#F5F4F0]"
-            />
-          ))}
+        <div className="mt-8 space-y-4">
+          <p className="text-xs font-medium text-[#78716C]">Loading showcase items...</p>
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-4 lg:gap-6">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div
+                key={i}
+                className="h-72 rounded-xl border border-[#E7E5E4] bg-[#F5F4F0]/60"
+              />
+            ))}
+          </div>
         </div>
       ) : productsError && products.length === 0 ? (
-        <div className="mt-10 rounded-2xl border border-red-200 bg-red-50/70 p-10 text-center">
-          <UtensilsCrossed className="mx-auto h-10 w-10 text-[#B91C1C]" />
-          <h3 className="font-display mt-3 text-xl font-bold text-[#1C1917] sm:text-2xl">
-            পণ্যগুলো এখন লোড করা যাচ্ছে না। অনুগ্রহ করে কিছুক্ষণ পরে আবার চেষ্টা করুন।
+        <div className="mt-10 rounded-xl border border-red-200 bg-red-50/70 p-10 text-center">
+          <UtensilsCrossed className="mx-auto h-9 w-9 text-[#B91C1C]" />
+          <h3 className="font-display mt-3 text-xl font-semibold text-[#1C1917] sm:text-2xl">
+            Unable to Load Products Right Now
           </h3>
+          <p className="font-bn mt-1 text-xs text-[#57534E]">
+            পণ্যগুলো এখন লোড করা যাচ্ছে না। অনুগ্রহ করে কিছুক্ষণ পরে আবার চেষ্টা করুন।
+          </p>
           <button
             type="button"
             onClick={() => window.location.reload()}
             className="mt-5 inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#DC1F26]"
           >
             <RotateCcw className="h-4 w-4" />
-            <span>পুনরায় চেষ্টা করুন</span>
+            <span>Try Again</span>
           </button>
         </div>
       ) : filteredProducts.length === 0 ? (
-        <div className="mt-10 rounded-2xl border border-[#E7E5E4] bg-white p-12 text-center">
-          <UtensilsCrossed className="mx-auto h-10 w-10 text-[#A8A29E]" />
-          <h3 className="font-display mt-3 text-2xl font-bold text-[#1C1917]">
-            কোনো পণ্য খুঁজে পাওয়া যায়নি
+        <div className="mt-10 rounded-xl border border-[#E7E5E4] bg-white p-12 text-center">
+          <UtensilsCrossed className="mx-auto h-9 w-9 text-[#A8A29E]" />
+          <h3 className="font-display mt-3 text-2xl font-semibold text-[#1C1917]">
+            No Matching Products Found
           </h3>
+          <p className="font-bn mt-1 text-xs text-[#78716C]">কোনো পণ্য খুঁজে পাওয়া যায়নি</p>
           <p className="mx-auto mt-2 max-w-md text-sm text-[#57534E]">
-            আপনার সার্চ শব্দ বা ফিল্টার পরিবর্তন করে আবার চেষ্টা করুন, অথবা সব ফিল্টার রিসেট করুন।
+            Try adjusting your search keywords or resetting the category, occasion, or price filters.
           </p>
           <button
             type="button"
@@ -326,7 +330,7 @@ export function ProductsPage() {
             className="mt-5 inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#DC1F26]"
           >
             <RotateCcw className="h-4 w-4" />
-            <span>{categorySlug ? 'সকল পণ্য দেখুন' : 'সব ফিল্টার রিসেট করুন'}</span>
+            <span>{categorySlug ? 'View All Products' : 'Reset All Filters'}</span>
           </button>
         </div>
       ) : (

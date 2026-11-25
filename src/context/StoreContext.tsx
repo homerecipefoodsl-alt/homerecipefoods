@@ -27,10 +27,14 @@ import {
 } from '../data/outletsData';
 import {
   MAHALLABIA_CATEGORY,
+  MASTER_CATEGORY_DEFINITIONS,
   PRODUCT_MASTER_LIST,
   buildProductMatchKey,
   normalizeMasterText,
+  resolveMasterCategoryDef,
 } from '../data/productMasterList';
+import { getCatalogStudioPhotos } from '../data/productPhotoMap';
+import { resolveProductCategorySlug } from '../lib/bilingual';
 import {
   SEED_CATEGORIES,
   SEED_GREETING,
@@ -208,11 +212,13 @@ interface StoreContextValue {
   ) => Promise<void>;
   seedDemoCatalog: () => Promise<{ createdCount: number }>;
   importProductMasterList: () => Promise<MasterImportSummary>;
+  assignMissingStudioPhotos: () => Promise<{ updatedCount: number; skippedCount: number }>;
   masterImportStats: {
     totalMaster: number;
     syncedCount: number;
     missingCount: number;
     missingImageCount: number;
+    unsyncedStudioPhotoCount: number;
   };
   masterImportRunning: boolean;
   lastMasterImportSummary: MasterImportSummary | null;
@@ -977,7 +983,21 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
     if (productsError && !dbProducts) return [];
     if (!dbProducts || dbProducts.length === 0) {
-      return isFirebaseConfigured ? [] : SEED_PRODUCTS;
+      if (isFirebaseConfigured) return [];
+      return SEED_PRODUCTS.map((seed) => {
+        const studioPhotos = getCatalogStudioPhotos({
+          id: seed.id,
+          slug: seed.slug,
+          nameEn: seed.nameEn || seed.name_en,
+        });
+        if (studioPhotos.length === 0) return seed;
+        return {
+          ...seed,
+          image: studioPhotos[0],
+          imageUrl: studioPhotos[0],
+          images: studioPhotos,
+        };
+      });
     }
     return dbProducts
       .map((docItem) => {
@@ -990,13 +1010,6 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             c.slug === docCategory ||
             c.name === safeStr(docItem.categoryName)
         );
-        const docImageCandidates = [
-          docItem.imageUrl,
-          docItem.image,
-          ...(Array.isArray(docItem.images) ? docItem.images : []),
-          ...(Array.isArray(seed?.images) ? seed.images : []),
-        ].filter((u): u is string => typeof u === 'string' && u.trim().length > 0);
-        const normalizedImages = Array.from(new Set(docImageCandidates));
 
         const resolvedNameBn =
           safeStr(docItem.nameBn) ||
@@ -1014,6 +1027,36 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           resolvedNameBn;
         const resolvedSlug =
           safeStr(docItem.slug) || toSlug(resolvedNameEn || resolvedNameBn) || docItem.id;
+
+        const rawDocImageCandidates = [
+          docItem.imageUrl,
+          docItem.image,
+          ...(Array.isArray(docItem.images) ? docItem.images : []),
+        ].filter((u): u is string => typeof u === 'string' && u.trim().length > 0);
+        const suppressedByAdmin = docItem.imageKey === 'no-photo';
+        const studioFallbackImages =
+          !suppressedByAdmin && rawDocImageCandidates.length === 0
+            ? getCatalogStudioPhotos({
+                id: docItem.id,
+                slug: resolvedSlug,
+                nameEn: resolvedNameEn,
+              })
+            : [];
+        const seedFallbackImages =
+          !suppressedByAdmin &&
+          rawDocImageCandidates.length === 0 &&
+          studioFallbackImages.length === 0 &&
+          Array.isArray(seed?.images)
+            ? seed.images
+            : [];
+        const normalizedImages = Array.from(
+          new Set([
+            ...rawDocImageCandidates,
+            ...studioFallbackImages,
+            ...seedFallbackImages,
+          ])
+        ).filter((u): u is string => typeof u === 'string' && u.trim().length > 0);
+
         const resolvedUnit =
           safeStr(docItem.unit) || safeStr(docItem.priceUnit) || seed?.priceUnit || 'Piece';
         const parsedPrice = Number(docItem.price);
@@ -1071,8 +1114,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             docItem.description_bn || docItem.description || seed?.description_bn || '',
           description_en:
             docItem.description_en || docItem.descriptionEn || seed?.description_en || '',
-          image: docItem.imageUrl || docItem.image || normalizedImages[0] || '',
-          imageUrl: docItem.imageUrl || docItem.image || normalizedImages[0] || '',
+          image: normalizedImages[0] || '',
+          imageUrl: normalizedImages[0] || '',
           imageKey: typeof docItem.imageKey === 'string' ? docItem.imageKey : '',
           images: normalizedImages,
           ingredients: Array.isArray(docItem.ingredients)
@@ -1403,7 +1446,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       case 'auth/operation-not-allowed':
         return {
           message:
-            'Firebase Email/Password sign-in is disabled in project ai-studio-applet-webapp-e4b0f. Enable Email/Password in Firebase Console → Authentication → Sign-in method.',
+            'Firebase Email/Password sign-in is disabled in project homerecipefoods. Enable Email/Password in Firebase Console → Authentication → Sign-in method.',
           countAsFailedAttempt: false,
         };
       case 'auth/user-disabled':
@@ -1434,7 +1477,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       case 'auth/configuration-not-found':
         return {
           message:
-            'Firebase Authentication configuration error for project ai-studio-applet-webapp-e4b0f.',
+            'Firebase Authentication configuration error for project homerecipefoods.',
           countAsFailedAttempt: false,
         };
       default:
@@ -1468,7 +1511,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
     if (!isFirebaseConfigured || !auth || !db) {
       throw new Error(
-        'Firebase connection for ai-studio-applet-webapp-e4b0f is not configured yet.'
+        'Firebase connection for homerecipefoods is not configured yet.'
       );
     }
 
@@ -1826,17 +1869,18 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const masterImportStats = useMemo(() => {
     const sourceProducts = isFirebaseConfigured ? dbProducts ?? [] : allProducts;
     const syncedCount = PRODUCT_MASTER_LIST.filter((item) =>
-      sourceProducts.some(
-        (p) =>
-          p.id === item.id ||
-          p.masterKey === item.masterKey ||
+      sourceProducts.some((p) => {
+        if (p.id === item.id || p.masterKey === item.masterKey) return true;
+        const resolvedCatSlug = resolveProductCategorySlug(p, allCategories) || p.category || '';
+        return (
           buildProductMatchKey(
             p.nameBn || p.name_bn || p.name || '',
             p.nameEn || p.name_en || '',
-            p.category || '',
+            resolvedCatSlug,
             p.unit || p.priceUnit || ''
           ) === item.masterKey
-      )
+        );
+      })
     ).length;
 
     const missingImageCount = allProducts.filter(
@@ -1847,13 +1891,30 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         (!p.images || p.images.length === 0)
     ).length;
 
+    const unsyncedStudioPhotoCount = (dbProducts ?? []).filter((p) => {
+      if (p.deleted || p.imageKey === 'no-photo') return false;
+      const hasDocImage =
+        Boolean(typeof p.imageUrl === 'string' && p.imageUrl.trim()) ||
+        Boolean(typeof p.image === 'string' && p.image.trim()) ||
+        (Array.isArray(p.images) && p.images.some((u) => typeof u === 'string' && u.trim()));
+      if (hasDocImage) return false;
+      return (
+        getCatalogStudioPhotos({
+          id: p.id,
+          slug: p.slug,
+          nameEn: p.nameEn || p.name_en,
+        }).length > 0
+      );
+    }).length;
+
     return {
       totalMaster: PRODUCT_MASTER_LIST.length,
       syncedCount,
       missingCount: Math.max(0, PRODUCT_MASTER_LIST.length - syncedCount),
       missingImageCount,
+      unsyncedStudioPhotoCount,
     };
-  }, [dbProducts, allProducts]);
+  }, [dbProducts, allProducts, allCategories]);
 
   // Duplicate-safe & Idempotent Admin-only Product Master List Import
   const importProductMasterList = useCallback(async (): Promise<MasterImportSummary> => {
@@ -1861,6 +1922,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     if (!isAdmin || !hasPermission('products_add')) {
       throw new Error('Admin permission required to import product master list.');
     }
+    const activeAuthUser = auth?.currentUser;
+    if (!activeAuthUser || !activeAuthUser.emailVerified) {
+      throw new Error('Verified admin session required to import product master list.');
+    }
+    await activeAuthUser.getIdToken().catch(() => undefined);
 
     setMasterImportRunning(true);
     try {
@@ -1869,16 +1935,42 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       // 1. Inspect live categories without overwriting any existing category
       const catSnap = await getDocs(collection(firestore, 'categories'));
+      const existingCategories: Category[] = [];
       const existingCategorySlugs = new Set<string>();
-      const existingCategoryByNormName = new Map<string, string>();
+      const existingCategoryByNormName = new Map<string, Category>();
       catSnap.docs.forEach((d) => {
-        const c = d.data() as Category;
-        if (c.slug) existingCategorySlugs.add(c.slug);
-        if (c.name) existingCategoryByNormName.set(normalizeMasterText(c.name), c.slug);
-        if (c.name_bn) existingCategoryByNormName.set(normalizeMasterText(c.name_bn), c.slug);
-        if (c.nameEn) existingCategoryByNormName.set(normalizeMasterText(c.nameEn), c.slug);
-        if (c.name_en) existingCategoryByNormName.set(normalizeMasterText(c.name_en), c.slug);
+        const c = { ...(d.data() as Category), id: d.id };
+        existingCategories.push(c);
+        if (c.slug) {
+          existingCategorySlugs.add(c.slug);
+          existingCategoryByNormName.set(normalizeMasterText(c.slug), c);
+        }
+        if (c.name) existingCategoryByNormName.set(normalizeMasterText(c.name), c);
+        if (c.name_bn) existingCategoryByNormName.set(normalizeMasterText(c.name_bn), c);
+        if (c.nameEn) existingCategoryByNormName.set(normalizeMasterText(c.nameEn), c);
+        if (c.name_en) existingCategoryByNormName.set(normalizeMasterText(c.name_en), c);
       });
+
+      // Also index known category aliases against any matching live Firestore category
+      for (const def of MASTER_CATEGORY_DEFINITIONS) {
+        const matchedLive =
+          existingCategoryByNormName.get(normalizeMasterText(def.slug)) ||
+          def.aliasesBn
+            .map((a) => existingCategoryByNormName.get(normalizeMasterText(a)))
+            .find(Boolean) ||
+          def.aliasesEn
+            .map((a) => existingCategoryByNormName.get(normalizeMasterText(a)))
+            .find(Boolean);
+        if (matchedLive) {
+          existingCategoryByNormName.set(normalizeMasterText(def.slug), matchedLive);
+          def.aliasesBn.forEach((a) =>
+            existingCategoryByNormName.set(normalizeMasterText(a), matchedLive)
+          );
+          def.aliasesEn.forEach((a) =>
+            existingCategoryByNormName.set(normalizeMasterText(a), matchedLive)
+          );
+        }
+      }
 
       const requiredCategories: Category[] = [
         ...SEED_CATEGORIES.filter((c) =>
@@ -1891,10 +1983,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const categoryWrites: Array<{ id: string; data: Record<string, unknown> }> = [];
       if (hasPermission('categories_manage')) {
         for (const cat of requiredCategories) {
+          const def = resolveMasterCategoryDef(cat.slug);
           const alreadyExists =
             existingCategorySlugs.has(cat.slug) ||
             existingCategoryByNormName.has(normalizeMasterText(cat.name)) ||
-            existingCategoryByNormName.has(normalizeMasterText(cat.nameEn));
+            existingCategoryByNormName.has(normalizeMasterText(cat.nameEn)) ||
+            def.aliasesBn.some((a) => existingCategoryByNormName.has(normalizeMasterText(a))) ||
+            def.aliasesEn.some((a) => existingCategoryByNormName.has(normalizeMasterText(a)));
           if (!alreadyExists) {
             categoryWrites.push({
               id: cat.id,
@@ -1906,7 +2001,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                 updatedAt: now,
               },
             });
+            existingCategories.push(cat);
             existingCategorySlugs.add(cat.slug);
+            existingCategoryByNormName.set(normalizeMasterText(cat.slug), cat);
+            def.aliasesBn.forEach((a) =>
+              existingCategoryByNormName.set(normalizeMasterText(a), cat)
+            );
+            def.aliasesEn.forEach((a) =>
+              existingCategoryByNormName.set(normalizeMasterText(a), cat)
+            );
             categoriesCreated += 1;
           }
         }
@@ -1926,10 +2029,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         if (p.id) existingIds.add(p.id);
         if (p.slug) existingSlugs.add(p.slug);
         if (p.masterKey) existingMasterKeys.add(p.masterKey);
+        const resolvedCatSlug =
+          resolveProductCategorySlug(p, existingCategories) || p.category || '';
         const mk = buildProductMatchKey(
           p.nameBn || p.name_bn || p.name || '',
           p.nameEn || p.name_en || '',
-          p.category || '',
+          resolvedCatSlug,
           p.unit || p.priceUnit || ''
         );
         existingMatchKeys.add(mk);
@@ -1939,10 +2044,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const productWrites: Array<{ id: string; data: Record<string, unknown> }> = [];
 
       for (const item of PRODUCT_MASTER_LIST) {
-        const matchedCatSlug =
+        const matchedCategoryObj =
+          existingCategoryByNormName.get(normalizeMasterText(item.categorySlug)) ||
           existingCategoryByNormName.get(normalizeMasterText(item.categoryBn)) ||
-          existingCategoryByNormName.get(normalizeMasterText(item.categoryNameEn)) ||
-          item.categorySlug;
+          existingCategoryByNormName.get(normalizeMasterText(item.categoryNameEn));
+        const matchedCatSlug = matchedCategoryObj?.slug || item.categorySlug;
 
         const liveMatchKey = buildProductMatchKey(
           item.nameBn,
@@ -1977,10 +2083,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         existingMatchKeys.add(item.masterKey);
         existingMatchKeys.add(liveMatchKey);
 
-        const shortDescBn = `${item.nameBn} — ${item.categoryBn} (${item.unit})`;
-        const shortDescEn = `${item.nameEn} — ${item.categoryNameEn} (${item.unit})`;
-        const fullDescBn = `${item.nameBn} (${item.nameEn}) — ${item.categoryBn} বিভাগের পণ্য। একক: ${item.unit}।`;
-        const fullDescEn = `${item.nameEn} (${item.nameBn}) — ${item.categoryNameEn} showcase item. Unit: ${item.unit}.`;
+        const shortDescBn = `${item.nameBn} — ${item.categoryBn} (${item.unit})`.slice(0, 300);
+        const shortDescEn = `${item.nameEn} — ${item.categoryNameEn} (${item.unit})`.slice(0, 300);
+        const fullDescBn = `${item.nameBn} (${item.nameEn}) — ${item.categoryBn} বিভাগের পণ্য। একক: ${item.unit}।`.slice(0, 4000);
+        const fullDescEn = `${item.nameEn} (${item.nameBn}) — ${item.categoryNameEn} showcase item. Unit: ${item.unit}.`.slice(0, 4000);
+
+        const studioPhotos = getCatalogStudioPhotos({
+          id: item.id,
+          slug: finalSlug,
+          nameEn: item.nameEn,
+        });
 
         productWrites.push({
           id: item.id,
@@ -1993,6 +2105,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             name_en: item.nameEn,
             slug: finalSlug,
             category: matchedCatSlug,
+            categorySlug: matchedCatSlug,
             categoryName: item.categoryBn,
             categoryNameEn: item.categoryNameEn,
             productType: item.categoryNameEn,
@@ -2007,8 +2120,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             descriptionEn: fullDescEn,
             description_bn: fullDescBn,
             description_en: fullDescEn,
-            image: '',
-            images: [],
+            image: studioPhotos[0] ?? '',
+            imageUrl: studioPhotos[0] ?? '',
+            imageKey: '',
+            images: studioPhotos,
             masterKey: item.masterKey,
             ingredients: [],
             sizes: [item.unit],
@@ -2020,9 +2135,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             featured: false,
             popular: false,
             visible: true,
+            active: true,
+            isActive: true,
             deleted: false,
             status: 'published',
             display_order: item.displayOrder,
+            createdBy: activeAuthUser.uid,
+            updatedBy: activeAuthUser.uid,
             createdAt: now,
             updatedAt: now,
           },
@@ -2073,6 +2192,130 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     }
   }, [hasPermission, isAdmin, logAdminActivity]);
 
+  // Non-destructive Admin sync: populates studio photos ONLY on live docs that still have zero images and were not intentionally cleared
+  const assignMissingStudioPhotos = useCallback(async (): Promise<{
+    updatedCount: number;
+    skippedCount: number;
+  }> => {
+    if (!db) throw new Error('Firestore not configured');
+    if (!isAdmin || !hasPermission('products_edit')) {
+      throw new Error('Admin permission required to sync studio product photos.');
+    }
+    const activeAuthUser = auth?.currentUser;
+    if (!activeAuthUser || !activeAuthUser.emailVerified) {
+      throw new Error('Verified admin session required to sync studio product photos.');
+    }
+    await activeAuthUser.getIdToken().catch(() => undefined);
+
+    setMasterImportRunning(true);
+    try {
+      const firestore = db;
+      const now = serverTimestamp();
+      const prodSnap = await getDocs(collection(firestore, 'products'));
+      const REQUIRED_KEYS = [
+        'id', 'name', 'nameEn', 'slug', 'category', 'categoryName', 'productType',
+        'price', 'priceUnit', 'shortDescription', 'description', 'images', 'ingredients',
+        'sizes', 'weight', 'occasions', 'showrooms', 'availability', 'importantNotes',
+        'featured', 'popular', 'createdAt', 'updatedAt',
+      ];
+      const ALLOWED_KEYS = new Set([
+        'id', 'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
+        'category', 'categorySlug', 'categoryName', 'categoryNameEn', 'productType',
+        'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
+        'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
+        'description', 'descriptionEn', 'description_bn', 'description_en',
+        'image', 'imageUrl', 'imageKey', 'images', 'masterKey', 'rating', 'stock', 'sku',
+        'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
+        'availability', 'importantNotes', 'featured', 'popular',
+        'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt',
+        'seoTitle', 'seoDescription', 'seoImage', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt',
+      ]);
+
+      const updates: Array<{ id: string; photos: string[] }> = [];
+      let skippedCount = 0;
+
+      for (const d of prodSnap.docs) {
+        const data = d.data() as Record<string, unknown>;
+        const existingImages = [
+          data.imageUrl,
+          data.image,
+          ...(Array.isArray(data.images) ? data.images : []),
+        ].filter((u): u is string => typeof u === 'string' && u.trim().length > 0);
+
+        if (existingImages.length > 0 || data.imageKey === 'no-photo') {
+          skippedCount += 1;
+          continue;
+        }
+
+        const hasValidCreated = Boolean(
+          data.createdAt &&
+            typeof data.createdAt === 'object' &&
+            'toMillis' in data.createdAt
+        );
+        const docRuleReady =
+          hasValidCreated &&
+          typeof data.id === 'string' &&
+          data.id === d.id &&
+          REQUIRED_KEYS.every((k) => k in data) &&
+          Object.keys(data).every((k) => ALLOWED_KEYS.has(k));
+
+        if (!docRuleReady) {
+          skippedCount += 1;
+          continue;
+        }
+
+        const studioPhotos = getCatalogStudioPhotos({
+          id: d.id,
+          slug: typeof data.slug === 'string' ? data.slug : '',
+          nameEn:
+            (typeof data.nameEn === 'string' && data.nameEn) ||
+            (typeof data.name_en === 'string' && data.name_en) ||
+            '',
+        });
+        if (studioPhotos.length === 0) {
+          skippedCount += 1;
+          continue;
+        }
+
+        updates.push({ id: d.id, photos: studioPhotos });
+      }
+
+      const CHUNK = 100;
+      for (let i = 0; i < updates.length; i += CHUNK) {
+        const chunk = updates.slice(i, i + CHUNK);
+        const batch = writeBatch(firestore);
+        for (const u of chunk) {
+          batch.update(doc(firestore, 'products', u.id), {
+            image: u.photos[0],
+            imageUrl: u.photos[0],
+            imageKey: '',
+            images: u.photos,
+            updatedBy: activeAuthUser.uid,
+            updatedAt: now,
+          });
+        }
+        await batch.commit();
+      }
+
+      if (updates.length > 0) {
+        await logAdminActivity(
+          'studio_photo_sync',
+          'products',
+          'studio_photo_map',
+          'Studio Photo Sync',
+          `Assigned studio photos to ${updates.length} products without overwriting existing photos (${skippedCount} skipped).`
+        );
+      }
+
+      return { updatedCount: updates.length, skippedCount };
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, 'products/studio_photo_sync');
+      throw err;
+    } finally {
+      setMasterImportRunning(false);
+    }
+  }, [hasPermission, isAdmin, logAdminActivity]);
+
   // Safe one-time Admin auto-import: runs ONLY once per Admin session when 0 master items exist in Firestore
   const autoMasterImportAttemptedRef = useRef(false);
   useEffect(() => {
@@ -2092,17 +2335,18 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
     autoMasterImportAttemptedRef.current = true;
     const syncedCount = PRODUCT_MASTER_LIST.filter((item) =>
-      dbProducts.some(
-        (p) =>
-          p.id === item.id ||
-          p.masterKey === item.masterKey ||
+      dbProducts.some((p) => {
+        if (p.id === item.id || p.masterKey === item.masterKey) return true;
+        const resolvedCatSlug = resolveProductCategorySlug(p, allCategories) || p.category || '';
+        return (
           buildProductMatchKey(
             p.nameBn || p.name_bn || p.name || '',
             p.nameEn || p.name_en || '',
-            p.category || '',
+            resolvedCatSlug,
             p.unit || p.priceUnit || ''
           ) === item.masterKey
-      )
+        );
+      })
     ).length;
 
     if (syncedCount === 0) {
@@ -2117,6 +2361,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     hasPermission,
     dbCategories,
     dbProducts,
+    allCategories,
     importProductMasterList,
   ]);
 
@@ -2179,6 +2424,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         logAdminActivity,
         seedDemoCatalog,
         importProductMasterList,
+        assignMissingStudioPhotos,
         masterImportStats,
         masterImportRunning,
         lastMasterImportSummary,

@@ -707,8 +707,11 @@ export function AdminGreetingPanel() {
               >
                 <div>
                   <p className="font-semibold text-[#1C1917]">
-                    {item.text_bn} {item.text_en ? `| ${item.text_en}` : ''}
+                    {item.text_en || item.text_bn}
                   </p>
+                  {item.text_en && item.text_bn && item.text_bn !== item.text_en && (
+                    <p className="font-bn text-[11px] text-[#57534E]">{item.text_bn}</p>
+                  )}
                   <p className="text-[11px] text-[#78716C]">
                     {(item.durationMs || 4200) / 1000}s
                     {item.startDate || item.endDate

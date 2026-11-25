@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { ArrowRight, UtensilsCrossed } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
 import { resolveAssetUrl } from '../lib/assets';
-import { getProductText } from '../lib/bilingual';
+import { getProductText, resolveBilingualPair } from '../lib/bilingual';
 import { formatBdtPrice } from '../lib/utils';
 import type { Product } from '../types';
 
@@ -20,111 +20,111 @@ export function ProductCard({ product }: ProductCardProps) {
   const text = getProductText(product, categories);
   const safePrice = Number.isFinite(Number(product.price)) ? Number(product.price) : 0;
 
-  const showBn = languageMode !== 'en';
-  const showEn = languageMode !== 'bn';
-  const highlightTag = product.featured ? 'বিশেষ' : product.popular ? 'জনপ্রিয়' : '';
+  const titlePair = resolveBilingualPair(text.nameEn, text.nameBn);
+  const catPair = resolveBilingualPair(text.categoryNameEn, text.categoryNameBn);
+  const descPair = resolveBilingualPair(text.shortDescriptionEn, text.shortDescriptionBn);
+
+  const showPrimaryEn = languageMode !== 'bn';
+  const showSecondaryBn = languageMode !== 'en' && Boolean(titlePair.secondaryBn);
+
+  const availabilityLabel =
+    product.availability === 'In Showroom'
+      ? 'In Showroom'
+      : product.availability === 'Pre-Order at Showroom'
+      ? 'Pre-Order'
+      : product.availability === 'Seasonal'
+      ? 'Seasonal'
+      : 'Unavailable';
 
   return (
     <Link
       to={`/product/${product.slug || product.id}`}
-      className="group flex flex-col overflow-hidden rounded-xl border border-[#E7E5E4] bg-white transition-all duration-200 hover:-translate-y-0.5 hover:border-[#1C1917]/25 hover:shadow-sm"
+      className="group flex flex-col overflow-hidden rounded-xl border border-[#E7E5E4] bg-white transition-colors duration-200 hover:border-[#1C1917]/30"
     >
-      {/* Consistent 4:3 Image Frame */}
-      <div className="relative aspect-[4/3] w-full overflow-hidden bg-[#F5F4F0]">
+      {/* Clean 4:3 Product Photography Frame — Zero Overlay Badges */}
+      <div className="aspect-[4/3] w-full overflow-hidden bg-[#F5F4F0]">
         {hasRealImage && !imgError ? (
           <img
             src={mainImage}
-            alt={`${text.nameBn} - ${text.nameEn}`}
+            alt={titlePair.primary}
             loading="lazy"
             decoding="async"
             referrerPolicy="no-referrer"
             onError={() => setImgError(true)}
-            className="h-full w-full object-cover transition-transform duration-300 ease-out group-hover:scale-105"
+            className="h-full w-full object-cover transition-transform duration-300 ease-out group-hover:scale-[1.03]"
           />
         ) : (
-          <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 bg-[#F5F4F0] p-3 text-center">
-            <UtensilsCrossed className="h-5 w-5 text-[#A8A29E]" />
-            <span className="line-clamp-1 text-[11px] font-semibold text-[#57534E]">
-              {text.nameBn || text.nameEn}
+          <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 bg-[#F5F4F0] p-4 text-center">
+            <UtensilsCrossed className="h-5 w-5 text-[#A8A29E]" aria-hidden="true" />
+            <span className="line-clamp-1 text-xs font-medium text-[#57534E]">
+              {titlePair.primary}
             </span>
-            <span className="text-[10px] text-[#78716C]">ছবি শীঘ্রই আসছে</span>
+            <span className="text-[11px] text-[#78716C]">Photo coming soon</span>
           </div>
-        )}
-        {highlightTag && (
-          <span className="absolute left-2 top-2 rounded bg-[#1C1917]/85 px-2 py-0.5 text-[10px] font-semibold text-[#FACC15]">
-            {highlightTag}
-          </span>
         )}
       </div>
 
-      {/* Compact Card Body */}
-      <div className="flex flex-1 flex-col p-2.5 sm:p-4">
-        <div className="flex items-center gap-1 text-[10px] font-medium text-[#78716C] sm:text-xs">
-          <span className="truncate">
-            {showBn ? text.categoryNameBn : text.categoryNameEn || text.categoryNameBn}
-          </span>
-          <span aria-hidden="true">·</span>
+      {/* Editorial Card Body — Strict English Primary -> Bengali Secondary */}
+      <div className="flex flex-1 flex-col p-3.5 sm:p-4">
+        <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-[#78716C]">
+          <span className="truncate">{catPair.primary}</span>
           <span
             className={`shrink-0 ${
-              product.availability === 'Out of Stock' ? 'text-red-700' : 'text-[#14532D]'
+              product.availability === 'Out of Stock' ? 'text-[#B91C1C]' : 'text-[#166534]'
             }`}
           >
-            {product.availability === 'In Showroom'
-              ? 'শোরুমে'
-              : product.availability === 'Pre-Order at Showroom'
-              ? 'প্রি-বুকিং'
-              : product.availability === 'Seasonal'
-              ? 'সিজনাল'
-              : 'স্টক শেষ'}
+            {availabilityLabel}
           </span>
         </div>
 
-        {showBn && (
-          <h3 className="font-display mt-1 line-clamp-1 text-base font-bold leading-snug text-[#1C1917] sm:text-lg">
-            {text.nameBn || text.nameEn}
+        {showPrimaryEn ? (
+          <>
+            <h3 className="mt-1.5 line-clamp-1 text-[15px] font-semibold leading-snug tracking-tight text-[#1C1917] sm:text-base">
+              {titlePair.primary}
+            </h3>
+            {showSecondaryBn && (
+              <p className="font-bn mt-0.5 line-clamp-1 text-[11px] font-normal leading-snug text-[#57534E] sm:text-xs">
+                {titlePair.secondaryBn}
+              </p>
+            )}
+          </>
+        ) : (
+          <h3 className="font-bn mt-1.5 line-clamp-1 text-[15px] font-semibold leading-snug text-[#1C1917] sm:text-base">
+            {text.nameBn || titlePair.primary}
           </h3>
         )}
-        {showEn && (
-          <p
-            className={`line-clamp-1 font-medium text-[#78716C] ${
-              showBn
-                ? 'text-[11px]'
-                : 'font-display mt-1 text-base font-bold text-[#1C1917] sm:text-lg'
-            }`}
-          >
-            {text.nameEn || text.nameBn}
+
+        {descPair.primary && (
+          <p className="mt-1.5 hidden line-clamp-1 text-xs text-[#57534E] sm:block">
+            {languageMode === 'bn'
+              ? descPair.secondaryBn || descPair.primary
+              : descPair.primary}
           </p>
         )}
 
-        <p className="mt-1 hidden line-clamp-1 text-xs text-[#57534E] sm:block">
-          {showBn
-            ? text.shortDescriptionBn || text.shortDescriptionEn
-            : text.shortDescriptionEn || text.shortDescriptionBn}
-        </p>
-
-        <div className="mt-auto flex items-baseline justify-between gap-1.5 border-t border-[#F5F4F0] pt-2.5">
+        <div className="mt-auto flex items-baseline justify-between gap-2 border-t border-[#F5F4F0] pt-3">
           <div className="flex min-w-0 flex-wrap items-baseline gap-1">
-            <span className="font-mono tabular-nums text-xs font-bold text-[#1C1917] sm:text-sm">
+            <span className="tabular-nums text-[15px] font-semibold text-[#1C1917] sm:text-base">
               {product.price_label || formatBdtPrice(safePrice)}
             </span>
             {text.unit && (
-              <span className="text-[10px] font-medium text-[#78716C]">
+              <span className="text-[11px] font-normal text-[#78716C]">
                 / {text.unit}
               </span>
             )}
             {typeof product.old_price === 'number' && product.old_price > safePrice && (
-              <span className="font-mono tabular-nums text-[10px] text-[#78716C] line-through sm:text-xs">
+              <span className="tabular-nums text-[11px] text-[#78716C] line-through">
                 {formatBdtPrice(product.old_price)}
               </span>
             )}
             {product.discount && (
-              <span className="text-[10px] font-bold text-[#DC1F26]">{product.discount}</span>
+              <span className="text-[11px] font-semibold text-[#DC1F26]">{product.discount}</span>
             )}
           </div>
-          <span className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap text-[11px] font-semibold text-[#B91C1C] transition-transform duration-200 group-hover:translate-x-0.5 sm:text-xs">
-            <span className="sm:hidden">দেখুন</span>
-            <span className="hidden sm:inline">বিস্তারিত</span>
-            <ArrowRight className="h-3 w-3" />
+          <span className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap text-xs font-semibold text-[#B91C1C] transition-transform duration-200 group-hover:translate-x-0.5">
+            <span className="sm:hidden">View</span>
+            <span className="hidden sm:inline">Details</span>
+            <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
           </span>
         </div>
       </div>

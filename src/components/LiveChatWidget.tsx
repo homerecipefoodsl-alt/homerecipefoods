@@ -78,7 +78,7 @@ export function LiveChatWidget({
       role: 'assistant',
       text:
         siteSettings.chatWelcomeMessage ||
-        'আসসালামু আলাইকুম! আমি Home Recipe Foods-এর AI Assistant। আমাদের পণ্য, দাম, উপাদান, উপলক্ষ বা শোরুম সম্পর্কে যেকোনো প্রশ্ন করতে পারেন।',
+        'Welcome to Home Recipe Foods! Ask me about our cakes, sweets, prices, ingredients, occasions, or showroom locations across Chattogram.',
     },
   ]);
   const [aiInput, setAiInput] = useState('');
@@ -224,31 +224,51 @@ export function LiveChatWidget({
         openingHoursBn: s.openingHours,
         openingHoursEn: s.openingHoursEn || s.openingHours,
       })),
-      products: products.map((p) => ({
-        slug: p.slug,
-        nameBn: p.name_bn || p.name,
-        nameEn: p.name_en || p.nameEn,
-        categoryBn: p.categoryName,
-        categoryEn: p.categoryNameEn || '',
-        productType: p.productType,
-        priceBDT: p.price,
-        ...(p.price_label ? { priceLabel: p.price_label } : {}),
-        ...(typeof p.old_price === 'number' ? { oldPriceBDT: p.old_price } : {}),
-        ...(p.discount ? { discount: p.discount } : {}),
-        priceUnit: p.priceUnit,
-        shortDescriptionBn: p.short_description_bn || p.shortDescription,
-        shortDescriptionEn: p.short_description_en || p.shortDescriptionEn || '',
-        ingredients: Array.isArray(p.ingredients) ? p.ingredients : [],
-        sizes: Array.isArray(p.sizes) ? p.sizes : [],
-        weight: p.weight,
-        occasions: Array.isArray(p.occasions) ? p.occasions : [],
-        availability: p.availability,
-        availableShowrooms: (Array.isArray(p.showrooms) ? p.showrooms : []).map((sid) => {
-          const sr = showrooms.find((s) => s.id === sid);
-          return sr ? `${sr.name} (${sr.nameEn || sr.name})` : sid;
-        }),
-        importantNotes: p.importantNotes,
-      })),
+      products: products.map((p) => {
+        const nameBn = (p.name_bn || p.name || '').trim();
+        const nameEn = (p.name_en || p.nameEn || '').trim();
+        const descBn = (p.short_description_bn || p.shortDescription || '').trim();
+        const descEn = (p.short_description_en || p.shortDescriptionEn || '').trim();
+        const ingredients = Array.isArray(p.ingredients)
+          ? p.ingredients.map((s) => s.trim()).filter(Boolean)
+          : [];
+        const sizes = Array.isArray(p.sizes)
+          ? p.sizes.map((s) => s.trim()).filter(Boolean)
+          : [];
+        const occs = Array.isArray(p.occasions)
+          ? p.occasions.map((s) => s.trim()).filter(Boolean)
+          : [];
+        const srIds = Array.isArray(p.showrooms)
+          ? p.showrooms.filter((sid) => showrooms.some((s) => s.id === sid))
+          : [];
+        const isGenericBoilerplate = (txt: string) =>
+          !txt || txt.startsWith(`${nameBn} — `) || txt.startsWith(`${nameEn} — `);
+
+        return {
+          slug: p.slug,
+          nameBn,
+          nameEn,
+          cat: p.categoryNameEn || p.categoryName,
+          priceBDT: p.price,
+          ...(p.price_label ? { priceLabel: p.price_label } : {}),
+          ...(typeof p.old_price === 'number' ? { oldPriceBDT: p.old_price } : {}),
+          ...(p.discount ? { discount: p.discount } : {}),
+          unit: p.unit || p.priceUnit,
+          avail: p.availability,
+          ...(!isGenericBoilerplate(descEn) ? { descEn: descEn.slice(0, 180) } : {}),
+          ...(!isGenericBoilerplate(descBn) ? { descBn: descBn.slice(0, 180) } : {}),
+          ...(ingredients.length > 0 ? { ingredients } : {}),
+          ...(sizes.length > 1 || (sizes.length === 1 && sizes[0] !== (p.unit || p.priceUnit))
+            ? { sizes }
+            : {}),
+          ...(p.weight && p.weight !== (p.unit || p.priceUnit) ? { weight: p.weight } : {}),
+          ...(occs.length > 0 ? { occasions: occs } : {}),
+          ...(srIds.length > 0 && srIds.length < showrooms.length
+            ? { showroomIds: srIds }
+            : {}),
+          ...(p.importantNotes ? { notes: p.importantNotes } : {}),
+        };
+      }),
     };
   }, [products, categories, occasions, showrooms, aiKnowledge, siteSettings]);
 
@@ -307,7 +327,7 @@ export function LiveChatWidget({
         const upstreamStatus =
           typeof data.upstreamStatus === 'number' ? data.upstreamStatus : 0;
         let errorText =
-          'Gemini API সার্ভারে সাময়িক ত্রুটি হয়েছে (500)। অনুগ্রহ করে একটু পর আবার চেষ্টা করুন।';
+          'Temporary server error occurred (500). Please try again in a moment.';
 
         if (
           rawCode === 'missing_api_key' ||
@@ -322,7 +342,7 @@ export function LiveChatWidget({
           rawCode === 'ai_key_invalid'
         ) {
           errorText =
-            'Gemini API key সঠিক নয় বা মেয়াদোত্তীর্ণ হয়েছে (401)। অনুগ্রহ করে Cloudflare Worker Secret-এ বৈধ GEMINI_API_KEY যাচাই করুন।';
+            'AI service key is invalid or expired (401). Please contact support.';
         } else if (
           resp.status === 403 ||
           upstreamStatus === 403 ||
@@ -330,7 +350,7 @@ export function LiveChatWidget({
           rawCode === 'ai_permission_denied'
         ) {
           errorText =
-            'এই Gemini API key-তে অনুরোধ করার অনুমতি নেই (403)। API permission ও restriction যাচাই করুন।';
+            'AI service request was denied (403). Please try connecting to a store representative.';
         } else if (
           resp.status === 404 ||
           upstreamStatus === 404 ||
@@ -338,7 +358,7 @@ export function LiveChatWidget({
           rawCode === 'ai_model_not_found'
         ) {
           errorText =
-            'নির্বাচিত Gemini মডেলটি পাওয়া যায়নি (404)। অনুগ্রহ করে কিছুক্ষণ পর আবার চেষ্টা করুন।';
+            'Assistant service is temporarily unavailable (404). Please try again shortly.';
         } else if (
           resp.status === 429 ||
           upstreamStatus === 429 ||
@@ -346,17 +366,17 @@ export function LiveChatWidget({
           rawCode === 'rate_limited'
         ) {
           const serverMsg =
-            typeof data.message === 'string' && /[\u0980-\u09FF]/.test(data.message)
+            typeof data.message === 'string' && data.message.trim()
               ? data.message.trim()
-              : 'অনুরোধের সীমা অতিক্রম করেছে (429 rate_limit)। অনুগ্রহ করে কিছুক্ষণ অপেক্ষা করে আবার চেষ্টা করুন।';
+              : 'Too many requests right now. Please wait a moment before trying again.';
           const retryNote =
             typeof data.retryAfterSec === 'number' && data.retryAfterSec > 0
-              ? ` (${data.retryAfterSec} সেকেন্ড পর চেষ্টা করুন)`
+              ? ` (Retry after ${data.retryAfterSec}s)`
               : '';
           errorText = `${serverMsg}${retryNote}`;
         } else if (resp.status === 504 || upstreamStatus === 504 || rawCode === 'api_timeout') {
           errorText =
-            'Gemini API থেকে উত্তর আসতে সময় বেশি লেগেছে (api_timeout)। অনুগ্রহ করে আবার চেষ্টা করুন।';
+            'The response took too long (timeout). Please try again.';
         } else if (
           resp.status === 500 ||
           upstreamStatus === 500 ||
@@ -365,7 +385,7 @@ export function LiveChatWidget({
           rawCode === 'ai_unavailable'
         ) {
           errorText =
-            'Gemini API বা সার্ভারের অভ্যন্তরীণ ত্রুটি হয়েছে (500)। অনুগ্রহ করে একটু পর আবার চেষ্টা করুন।';
+            'Assistant service encountered a temporary issue (500). Please try again shortly.';
         } else if (typeof data.message === 'string' && data.message.trim() && resp.status === 400) {
           errorText = data.message.trim();
         }
@@ -390,7 +410,7 @@ export function LiveChatWidget({
           {
             id: `e-${Date.now()}`,
             role: 'assistant',
-            text: 'Gemini API থেকে উত্তর পাওয়া যায়নি (gemini_api_error)। আবার চেষ্টা করুন।',
+            text: 'No response was received. Please try again.',
             isError: true,
             retryPrompt: trimmed,
           },
@@ -412,7 +432,7 @@ export function LiveChatWidget({
         {
           id: `e-${Date.now()}`,
           role: 'assistant',
-          text: 'সার্ভারের সাথে সংযোগ ব্যর্থ হয়েছে (worker_internal_error)। আবার চেষ্টা করুন।',
+          text: 'Unable to reach the server. Please check your connection and retry.',
           isError: true,
           retryPrompt: trimmed,
         },
@@ -436,11 +456,11 @@ export function LiveChatWidget({
   const startHumanSession = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!db) {
-      setHumanError('ডাটাবেস সংযোগ সক্রিয় নয়। অনুগ্রহ করে হটলাইন নম্বরে কল করুন।');
+      setHumanError('Live support database is unavailable right now. Please call our hotline.');
       return;
     }
     if (!customerName.trim() || !customerPhone.trim()) {
-      setHumanError('অনুগ্রহ করে আপনার নাম ও ফোন নম্বর দিন।');
+      setHumanError('Please enter your name and phone number.');
       return;
     }
 
@@ -450,7 +470,7 @@ export function LiveChatWidget({
 
     try {
       const now = serverTimestamp();
-      const firstMsgText = 'আমি একজন প্রতিনিধির সাথে কথা বলতে চাই।';
+      const firstMsgText = 'Hello, I would like to speak with a store representative.';
       const firstMsgId = `msg_${Date.now()}`;
 
       await setDoc(doc(db, 'chat_sessions', newId), {
@@ -479,7 +499,7 @@ export function LiveChatWidget({
       localStorage.setItem(SESSION_STORAGE_KEY, newId);
       setSessionId(newId);
     } catch (err) {
-      setHumanError('চ্যাট শুরু করতে সমস্যা হয়েছে। অনুগ্রহ করে শোরুম নম্বরে কল করুন।');
+      setHumanError('Unable to start live chat right now. Please call our showroom hotline.');
       try {
         handleFirestoreError(err, OperationType.CREATE, `chat_sessions/${newId}`);
       } catch {
@@ -514,7 +534,7 @@ export function LiveChatWidget({
         updatedAt: serverTimestamp(),
       });
     } catch (err) {
-      setHumanError('বার্তা পাঠানো যায়নি। অনুগ্রহ করে আবার চেষ্টা করুন।');
+      setHumanError('Message could not be sent. Please try again.');
       try {
         handleFirestoreError(err, OperationType.CREATE, `chat_sessions/${sessionId}/messages/${msgId}`);
       } catch {
@@ -538,12 +558,12 @@ export function LiveChatWidget({
           setMode('select');
           onOpen();
         }}
-        aria-label="Open Live Chat & AI Support"
-        className="fixed right-3 bottom-[calc(3.5rem+env(safe-area-inset-bottom))] z-30 inline-flex h-10 cursor-pointer items-center gap-2 rounded-full bg-[#DC1F26] px-3.5 text-xs font-semibold text-white shadow-md transition-transform duration-200 hover:-translate-y-0.5 hover:bg-[#B91C1C] focus-visible:outline-2 focus-visible:outline-[#FACC15] sm:right-5 sm:bottom-5 sm:h-11 sm:gap-2.5 sm:px-4"
+        aria-label="Open Live Chat & Product Concierge"
+        className="fixed right-3 bottom-[calc(3.5rem+env(safe-area-inset-bottom))] z-30 inline-flex h-10 cursor-pointer items-center gap-2 rounded-full bg-[#DC1F26] px-3.5 text-xs font-semibold text-white shadow-md transition-colors duration-200 hover:bg-[#B91C1C] focus-visible:outline-2 focus-visible:outline-[#FACC15] sm:right-5 sm:bottom-5 sm:h-11 sm:gap-2.5 sm:px-4"
       >
         <MessageCircle className="h-4 w-4 shrink-0 text-[#FACC15]" />
-        <span className="whitespace-nowrap sm:hidden">লাইভ চ্যাট</span>
-        <span className="hidden whitespace-nowrap sm:inline">সহায়তা ও লাইভ চ্যাট</span>
+        <span className="whitespace-nowrap sm:hidden">Live Chat</span>
+        <span className="hidden whitespace-nowrap sm:inline">Support &amp; Live Chat</span>
       </button>
     );
   }
@@ -562,12 +582,12 @@ export function LiveChatWidget({
             <p className="text-xs font-semibold text-white">Customer Care</p>
             <p className="text-[11px] text-[#A8A29E]">
               {mode === 'ai'
-                ? 'AI Assistant · দ্রুত তথ্য'
+                ? 'Menu Concierge · Instant Answers'
                 : mode === 'human'
                 ? siteSettings.supportOnline
-                  ? 'প্রতিনিধি অনলাইনে আছেন'
-                  : 'বার্তা রেখে যান'
-                : 'সহায়তা মাধ্যম বাছাই'}
+                  ? 'Representative Online'
+                  : 'Leave a Message'
+                : 'Choose Support Option'}
             </p>
           </div>
         </div>
@@ -578,7 +598,7 @@ export function LiveChatWidget({
               onClick={() => setMode('select')}
               className="cursor-pointer rounded-md px-2 py-1 text-[11px] font-medium text-[#FACC15] hover:bg-[#292524]"
             >
-              পরিবর্তন
+              Switch
             </button>
           )}
           <button
@@ -597,38 +617,43 @@ export function LiveChatWidget({
         <div className="flex flex-1 flex-col justify-center gap-4 bg-[#FAFAF8] p-5">
           <div className="text-center">
             <p className="text-sm font-semibold text-[#1C1917]">
-              কিভাবে সাহায্য করতে পারি?
+              How can we help you today?
             </p>
-            <p className="mt-1 text-xs text-[#57534E]">
-              পণ্য, দাম, উপাদান বা শোরুম সম্পর্কে জানতে নিচের যেকোনো একটি বেছে নিন
+            <p className="font-bn mt-0.5 text-[11px] text-[#78716C]">কিভাবে সাহায্য করতে পারি?</p>
+            <p className="mt-1.5 text-xs text-[#57534E]">
+              Choose instant menu lookup or connect directly with our showroom team.
             </p>
           </div>
 
           <button
             type="button"
             onClick={() => setMode('ai')}
-            className="flex cursor-pointer items-start gap-3.5 rounded-xl border border-[#E7E5E4] bg-white p-4 text-left transition-all hover:border-[#DC1F26] hover:shadow-sm"
+            className="flex cursor-pointer items-start gap-3.5 rounded-xl border border-[#E7E5E4] bg-white p-4 text-left transition-colors hover:border-[#DC1F26]"
           >
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#FEF2F2] text-[#DC1F26]">
               <Bot className="h-5 w-5" />
             </div>
             <div>
-              <p className="text-sm font-bold text-[#1C1917]">AI Assistant</p>
-              <p className="mt-0.5 text-xs text-[#57534E]">দ্রুত তথ্য জানতে</p>
+              <p className="text-sm font-bold text-[#1C1917]">Instant Menu Assistant</p>
+              <p className="mt-0.5 text-xs text-[#57534E]">
+                Quick answers on items, prices, and outlets
+              </p>
             </div>
           </button>
 
           <button
             type="button"
             onClick={() => setMode('human')}
-            className="flex cursor-pointer items-start gap-3.5 rounded-xl border border-[#E7E5E4] bg-white p-4 text-left transition-all hover:border-[#DC1F26] hover:shadow-sm"
+            className="flex cursor-pointer items-start gap-3.5 rounded-xl border border-[#E7E5E4] bg-white p-4 text-left transition-colors hover:border-[#DC1F26]"
           >
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#1C1917] text-[#FACC15]">
               <Headphones className="h-5 w-5" />
             </div>
             <div>
-              <p className="text-sm font-bold text-[#1C1917]">Customer Support</p>
-              <p className="mt-0.5 text-xs text-[#57534E]">সরাসরি প্রতিনিধির সাথে কথা বলতে</p>
+              <p className="text-sm font-bold text-[#1C1917]">Customer Support Team</p>
+              <p className="mt-0.5 text-xs text-[#57534E]">
+                Speak directly with a store representative
+              </p>
             </div>
           </button>
         </div>
@@ -669,7 +694,7 @@ export function LiveChatWidget({
                           className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-red-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-[#B91C1C] transition-colors hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           <RotateCcw className="h-3 w-3" />
-                          <span>আবার চেষ্টা করুন</span>
+                          <span>Try Again</span>
                         </button>
                       </div>
                     )}
@@ -681,7 +706,7 @@ export function LiveChatWidget({
               <div className="flex items-start">
                 <div className="inline-flex items-center gap-2 rounded-2xl border border-[#E7E5E4] bg-white px-3.5 py-2 text-xs text-[#57534E]">
                   <Loader2 className="h-3.5 w-3.5 animate-spin text-[#DC1F26]" />
-                  <span>তথ্য যাচাই করা হচ্ছে...</span>
+                  <span>Checking menu &amp; showroom details...</span>
                 </div>
               </div>
             )}
@@ -695,7 +720,7 @@ export function LiveChatWidget({
               className="mb-2 flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg bg-[#FEF2F2] py-1.5 text-[11px] font-semibold text-[#B91C1C] hover:bg-[#FEE2E2]"
             >
               <UserCheck className="h-3.5 w-3.5" />
-              <span>সরাসরি প্রতিনিধির সাথে কথা বলুন</span>
+              <span>Speak with a Store Representative</span>
             </button>
             <form onSubmit={handleSendAi} className="flex items-center gap-2">
               <input
@@ -703,7 +728,7 @@ export function LiveChatWidget({
                 value={aiInput}
                 onChange={(e) => setAiInput(e.target.value)}
                 disabled={aiLoading}
-                placeholder="পণ্য, দাম বা শোরুম সম্পর্কে লিখুন..."
+                placeholder="Ask about cakes, sweets, prices, or outlets..."
                 className="flex-1 rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3 py-2 text-xs text-[#1C1917] focus:border-[#DC1F26] focus:outline-none disabled:opacity-70 sm:text-sm"
               />
               <button
@@ -733,10 +758,10 @@ export function LiveChatWidget({
             >
               <div>
                 <h4 className="text-sm font-bold text-[#1C1917]">
-                  প্রতিনিধির সাথে সরাসরি চ্যাট শুরু করুন
+                  Start a Live Chat with Customer Care
                 </h4>
                 <p className="mt-1 text-xs text-[#57534E]">
-                  আপনার নাম ও ফোন নম্বর দিলে আমাদের প্রতিনিধি দ্রুত যুক্ত হবেন।
+                  Enter your name and phone number and our team will join shortly.
                 </p>
               </div>
 
@@ -748,21 +773,21 @@ export function LiveChatWidget({
 
               <div>
                 <label className="mb-1 block text-xs font-medium text-[#44403C]">
-                  আপনার নাম
+                  Your Name
                 </label>
                 <input
                   type="text"
                   required
                   value={customerName}
                   onChange={(e) => setCustomerName(e.target.value)}
-                  placeholder="যেমন: তানভীর আহমেদ"
+                  placeholder="e.g. Tanvir Ahmed"
                   className="w-full rounded-lg border border-[#D6D3D1] bg-white px-3 py-2 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:outline-none"
                 />
               </div>
 
               <div>
                 <label className="mb-1 block text-xs font-medium text-[#44403C]">
-                  ফোন নম্বর
+                  Phone Number
                 </label>
                 <input
                   type="tel"
@@ -779,18 +804,18 @@ export function LiveChatWidget({
                 disabled={humanLoading}
                 className="mt-1 w-full cursor-pointer rounded-lg bg-[#DC1F26] py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#B91C1C] disabled:opacity-50"
               >
-                {humanLoading ? 'সংযোগ করা হচ্ছে...' : 'প্রতিনিধির সাথে কথা বলুন'}
+                {humanLoading ? 'Connecting...' : 'Start Chat'}
               </button>
             </form>
           ) : (
             <>
               <div className="border-b border-[#E7E5E4] bg-[#FEF9C3] px-4 py-2 text-xs font-medium text-[#854D0E]">
                 {sessionData.status === 'waiting' &&
-                  'একজন প্রতিনিধি আপনার সাথে সংযুক্ত হওয়ার চেষ্টা করছেন।'}
+                  'A representative is being connected to your chat...'}
                 {sessionData.status === 'active' &&
-                  `${sessionData.assignedAdminName || 'আমাদের প্রতিনিধি'} এখন আপনার সাথে যুক্ত আছেন।`}
+                  `${sessionData.assignedAdminName || 'Our Representative'} is now assisting you.`}
                 {sessionData.status === 'closed' &&
-                  'এই কথোপকথনটি সমাপ্ত হয়েছে।'}
+                  'This conversation has been closed.'}
               </div>
 
               <div className="flex-1 space-y-3 overflow-y-auto bg-[#FAFAF8] p-4">
@@ -803,7 +828,7 @@ export function LiveChatWidget({
                   >
                     <span className="mb-0.5 text-[10px] text-[#78716C]">
                       {msg.senderRole === 'customer'
-                        ? 'আপনি'
+                        ? 'You'
                         : 'Home Recipe Representative'}
                     </span>
                     <div
@@ -827,7 +852,7 @@ export function LiveChatWidget({
                     onClick={resetHumanSession}
                     className="w-full cursor-pointer rounded-lg bg-[#1C1917] py-2 text-xs font-semibold text-white hover:bg-[#DC1F26]"
                   >
-                    নতুন চ্যাট শুরু করুন
+                    Start a New Chat
                   </button>
                 </div>
               ) : (
@@ -839,7 +864,7 @@ export function LiveChatWidget({
                     type="text"
                     value={humanInput}
                     onChange={(e) => setHumanInput(e.target.value)}
-                    placeholder="আপনার বার্তা লিখুন..."
+                    placeholder="Write your message..."
                     className="flex-1 rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3 py-2 text-xs text-[#1C1917] focus:border-[#DC1F26] focus:outline-none sm:text-sm"
                   />
                   <button

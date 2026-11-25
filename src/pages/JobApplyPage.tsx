@@ -22,6 +22,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { ApplicationStatusTracker } from '../components/ApplicationStatusTracker';
+import { resolveBilingualPair } from '../lib/bilingual';
 import {
   OperationType,
   db,
@@ -30,9 +31,11 @@ import {
 import {
   computeJobApplicationLock,
   computeMobileVerificationHash,
-  formatRecruitmentDateBn,
-  getJobWindowLabelBn,
+  formatRecruitmentDateEn,
+  getJobCategoryDisplay,
+  getJobWindowLabelEn,
   getJobWindowState,
+  getLocalTodayIso,
   isValidBdMobile,
   isValidOptionalEmail,
   normalizeBdMobile,
@@ -43,7 +46,6 @@ import {
   validateDocumentFile,
   validatePhotoFile,
 } from '../lib/recruitment';
-import { getDynamicBengaliDate, toBengaliDigits } from '../lib/utils';
 import type { JobApplicationDocumentRef, JobApplicationDocumentUrls, JobPosting } from '../types';
 
 export function JobApplyPage() {
@@ -58,7 +60,7 @@ export function JobApplyPage() {
   const [dateOfBirth, setDateOfBirth] = useState('');
   const [gender, setGender] = useState('পুরুষ');
   const [maritalStatus, setMaritalStatus] = useState('অবিবাহিত');
-  const [nationality, setNationality] = useState('বাংলাদেশি');
+  const [nationality, setNationality] = useState('Bangladeshi');
   const [nidNumber, setNidNumber] = useState('');
   const [passportNumber, setPassportNumber] = useState('');
 
@@ -87,13 +89,13 @@ export function JobApplyPage() {
 
   // Section E: Skills & Additional Information
   const [computerSkills, setComputerSkills] = useState('');
-  const [languageSkills, setLanguageSkills] = useState('বাংলা (মাতৃভাষা), ইংরেজি');
+  const [languageSkills, setLanguageSkills] = useState('Bengali (Native), English');
   const [skills, setSkills] = useState('');
   const [aboutSelf, setAboutSelf] = useState('');
   const [referenceInfo, setReferenceInfo] = useState('');
   const [cvUrlOrNote, setCvUrlOrNote] = useState('');
 
-  // Section F: Photo & Documents (Firebase Storage)
+  // Section F: Photo & Documents
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState('');
   const [nidFile, setNidFile] = useState<File | null>(null);
@@ -149,8 +151,9 @@ export function JobApplyPage() {
         if (!active) return;
         if (foundJob) {
           setJob(foundJob);
-          setAppliedPosition(foundJob.title);
-          document.title = `আবেদন ফর্ম: ${foundJob.title} – Home Recipe Foods`;
+          const titleInfo = resolveBilingualPair(foundJob.titleEn, foundJob.title);
+          setAppliedPosition(titleInfo.primary);
+          document.title = `Apply: ${titleInfo.primary} – Careers | Home Recipe Foods`;
         } else {
           setJob(null);
         }
@@ -243,64 +246,64 @@ export function JobApplyPage() {
     setErrorMsg(null);
 
     if (!db) {
-      setErrorMsg('ডাটাবেস সংযোগ এই মুহূর্তে সক্রিয় নয়। একটু পর আবার চেষ্টা করুন।');
+      setErrorMsg('Database connection is unavailable right now. Please try again shortly.');
       return;
     }
     const activeDb = db;
 
     if (!job || getJobWindowState(job) !== 'open') {
-      setErrorMsg('এই পদের জন্য আবেদন বর্তমানে চালু নেই।');
+      setErrorMsg('Applications are not currently open for this position.');
       return;
     }
 
     if (fullName.trim().length < 2) {
-      setErrorMsg('অনুগ্রহ করে আপনার পূর্ণ নাম লিখুন।');
+      setErrorMsg('Please enter your full name.');
       return;
     }
     if (!dateOfBirth.trim()) {
-      setErrorMsg('অনুগ্রহ করে জন্ম তারিখ নির্বাচন করুন।');
+      setErrorMsg('Please select your date of birth.');
       return;
     }
     const cleanNid = normalizeNidNumber(nidNumber);
     if (cleanNid.length < 8) {
-      setErrorMsg('সঠিক জাতীয় পরিচয়পত্র (NID) বা জন্ম নিবন্ধন নম্বর লিখুন।');
+      setErrorMsg('Please enter a valid National ID (NID) or Birth Registration number.');
       return;
     }
     if (!isValidBdMobile(mobile)) {
-      setErrorMsg('সঠিক ১১ সংখ্যার বাংলাদেশি মোবাইল নম্বর দিন (যেমন: 017XXXXXXXX)।');
+      setErrorMsg('Please enter a valid 11-digit Bangladeshi mobile number (e.g. 017XXXXXXXX).');
       return;
     }
     if (alternativeMobile.trim() && !isValidBdMobile(alternativeMobile)) {
-      setErrorMsg('বিকল্প মোবাইল নম্বর দিলে অবশ্যই সঠিক ১১ সংখ্যার বাংলাদেশি নম্বর দিন।');
+      setErrorMsg('Please enter a valid 11-digit alternative Bangladeshi mobile number.');
       return;
     }
     if (!isValidOptionalEmail(email)) {
-      setErrorMsg('অনুগ্রহ করে সঠিক ইমেইল ঠিকানা লিখুন অথবা ঘরটি খালি রাখুন।');
+      setErrorMsg('Please enter a valid email address or leave this field blank.');
       return;
     }
     if (presentAddress.trim().length < 3) {
-      setErrorMsg('অনুগ্রহ করে আপনার বর্তমান ঠিকানা লিখুন।');
+      setErrorMsg('Please enter your current address.');
       return;
     }
     if (!educationLevel.trim()) {
-      setErrorMsg('অনুগ্রহ করে আপনার সর্বশেষ শিক্ষাগত যোগ্যতা নির্বাচন বা লিখুন।');
+      setErrorMsg('Please enter your highest educational qualification.');
       return;
     }
     if (!appliedPosition.trim()) {
-      setErrorMsg('কোন পদে আবেদন করছেন তা নির্ধারণ করুন।');
+      setErrorMsg('Please confirm the position you are applying for.');
       return;
     }
     if (!photoFile) {
-      setErrorMsg('অনুগ্রহ করে প্রার্থীর পাসপোর্ট সাইজ ছবি আপলোড করুন (JPG/PNG, সর্বোচ্চ 2MB)।');
+      setErrorMsg('Please upload a passport-size photo (JPG/PNG, max 2 MB).');
       return;
     }
     if (!declarationAccepted) {
-      setErrorMsg('আবেদন জমা দেওয়ার আগে ঘোষণা (Declaration) বক্সে টিক চিহ্ন দিন।');
+      setErrorMsg('Please confirm the declaration checkbox before submitting.');
       return;
     }
 
     setSubmitting(true);
-    setSubmitStepLabel('তথ্য যাচাই করা হচ্ছে...');
+    setSubmitStepLabel('Verifying your details...');
 
     try {
       const cleanMobile = normalizeBdMobile(mobile);
@@ -313,9 +316,7 @@ export function JobApplyPage() {
         doc(activeDb, 'jobApplicationLocks', mobileLock.lockId)
       );
       if (existingMobileLock.exists()) {
-        setErrorMsg(
-          'এই মোবাইল নম্বর দিয়ে এই পদের জন্য ইতিমধ্যে একটি আবেদন জমা দেওয়া হয়েছে।'
-        );
+        setErrorMsg('An application with this mobile number has already been submitted for this role.');
         setSubmitting(false);
         setSubmitStepLabel('');
         return;
@@ -327,7 +328,7 @@ export function JobApplyPage() {
       );
       if (existingNidLock.exists()) {
         setErrorMsg(
-          'এই NID / জন্ম নিবন্ধন নম্বর দিয়ে এই পদের জন্য ইতিমধ্যে একটি আবেদন জমা দেওয়া হয়েছে।'
+          'An application with this NID / Birth Registration number has already been submitted for this role.'
         );
         setSubmitting(false);
         setSubmitStepLabel('');
@@ -335,11 +336,11 @@ export function JobApplyPage() {
       }
 
       // Step 1: Reserve deterministic SN-JOB-YYYY-00001 application ID
-      setSubmitStepLabel('আবেদন নম্বর তৈরি হচ্ছে...');
+      setSubmitStepLabel('Generating Application ID...');
       const applicationCode = await reserveNextApplicationId(activeDb);
 
       // Step 2: Upload Photo & Documents (fail-fast before Firestore commit)
-      setSubmitStepLabel('ছবি ও ডকুমেন্ট আপলোড হচ্ছে...');
+      setSubmitStepLabel('Uploading photo & documents...');
       let photoUrl = '';
       let photoStoragePath = '';
       const documentUrls: JobApplicationDocumentUrls = {};
@@ -383,16 +384,16 @@ export function JobApplyPage() {
         if (otherRef) documentUrls.otherDoc = otherRef;
       } catch (uploadErr) {
         console.error('Recruitment file upload failed:', uploadErr);
-        setErrorMsg('ডকুমেন্ট আপলোড হয়নি। আবার চেষ্টা করুন।');
+        setErrorMsg('Document upload failed. Please verify files and try again.');
         setSubmitting(false);
         setSubmitStepLabel('');
         return;
       }
 
       // Step 3: Commit Firestore documents atomically
-      setSubmitStepLabel('আবেদন সংরক্ষণ করা হচ্ছে...');
+      setSubmitStepLabel('Saving your application...');
       const mobileHash = await computeMobileVerificationHash(cleanMobile);
-      const submittedDateText = getDynamicBengaliDate().replace(/^আজ\s+/, '');
+      const submittedDateText = formatRecruitmentDateEn(getLocalTodayIso());
       const nowTs = serverTimestamp();
       const resolvedPermanentAddress = sameAsPresent
         ? presentAddress.trim()
@@ -413,7 +414,7 @@ export function JobApplyPage() {
         dateOfBirth: dateOfBirth.trim().slice(0, 32),
         gender: gender.trim().slice(0, 32),
         maritalStatus: maritalStatus.trim().slice(0, 40),
-        nationality: (nationality.trim() || 'বাংলাদেশি').slice(0, 60),
+        nationality: (nationality.trim() || 'Bangladeshi').slice(0, 60),
         nidNumber: cleanNid.slice(0, 40),
         passportNumber: passportNumber.trim().slice(0, 40),
         mobile: cleanMobile.slice(0, 32),
@@ -454,7 +455,7 @@ export function JobApplyPage() {
         statusHistory: [
           {
             status: 'Submitted',
-            note: 'অনলাইন পোর্টাল থেকে আবেদন জমা দেওয়া হয়েছে।',
+            note: 'Submitted via online careers portal.',
             changedAt: new Date().toISOString(),
           },
         ],
@@ -497,11 +498,11 @@ export function JobApplyPage() {
         const msg = commitErr instanceof Error ? commitErr.message.toLowerCase() : '';
         if (msg.includes('already-exists')) {
           setErrorMsg(
-            'একই মোবাইল নম্বর বা NID দিয়ে ইতিমধ্যে এই পদের জন্য আবেদন করা হয়েছে।'
+            'An application using this mobile number or NID has already been submitted for this position.'
           );
         } else {
           setErrorMsg(
-            'আবেদন সংরক্ষণ করা যায়নি। আপনার ইন্টারনেট সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।'
+            'Unable to save your application. Please check your internet connection and retry.'
           );
         }
         try {
@@ -519,7 +520,7 @@ export function JobApplyPage() {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
       setErrorMsg(
-        'আবেদন সংরক্ষণ করা যায়নি। আপনার ইন্টারনেট সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।'
+        'Unable to save your application. Please check your internet connection and retry.'
       );
       try {
         handleFirestoreError(err, OperationType.WRITE, 'jobApplications');
@@ -535,7 +536,8 @@ export function JobApplyPage() {
   if (loadingJob) {
     return (
       <div className="mx-auto max-w-3xl px-4 py-12 sm:px-6">
-        <div className="h-96 animate-pulse rounded-2xl border border-[#E7E5E4] bg-white" />
+        <p className="mb-3 text-xs font-medium text-[#78716C]">Loading application form...</p>
+        <div className="h-80 rounded-2xl border border-[#E7E5E4] bg-white" />
       </div>
     );
   }
@@ -545,23 +547,26 @@ export function JobApplyPage() {
       <div className="mx-auto max-w-xl px-4 py-20 text-center">
         <AlertCircle className="mx-auto h-10 w-10 text-[#DC1F26]" />
         <h1 className="font-display mt-3 text-2xl font-bold text-[#1C1917]">
-          নিয়োগ বিজ্ঞপ্তি পাওয়া যায়নি
+          Job Circular Not Found
         </h1>
+        <p className="font-bn mt-1 text-xs text-[#78716C]">নিয়োগ বিজ্ঞপ্তি পাওয়া যায়নি</p>
         <p className="mt-2 text-sm text-[#57534E]">
-          এই পদের আবেদন লিংকটি বর্তমানে সক্রিয় নয়।
+          This application link is currently inactive or closed.
         </p>
         <Link
           to="/jobs"
           className="mt-6 inline-flex items-center gap-2 rounded-xl bg-[#1C1917] px-5 py-3 text-sm font-semibold text-white"
         >
           <ArrowLeft className="h-4 w-4" />
-          <span>চলমান নিয়োগ বিজ্ঞপ্তি দেখুন</span>
+          <span>View Active Openings</span>
         </Link>
       </div>
     );
   }
 
   const winState = getJobWindowState(job);
+  const titlePair = resolveBilingualPair(job.titleEn, job.title);
+  const catInfo = getJobCategoryDisplay(job.category);
 
   if (submittedCode) {
     return (
@@ -572,16 +577,19 @@ export function JobApplyPage() {
               <CheckCircle2 className="h-7 w-7" />
             </div>
             <h1 className="font-display mt-4 text-2xl font-bold text-[#1C1917] sm:text-3xl">
-              আপনার আবেদন সফলভাবে গৃহীত হয়েছে!
+              Application Submitted Successfully!
             </h1>
+            <p className="font-bn mt-1 text-xs text-[#78716C]">
+              আপনার আবেদন সফলভাবে গৃহীত হয়েছে
+            </p>
             <p className="mx-auto mt-2.5 max-w-md text-sm leading-relaxed text-[#44403C]">
-              আপনার আবেদনটি <strong className="text-[#1C1917]">{job.title}</strong> পদের জন্য জমা হয়েছে। যাচাই-বাছাই শেষে পরবর্তী পরীক্ষা বা সাক্ষাৎকারের তথ্য নিচের Application ID এবং আপনার মোবাইল নম্বর দিয়ে জানতে পারবেন।
+              Your application for <strong className="text-[#1C1917]">{titlePair.primary}</strong>{' '}
+              has been received. Once reviewed, exam or interview schedules can be checked anytime
+              using your Application ID and mobile number.
             </p>
 
             <div className="mx-auto mt-6 max-w-sm rounded-2xl border border-[#E7E5E4] bg-[#FAFAF8] p-4">
-              <p className="text-xs font-semibold text-[#78716C]">
-                আপনার আবেদন নম্বর (Application ID)
-              </p>
+              <p className="text-xs font-semibold text-[#78716C]">Your Application ID</p>
               <div className="mt-1.5 flex items-center justify-center gap-2">
                 <span className="font-mono text-xl font-bold tracking-wider text-[#DC1F26] sm:text-2xl">
                   {submittedCode}
@@ -604,7 +612,7 @@ export function JobApplyPage() {
                 </button>
               </div>
               <p className="mt-1.5 text-[11px] text-[#57534E]">
-                ভবিষ্যতে আবেদনের অবস্থা দেখতে এই Application ID সংরক্ষণ করে রাখুন।
+                Please save this Application ID to check status updates later.
               </p>
             </div>
 
@@ -615,19 +623,19 @@ export function JobApplyPage() {
                 )}&mobile=${encodeURIComponent(submittedMobile)}`}
                 className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-[#DC1F26] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#B91C1C]"
               >
-                আবেদনের অবস্থা দেখুন
+                Track Application Status
               </Link>
               <Link
                 to="/jobs"
                 className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-[#D6D3D1] bg-white px-6 py-2.5 text-sm font-semibold text-[#1C1917] hover:border-[#1C1917]"
               >
-                অন্যান্য নিয়োগ দেখুন
+                Browse Other Openings
               </Link>
               <Link
                 to="/"
                 className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-[#1C1917] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#44403C]"
               >
-                হোমে ফিরে যান
+                Back to Home
               </Link>
             </div>
           </div>
@@ -646,19 +654,19 @@ export function JobApplyPage() {
       <div className="mx-auto max-w-xl px-4 py-20 text-center">
         <AlertCircle className="mx-auto h-10 w-10 text-amber-600" />
         <h1 className="font-display mt-3 text-2xl font-bold text-[#1C1917]">
-          {getJobWindowLabelBn(winState)}
+          {getJobWindowLabelEn(winState)}
         </h1>
         <p className="mt-2 text-sm text-[#57534E]">
           {winState === 'upcoming'
-            ? `এই পদের আবেদন শুরু হবে ${formatRecruitmentDateBn(job.startDate)} তারিখে।`
-            : `এই পদের আবেদনের শেষ তারিখ (${formatRecruitmentDateBn(job.deadline)}) অতিক্রম করেছে।`}
+            ? `Applications for this position open on ${formatRecruitmentDateEn(job.startDate)}.`
+            : `The application deadline (${formatRecruitmentDateEn(job.deadline)}) has passed.`}
         </p>
         <Link
           to={`/jobs/${job.slug}`}
           className="mt-6 inline-flex items-center gap-2 rounded-xl bg-[#1C1917] px-5 py-3 text-sm font-semibold text-white"
         >
           <ArrowLeft className="h-4 w-4" />
-          <span>বিজ্ঞপ্তিতে ফিরে যান</span>
+          <span>Back to Circular</span>
         </Link>
       </div>
     );
@@ -672,24 +680,27 @@ export function JobApplyPage() {
           className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#57534E] hover:text-[#DC1F26]"
         >
           <ArrowLeft className="h-4 w-4" />
-          <span>বিজ্ঞপ্তিতে ফিরে যান</span>
+          <span>Back to Job Circular</span>
         </Link>
 
         {/* Form Header & Completion Progress */}
         <div className="mt-4 rounded-2xl border border-[#E7E5E4] bg-white p-5 sm:p-7">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="rounded-md border border-[#FDE047] bg-[#FEFCE8] px-2.5 py-1 text-[11px] font-bold text-[#9A3412]">
-              {job.department ? `${job.department} · ${job.category}` : job.category}
+            <span className="rounded-md border border-[#E7E5E4] bg-[#FAFAF8] px-2.5 py-1 text-[11px] font-semibold text-[#57534E]">
+              {job.department ? `${job.department} · ${catInfo.en}` : catInfo.en}
             </span>
-            <span className="font-mono text-xs font-semibold text-[#57534E] tabular-nums">
-              ফর্ম অগ্রগতি: {toBengaliDigits(progressSummary.percent)}%
+            <span className="font-mono text-xs font-semibold tabular-nums text-[#57534E]">
+              Completion: {progressSummary.percent}%
             </span>
           </div>
           <h1 className="font-display mt-2.5 text-2xl font-bold text-[#1C1917] sm:text-3xl">
-            চাকরির আবেদন ফর্ম — {job.title}
+            Application Form — {titlePair.primary}
           </h1>
-          <p className="mt-1 text-xs text-[#57534E] sm:text-sm">
-            কর্মস্থল: {job.workplace} · শেষ তারিখ: {formatRecruitmentDateBn(job.deadline)}
+          {titlePair.secondaryBn && (
+            <p className="font-bn mt-0.5 text-xs text-[#78716C]">{titlePair.secondaryBn}</p>
+          )}
+          <p className="mt-1.5 text-xs tabular-nums text-[#57534E] sm:text-sm">
+            Location: {job.workplace} · Deadline: {formatRecruitmentDateEn(job.deadline)}
           </p>
           <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-[#F5F4F0]">
             <div
@@ -708,13 +719,16 @@ export function JobApplyPage() {
 
           {/* Section A: Personal Information */}
           <section className="rounded-2xl border border-[#E7E5E4] bg-white p-5 sm:p-7">
-            <h2 className="font-display border-b border-[#F5F4F0] pb-3 text-lg font-bold text-[#1C1917] sm:text-xl">
-              A. ব্যক্তিগত তথ্য (Personal Information)
-            </h2>
+            <div className="border-b border-[#F5F4F0] pb-3">
+              <h2 className="font-display text-lg font-bold text-[#1C1917] sm:text-xl">
+                A. Personal Information
+              </h2>
+              <p className="font-bn text-[11px] text-[#78716C]">ব্যক্তিগত তথ্য</p>
+            </div>
             <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="sm:col-span-2">
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  পূর্ণ নাম <span className="text-[#DC1F26]">*</span>
+                  Full Name (as per NID) <span className="text-[#DC1F26]">*</span>
                 </label>
                 <input
                   type="text"
@@ -722,42 +736,42 @@ export function JobApplyPage() {
                   maxLength={120}
                   value={fullName}
                   onChange={(e) => setFullName(e.target.value)}
-                  placeholder="জাতীয় পরিচয়পত্র অনুযায়ী আপনার পূর্ণ নাম"
+                  placeholder="Enter your full legal name"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
 
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  পিতার নাম
+                  Father&apos;s Name
                 </label>
                 <input
                   type="text"
                   maxLength={120}
                   value={fatherName}
                   onChange={(e) => setFatherName(e.target.value)}
-                  placeholder="পিতার পূর্ণ নাম"
+                  placeholder="Father's full name"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
 
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  মাতার নাম
+                  Mother&apos;s Name
                 </label>
                 <input
                   type="text"
                   maxLength={120}
                   value={motherName}
                   onChange={(e) => setMotherName(e.target.value)}
-                  placeholder="মাতার পূর্ণ নাম"
+                  placeholder="Mother's full name"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
 
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  জন্ম তারিখ <span className="text-[#DC1F26]">*</span>
+                  Date of Birth <span className="text-[#DC1F26]">*</span>
                 </label>
                 <input
                   type="date"
@@ -770,51 +784,51 @@ export function JobApplyPage() {
 
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  লিঙ্গ <span className="text-[#DC1F26]">*</span>
+                  Gender <span className="text-[#DC1F26]">*</span>
                 </label>
                 <select
                   value={gender}
                   onChange={(e) => setGender(e.target.value)}
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 >
-                  <option value="পুরুষ">পুরুষ (Male)</option>
-                  <option value="নারী">নারী (Female)</option>
-                  <option value="অন্যান্য">অন্যান্য (Other)</option>
+                  <option value="পুরুষ">Male (পুরুষ)</option>
+                  <option value="নারী">Female (নারী)</option>
+                  <option value="অন্যান্য">Other (অন্যান্য)</option>
                 </select>
               </div>
 
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  বৈবাহিক অবস্থা
+                  Marital Status
                 </label>
                 <select
                   value={maritalStatus}
                   onChange={(e) => setMaritalStatus(e.target.value)}
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 >
-                  <option value="অবিবাহিত">অবিবাহিত (Unmarried)</option>
-                  <option value="বিবাহিত">বিবাহিত (Married)</option>
-                  <option value="অন্যান্য">অন্যান্য</option>
+                  <option value="অবিবাহিত">Unmarried (অবিবাহিত)</option>
+                  <option value="বিবাহিত">Married (বিবাহিত)</option>
+                  <option value="অন্যান্য">Other (অন্যান্য)</option>
                 </select>
               </div>
 
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  জাতীয়তা
+                  Nationality
                 </label>
                 <input
                   type="text"
                   maxLength={60}
                   value={nationality}
                   onChange={(e) => setNationality(e.target.value)}
-                  placeholder="বাংলাদেশি"
+                  placeholder="Bangladeshi"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
 
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  জাতীয় পরিচয়পত্র (NID) / জন্ম নিবন্ধন নম্বর <span className="text-[#DC1F26]">*</span>
+                  National ID (NID) / Birth Registration No. <span className="text-[#DC1F26]">*</span>
                 </label>
                 <input
                   type="text"
@@ -822,21 +836,21 @@ export function JobApplyPage() {
                   maxLength={40}
                   value={nidNumber}
                   onChange={(e) => setNidNumber(e.target.value)}
-                  placeholder="১০ / ১৩ / ১৭ সংখ্যার NID নম্বর"
+                  placeholder="10, 13, or 17 digit NID number"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 font-mono text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
 
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  পাসপোর্ট নম্বর (ঐচ্ছিক)
+                  Passport Number (Optional)
                 </label>
                 <input
                   type="text"
                   maxLength={40}
                   value={passportNumber}
                   onChange={(e) => setPassportNumber(e.target.value)}
-                  placeholder="যদি থাকে"
+                  placeholder="If available"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 font-mono text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
@@ -845,13 +859,16 @@ export function JobApplyPage() {
 
           {/* Section B: Contact Information */}
           <section className="rounded-2xl border border-[#E7E5E4] bg-white p-5 sm:p-7">
-            <h2 className="font-display border-b border-[#F5F4F0] pb-3 text-lg font-bold text-[#1C1917] sm:text-xl">
-              B. যোগাযোগের তথ্য (Contact Information)
-            </h2>
+            <div className="border-b border-[#F5F4F0] pb-3">
+              <h2 className="font-display text-lg font-bold text-[#1C1917] sm:text-xl">
+                B. Contact Information
+              </h2>
+              <p className="font-bn text-[11px] text-[#78716C]">যোগাযোগের তথ্য</p>
+            </div>
             <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  মোবাইল নম্বর <span className="text-[#DC1F26]">*</span>
+                  Mobile Number <span className="text-[#DC1F26]">*</span>
                 </label>
                 <input
                   type="tel"
@@ -866,7 +883,7 @@ export function JobApplyPage() {
 
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  বিকল্প মোবাইল নম্বর (ঐচ্ছিক)
+                  Alternative Mobile (Optional)
                 </label>
                 <input
                   type="tel"
@@ -880,7 +897,7 @@ export function JobApplyPage() {
 
               <div className="sm:col-span-2">
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  ইমেইল ঠিকানা (ঐচ্ছিক)
+                  Email Address (Optional)
                 </label>
                 <input
                   type="email"
@@ -894,7 +911,7 @@ export function JobApplyPage() {
 
               <div className="sm:col-span-2">
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  বর্তমান ঠিকানা <span className="text-[#DC1F26]">*</span>
+                  Present Address <span className="text-[#DC1F26]">*</span>
                 </label>
                 <input
                   type="text"
@@ -906,7 +923,7 @@ export function JobApplyPage() {
                     setPresentAddress(val);
                     if (sameAsPresent) setPermanentAddress(val);
                   }}
-                  placeholder="বাসা/গ্রাম, ডাকঘর, থানা, জেলা"
+                  placeholder="House/Road, Area, Thana, District"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
@@ -914,7 +931,7 @@ export function JobApplyPage() {
               <div className="sm:col-span-2">
                 <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
                   <label className="text-xs font-semibold text-[#1C1917]">
-                    স্থায়ী ঠিকানা
+                    Permanent Address
                   </label>
                   <label className="inline-flex cursor-pointer items-center gap-1.5 text-xs font-medium text-[#57534E]">
                     <input
@@ -927,7 +944,7 @@ export function JobApplyPage() {
                       }}
                       className="h-3.5 w-3.5 rounded border-[#D6D3D1] text-[#DC1F26]"
                     />
-                    <span>বর্তমান ঠিকানার মতোই</span>
+                    <span>Same as present address</span>
                   </label>
                 </div>
                 <input
@@ -936,7 +953,7 @@ export function JobApplyPage() {
                   disabled={sameAsPresent}
                   value={sameAsPresent ? presentAddress : permanentAddress}
                   onChange={(e) => setPermanentAddress(e.target.value)}
-                  placeholder="স্থায়ী ঠিকানা লিখুন"
+                  placeholder="Enter permanent address"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none disabled:opacity-75"
                 />
               </div>
@@ -945,13 +962,16 @@ export function JobApplyPage() {
 
           {/* Section C: Educational Qualification */}
           <section className="rounded-2xl border border-[#E7E5E4] bg-white p-5 sm:p-7">
-            <h2 className="font-display border-b border-[#F5F4F0] pb-3 text-lg font-bold text-[#1C1917] sm:text-xl">
-              C. শিক্ষাগত যোগ্যতা (Educational Qualification)
-            </h2>
+            <div className="border-b border-[#F5F4F0] pb-3">
+              <h2 className="font-display text-lg font-bold text-[#1C1917] sm:text-xl">
+                C. Educational Qualification
+              </h2>
+              <p className="font-bn text-[11px] text-[#78716C]">শিক্ষাগত যোগ্যতা</p>
+            </div>
             <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  সর্বশেষ শিক্ষাগত যোগ্যতা <span className="text-[#DC1F26]">*</span>
+                  Highest Qualification <span className="text-[#DC1F26]">*</span>
                 </label>
                 <input
                   type="text"
@@ -959,35 +979,35 @@ export function JobApplyPage() {
                   maxLength={120}
                   value={educationLevel}
                   onChange={(e) => setEducationLevel(e.target.value)}
-                  placeholder="যেমন: অষ্টম শ্রেণি / এসএসসি / এইচএসসি / স্নাতক"
+                  placeholder="e.g. SSC / HSC / Diploma / Bachelor's"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
 
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  বিষয় / বিভাগ (Subject / Department)
+                  Subject / Department
                 </label>
                 <input
                   type="text"
                   maxLength={160}
                   value={subjectDepartment}
                   onChange={(e) => setSubjectDepartment(e.target.value)}
-                  placeholder="যেমন: বিজ্ঞান / ব্যবসায় শিক্ষা / মানবিক / হিসাববিজ্ঞান"
+                  placeholder="e.g. Science / Commerce / Accounting"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
 
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  শিক্ষা প্রতিষ্ঠানের নাম
+                  Institution Name
                 </label>
                 <input
                   type="text"
                   maxLength={160}
                   value={institution}
                   onChange={(e) => setInstitution(e.target.value)}
-                  placeholder="স্কুল / কলেজ / বিশ্ববিদ্যালয়"
+                  placeholder="School / College / University"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
@@ -995,20 +1015,20 @@ export function JobApplyPage() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                    পাশের সাল
+                    Passing Year
                   </label>
                   <input
                     type="text"
                     maxLength={20}
                     value={passingYear}
                     onChange={(e) => setPassingYear(e.target.value)}
-                    placeholder="যেমন: ২০২২"
+                    placeholder="e.g. 2022"
                     className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                   />
                 </div>
                 <div>
                   <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                    ফলাফল / GPA
+                    Result / GPA
                   </label>
                   <input
                     type="text"
@@ -1025,13 +1045,16 @@ export function JobApplyPage() {
 
           {/* Section D: Experience & Position */}
           <section className="rounded-2xl border border-[#E7E5E4] bg-white p-5 sm:p-7">
-            <h2 className="font-display border-b border-[#F5F4F0] pb-3 text-lg font-bold text-[#1C1917] sm:text-xl">
-              D. চাকরি ও অভিজ্ঞতা (Experience &amp; Job Info)
-            </h2>
+            <div className="border-b border-[#F5F4F0] pb-3">
+              <h2 className="font-display text-lg font-bold text-[#1C1917] sm:text-xl">
+                D. Position &amp; Experience
+              </h2>
+              <p className="font-bn text-[11px] text-[#78716C]">চাকরি ও অভিজ্ঞতা</p>
+            </div>
             <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="sm:col-span-2">
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  কোন পদে আবেদন করছেন <span className="text-[#DC1F26]">*</span>
+                  Position Applied For <span className="text-[#DC1F26]">*</span>
                 </label>
                 <input
                   type="text"
@@ -1051,7 +1074,7 @@ export function JobApplyPage() {
                     onChange={(e) => setHasPreviousExperience(e.target.checked)}
                     className="h-4 w-4 rounded border-[#D6D3D1] text-[#DC1F26]"
                   />
-                  <span>আমার পূর্বের চাকরির অভিজ্ঞতা রয়েছে</span>
+                  <span>I have prior work experience</span>
                 </label>
               </div>
 
@@ -1059,27 +1082,27 @@ export function JobApplyPage() {
                 <>
                   <div>
                     <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                      কত বছরের অভিজ্ঞতা
+                      Years of Experience
                     </label>
                     <input
                       type="text"
                       maxLength={40}
                       value={experienceYears}
                       onChange={(e) => setExperienceYears(e.target.value)}
-                      placeholder="যেমন: ২ বছর"
+                      placeholder="e.g. 2 years"
                       className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                     />
                   </div>
                   <div>
                     <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                      পূর্বের প্রতিষ্ঠানের নাম
+                      Previous Organization &amp; Role
                     </label>
                     <input
                       type="text"
                       maxLength={160}
                       value={previousOrganization}
                       onChange={(e) => setPreviousOrganization(e.target.value)}
-                      placeholder="প্রতিষ্ঠানের নাম ও পদবি"
+                      placeholder="Company name & designation"
                       className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                     />
                   </div>
@@ -1088,28 +1111,28 @@ export function JobApplyPage() {
 
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  বর্তমান পেশা
+                  Current Occupation
                 </label>
                 <input
                   type="text"
                   maxLength={120}
                   value={currentOccupation}
                   onChange={(e) => setCurrentOccupation(e.target.value)}
-                  placeholder="যেমন: ছাত্র / চাকরিজীবী / ফ্রিল্যান্সার"
+                  placeholder="e.g. Student / Employed / Self-employed"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
 
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  প্রত্যাশিত বেতন
+                  Expected Salary (BDT)
                 </label>
                 <input
                   type="text"
                   maxLength={60}
                   value={expectedSalary}
                   onChange={(e) => setExpectedSalary(e.target.value)}
-                  placeholder="যেমন: ১৮,০০০ টাকা বা আলোচনা সাপেক্ষে"
+                  placeholder="e.g. 18,000 BDT or Negotiable"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
@@ -1118,90 +1141,93 @@ export function JobApplyPage() {
 
           {/* Section E: Skills & Additional Information */}
           <section className="rounded-2xl border border-[#E7E5E4] bg-white p-5 sm:p-7">
-            <h2 className="font-display border-b border-[#F5F4F0] pb-3 text-lg font-bold text-[#1C1917] sm:text-xl">
-              E. দক্ষতা ও অতিরিক্ত তথ্য (Skills &amp; Additional Info)
-            </h2>
+            <div className="border-b border-[#F5F4F0] pb-3">
+              <h2 className="font-display text-lg font-bold text-[#1C1917] sm:text-xl">
+                E. Skills &amp; Additional Information
+              </h2>
+              <p className="font-bn text-[11px] text-[#78716C]">দক্ষতা ও অতিরিক্ত তথ্য</p>
+            </div>
             <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  কম্পিউটার দক্ষতা (Computer Skills)
+                  Computer Skills
                 </label>
                 <input
                   type="text"
                   maxLength={400}
                   value={computerSkills}
                   onChange={(e) => setComputerSkills(e.target.value)}
-                  placeholder="যেমন: MS Word, Excel, Billing Software"
+                  placeholder="e.g. MS Word, Excel, POS Billing"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
 
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  ভাষাগত দক্ষতা (Language Skills)
+                  Language Proficiency
                 </label>
                 <input
                   type="text"
                   maxLength={400}
                   value={languageSkills}
                   onChange={(e) => setLanguageSkills(e.target.value)}
-                  placeholder="যেমন: বাংলা, ইংরেজি"
+                  placeholder="e.g. Bengali, English"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
 
               <div className="sm:col-span-2">
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  অন্যান্য দক্ষতা (Skills)
+                  Other Practical Skills
                 </label>
                 <input
                   type="text"
                   maxLength={600}
                   value={skills}
                   onChange={(e) => setSkills(e.target.value)}
-                  placeholder="যেমন: কাস্টমার হ্যান্ডলিং, হিসাবরক্ষণ, ড্রাইভিং লাইসেন্স"
+                  placeholder="e.g. Customer Service, Inventory Handling, Driving Licence"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
 
               <div className="sm:col-span-2">
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  নিজের সম্পর্কে সংক্ষিপ্ত বিবরণ
+                  Brief Introduction About Yourself
                 </label>
                 <textarea
                   rows={3}
                   maxLength={1500}
                   value={aboutSelf}
                   onChange={(e) => setAboutSelf(e.target.value)}
-                  placeholder="আপনি কেন এই পদের জন্য যোগ্য এবং কাজের আগ্রহ সম্পর্কে সংক্ষেপে লিখুন..."
+                  placeholder="Share why you are a good fit and what excites you about working with Home Recipe Foods..."
                   className="w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
 
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  রেফারেন্স তথ্য (ঐচ্ছিক)
+                  Reference (Optional)
                 </label>
                 <input
                   type="text"
                   maxLength={400}
                   value={referenceInfo}
                   onChange={(e) => setReferenceInfo(e.target.value)}
-                  placeholder="পরিচিত কারও নাম ও ফোন নম্বর"
+                  placeholder="Name & phone number of a reference"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
 
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  অতিরিক্ত নোট / পোর্টফোলিও লিংক (ঐচ্ছিক)
+                  Portfolio Link or Extra Note (Optional)
                 </label>
                 <input
                   type="text"
                   maxLength={1000}
                   value={cvUrlOrNote}
                   onChange={(e) => setCvUrlOrNote(e.target.value)}
-                  placeholder="অতিরিক্ত কোনো লিংক বা তথ্য"
+                  placeholder="Any external link or additional note"
                   className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
                 />
               </div>
@@ -1210,19 +1236,23 @@ export function JobApplyPage() {
 
           {/* Section F: Photo & Documents Upload */}
           <section className="rounded-2xl border border-[#E7E5E4] bg-white p-5 sm:p-7">
-            <h2 className="font-display border-b border-[#F5F4F0] pb-3 text-lg font-bold text-[#1C1917] sm:text-xl">
-              F. ছবি ও ডকুমেন্ট আপলোড (Photo &amp; Documents)
-            </h2>
-            <p className="mt-2 text-xs text-[#57534E]">
-              ছবি সর্বোচ্চ 2MB (JPG / JPEG / PNG) এবং প্রতিটি ডকুমেন্ট সর্বোচ্চ 5MB (PDF / DOC / DOCX / JPG / PNG) হতে পারবে।
+            <div className="border-b border-[#F5F4F0] pb-3">
+              <h2 className="font-display text-lg font-bold text-[#1C1917] sm:text-xl">
+                F. Photo &amp; Supporting Documents
+              </h2>
+              <p className="font-bn text-[11px] text-[#78716C]">ছবি ও ডকুমেন্ট আপলোড</p>
+            </div>
+            <p className="mt-2.5 text-xs text-[#57534E]">
+              Candidate photo must be under 2 MB (JPG / JPEG / PNG). Supporting documents may be up
+              to 5 MB each (PDF / DOC / DOCX / JPG / PNG).
             </p>
 
             <div className="mt-4 space-y-4">
               {/* Candidate Photo */}
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-                  প্রার্থীর পাসপোর্ট সাইজ ছবি <span className="text-[#DC1F26]">*</span>{' '}
-                  <span className="font-normal text-[#78716C]">(JPG / PNG, সর্বোচ্চ 2MB)</span>
+                  Passport-Size Candidate Photo <span className="text-[#DC1F26]">*</span>{' '}
+                  <span className="font-normal text-[#78716C]">(JPG / PNG, max 2 MB)</span>
                 </label>
                 {photoPreviewUrl && photoFile ? (
                   <div className="flex items-center gap-4 rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-3">
@@ -1235,7 +1265,7 @@ export function JobApplyPage() {
                     </div>
                     <div className="min-w-0 flex-1 text-xs">
                       <p className="truncate font-semibold text-[#1C1917]">{photoFile.name}</p>
-                      <p className="font-mono text-[#78716C]">
+                      <p className="font-mono tabular-nums text-[#78716C]">
                         {(photoFile.size / 1024).toFixed(0)} KB
                       </p>
                       <button
@@ -1248,14 +1278,14 @@ export function JobApplyPage() {
                         className="mt-2 inline-flex cursor-pointer items-center gap-1 rounded-lg border border-red-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-50"
                       >
                         <X className="h-3 w-3" />
-                        <span>পরিবর্তন করুন</span>
+                        <span>Replace Photo</span>
                       </button>
                     </div>
                   </div>
                 ) : (
                   <label className="flex min-h-[72px] cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-[#D6D3D1] bg-[#FAFAF8] px-4 py-4 text-xs font-medium text-[#57534E] transition-colors hover:border-[#DC1F26] hover:text-[#1C1917]">
                     <Upload className="h-4 w-4 text-[#DC1F26]" />
-                    <span>পাসপোর্ট সাইজ ছবি নির্বাচন করুন (আবশ্যক)</span>
+                    <span>Select Passport-Size Photo (Required)</span>
                     <input
                       type="file"
                       accept=".jpg,.jpeg,.png,image/jpeg,image/png"
@@ -1269,29 +1299,29 @@ export function JobApplyPage() {
               {/* Supporting Documents */}
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <DocUploadField
-                  label="NID / জন্ম নিবন্ধন কপি"
-                  hint="PDF, DOC, JPG বা PNG (সর্বোচ্চ 5MB)"
+                  label="NID / Birth Certificate Copy"
+                  hint="PDF, DOC, JPG, or PNG (max 5 MB)"
                   file={nidFile}
                   onClear={() => setNidFile(null)}
                   onChange={(e) => handleDocFileChange(setNidFile, e)}
                 />
                 <DocUploadField
-                  label="CV / জীবনবৃত্তান্ত (Resume)"
-                  hint="PDF, DOC, DOCX, JPG বা PNG (সর্বোচ্চ 5MB)"
+                  label="CV / Resume"
+                  hint="PDF, DOC, DOCX, JPG, or PNG (max 5 MB)"
                   file={cvFile}
                   onClear={() => setCvFile(null)}
                   onChange={(e) => handleDocFileChange(setCvFile, e)}
                 />
                 <DocUploadField
-                  label="শিক্ষাগত সনদপত্র (Certificate)"
-                  hint="PDF, DOC, JPG বা PNG (সর্বোচ্চ 5MB)"
+                  label="Educational Certificate"
+                  hint="PDF, DOC, JPG, or PNG (max 5 MB)"
                   file={eduFile}
                   onClear={() => setEduFile(null)}
                   onChange={(e) => handleDocFileChange(setEduFile, e)}
                 />
                 <DocUploadField
-                  label="অন্যান্য ডকুমেন্ট (ঐচ্ছিক)"
-                  hint="অভিজ্ঞতা / ড্রাইভিং লাইসেন্স ইত্যাদি"
+                  label="Other Document (Optional)"
+                  hint="Experience letter, driving licence, etc."
                   file={otherFile}
                   onClear={() => setOtherFile(null)}
                   onChange={(e) => handleDocFileChange(setOtherFile, e)}
@@ -1302,9 +1332,12 @@ export function JobApplyPage() {
 
           {/* Section G: Declaration & Submit */}
           <section className="rounded-2xl border border-[#E7E5E4] bg-white p-5 sm:p-7">
-            <h2 className="font-display border-b border-[#F5F4F0] pb-3 text-lg font-bold text-[#1C1917] sm:text-xl">
-              G. ঘোষণা ও জমা (Declaration &amp; Submit)
-            </h2>
+            <div className="border-b border-[#F5F4F0] pb-3">
+              <h2 className="font-display text-lg font-bold text-[#1C1917] sm:text-xl">
+                G. Declaration &amp; Submit
+              </h2>
+              <p className="font-bn text-[11px] text-[#78716C]">ঘোষণা ও জমা</p>
+            </div>
             <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-4 text-xs leading-relaxed text-[#1C1917] sm:text-sm">
               <input
                 type="checkbox"
@@ -1313,21 +1346,23 @@ export function JobApplyPage() {
                 className="mt-0.5 h-4 w-4 shrink-0 rounded border-[#D6D3D1] text-[#DC1F26]"
               />
               <span>
-                আমি ঘোষণা করছি যে উপরের প্রদত্ত সকল তথ্য ও সংযুক্ত কাগজপত্র সম্পূর্ণ সত্য ও নির্ভুল। কোনো তথ্য মিথ্যা বা অসত্য প্রমাণিত হলে আমার আবেদন বাতিল বলে গণ্য হবে।{' '}
+                I declare that all information and uploaded documents provided above are true and
+                accurate. Any misrepresentation may result in cancellation of my application.{' '}
                 <span className="text-[#DC1F26]">*</span>
               </span>
             </label>
 
             <div className="mt-5 flex flex-col items-center justify-between gap-3 sm:flex-row">
               <p className="text-xs text-[#57534E]">
-                {submitStepLabel || 'সঠিক তথ্য যাচাই করে নিচের বাটনে ক্লিক করে আবেদন সম্পন্ন করুন।'}
+                {submitStepLabel ||
+                  'Please review your entries carefully and click Submit Application.'}
               </p>
               <button
                 type="submit"
                 disabled={submitting}
-                className="min-h-[48px] w-full cursor-pointer rounded-xl bg-[#DC1F26] px-7 py-3 text-sm font-bold text-white transition-colors hover:bg-[#B91C1C] disabled:opacity-60 sm:w-auto"
+                className="min-h-[48px] w-full cursor-pointer rounded-xl bg-[#DC1F26] px-7 py-3 text-sm font-semibold text-white transition-colors hover:bg-[#B91C1C] disabled:opacity-60 sm:w-auto"
               >
-                {submitting ? submitStepLabel || 'আবেদন জমা হচ্ছে...' : 'আবেদন জমা দিন'}
+                {submitting ? submitStepLabel || 'Submitting...' : 'Submit Application'}
               </button>
             </div>
           </section>
@@ -1372,7 +1407,7 @@ function DocUploadField({
       ) : (
         <label className="mt-2.5 flex min-h-[42px] cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-dashed border-[#D6D3D1] bg-white px-3 py-2 text-xs font-semibold text-[#57534E] transition-colors hover:border-[#DC1F26] hover:text-[#1C1917]">
           <Upload className="h-3.5 w-3.5 text-[#DC1F26]" />
-          <span>ফাইল নির্বাচন করুন</span>
+          <span>Choose File</span>
           <input
             type="file"
             accept=".jpg,.jpeg,.png,.pdf,.doc,.docx,image/jpeg,image/png,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"

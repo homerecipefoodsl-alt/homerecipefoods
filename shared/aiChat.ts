@@ -264,13 +264,43 @@ function sanitizeHistory(rawHistory: unknown, currentMessage: string): Array<{
   }));
 }
 
+function pruneEmptyContextFields(value: unknown, depth = 0): unknown {
+  if (depth > 6) return undefined;
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : undefined;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const cleaned = value
+      .map((item) => pruneEmptyContextFields(item, depth + 1))
+      .filter((item) => item !== undefined);
+    return cleaned.length > 0 ? cleaned : undefined;
+  }
+  if (typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      const cleaned = pruneEmptyContextFields(v, depth + 1);
+      if (cleaned !== undefined) {
+        out[k] = cleaned;
+      }
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+  }
+  return undefined;
+}
+
 function compactCatalogContext(rawContext: unknown): string {
   if (!rawContext || typeof rawContext !== 'object') {
     return '{}';
   }
-  // Compact single-line JSON saves significant input tokens per request to avoid TPM 429 limits
+  // Compact single-line JSON without empty keys saves input tokens per request to avoid TPM 429 limits
   try {
-    return JSON.stringify(rawContext);
+    const pruned = pruneEmptyContextFields(rawContext);
+    return JSON.stringify(pruned ?? {});
   } catch {
     return '{}';
   }

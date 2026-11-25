@@ -796,7 +796,7 @@ export function AdminSystemSettingsPanel() {
       {canAddProducts && (
         <div className="rounded-xl border border-[#E7E5E4] bg-white p-5">
           <h3 className="font-display text-lg font-bold text-[#1C1917]">
-            Authoritative Product Master List (১৩৬টি পণ্য)
+            Authoritative Product Master List ({masterImportStats.totalMaster}টি পণ্য)
           </h3>
           <p className="mt-1 text-xs text-[#57534E]">
             সিঙ্কড: {masterImportStats.syncedCount}/{masterImportStats.totalMaster}টি · অনুপস্থিত:{' '}

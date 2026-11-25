@@ -15,14 +15,15 @@ import {
 } from 'lucide-react';
 import { collection, doc, getDoc, getDocs, limit, query, where } from 'firebase/firestore';
 import { ApplicationStatusTracker } from '../components/ApplicationStatusTracker';
+import { resolveBilingualPair } from '../lib/bilingual';
 import { OperationType, db, handleFirestoreError } from '../lib/firebase';
 import {
-  formatRecruitmentDateBn,
-  getEmploymentTypeBn,
-  getJobWindowLabelBn,
+  formatRecruitmentDateEn,
+  getEmploymentTypeEn,
+  getJobCategoryDisplay,
+  getJobWindowLabelEn,
   getJobWindowState,
 } from '../lib/recruitment';
-import { toBengaliDigits } from '../lib/utils';
 import type { JobPosting } from '../types';
 
 export function JobDetailPage() {
@@ -69,7 +70,8 @@ export function JobDetailPage() {
         if (!active) return;
         if (foundJob) {
           setJob(foundJob);
-          document.title = `${foundJob.title} – নিয়োগ বিজ্ঞপ্তি | Home Recipe Foods`;
+          const titleInfo = resolveBilingualPair(foundJob.titleEn, foundJob.title);
+          document.title = `${titleInfo.primary} – Careers | Home Recipe Foods`;
         } else {
           setJob(null);
         }
@@ -93,7 +95,8 @@ export function JobDetailPage() {
   if (loading) {
     return (
       <div className="mx-auto max-w-4xl px-4 py-12 sm:px-6 lg:px-8">
-        <div className="h-96 animate-pulse rounded-2xl border border-[#E7E5E4] bg-white" />
+        <p className="mb-3 text-xs font-medium text-[#78716C]">Loading circular details...</p>
+        <div className="h-80 rounded-2xl border border-[#E7E5E4] bg-white" />
       </div>
     );
   }
@@ -105,25 +108,28 @@ export function JobDetailPage() {
           <AlertCircle className="h-6 w-6" />
         </div>
         <h1 className="font-display mt-4 text-2xl font-bold text-[#1C1917] sm:text-3xl">
-          নিয়োগ বিজ্ঞপ্তিটি পাওয়া যায়নি
+          Job Circular Not Found
         </h1>
+        <p className="font-bn mt-1 text-xs text-[#78716C]">নিয়োগ বিজ্ঞপ্তিটি পাওয়া যায়নি</p>
         <p className="mt-2 text-sm text-[#57534E]">
-          সম্ভবত এই বিজ্ঞপ্তিটি বর্তমানে প্রকাশিত নয় বা বন্ধ করা হয়েছে।
+          This position may no longer be published or has been closed.
         </p>
         <Link
           to="/jobs"
           className="mt-6 inline-flex items-center gap-2 rounded-xl bg-[#1C1917] px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-[#DC1F26]"
         >
           <ArrowLeft className="h-4 w-4" />
-          <span>সকল নিয়োগ বিজ্ঞপ্তি দেখুন</span>
+          <span>View All Openings</span>
         </Link>
       </div>
     );
   }
 
   const winState = getJobWindowState(job);
-  const statusLabel = getJobWindowLabelBn(winState);
+  const statusLabel = getJobWindowLabelEn(winState);
   const isOpen = winState === 'open';
+  const catInfo = getJobCategoryDisplay(job.category);
+  const titlePair = resolveBilingualPair(job.titleEn, job.title);
 
   return (
     <div className="bg-[#FAFAF8] pb-24 md:pb-16">
@@ -134,13 +140,13 @@ export function JobDetailPage() {
             className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#57534E] transition-colors hover:text-[#DC1F26]"
           >
             <ArrowLeft className="h-4 w-4" />
-            <span>সব নিয়োগ বিজ্ঞপ্তি</span>
+            <span>All Job Openings</span>
           </Link>
           <Link
             to="/application-status"
             className="inline-flex items-center gap-1.5 rounded-lg border border-[#E7E5E4] bg-white px-3 py-1.5 text-xs font-semibold text-[#1C1917] transition-colors hover:border-[#DC1F26] hover:text-[#DC1F26]"
           >
-            <span>আবেদনের অবস্থা যাচাই করুন</span>
+            <span>Check Application Status</span>
             <ArrowRight className="h-3.5 w-3.5" />
           </Link>
         </div>
@@ -148,11 +154,11 @@ export function JobDetailPage() {
         {/* Main Header Card */}
         <div className="mt-4 rounded-2xl border border-[#E7E5E4] bg-white p-6 sm:p-8">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <span className="rounded-lg border border-[#E7E5E4] bg-[#FAFAF8] px-3 py-1 text-xs font-bold text-[#1C1917]">
-              {job.department ? `${job.department} · ${job.category}` : job.category}
+            <span className="rounded-lg border border-[#E7E5E4] bg-[#FAFAF8] px-3 py-1 text-xs font-semibold text-[#1C1917]">
+              {job.department ? `${job.department} · ${catInfo.en}` : catInfo.en}
             </span>
             <span
-              className={`rounded-lg border px-3 py-1 text-xs font-bold ${
+              className={`rounded-lg border px-3 py-1 text-xs font-semibold ${
                 isOpen
                   ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
                   : winState === 'upcoming'
@@ -165,10 +171,12 @@ export function JobDetailPage() {
           </div>
 
           <h1 className="font-display mt-4 text-2xl font-bold leading-snug text-[#1C1917] sm:text-4xl">
-            {job.title}
+            {titlePair.primary}
           </h1>
-          {job.titleEn && (
-            <p className="mt-1 text-sm font-medium text-[#78716C]">{job.titleEn}</p>
+          {titlePair.secondaryBn && (
+            <p className="font-bn mt-1 text-sm font-medium text-[#78716C]">
+              {titlePair.secondaryBn}
+            </p>
           )}
 
           {/* Key Info Grid */}
@@ -176,24 +184,24 @@ export function JobDetailPage() {
             <div className="flex items-start gap-2.5">
               <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-[#DC1F26]" />
               <div>
-                <p className="text-[11px] font-semibold text-[#78716C]">কর্মস্থল</p>
-                <p className="text-xs font-bold text-[#1C1917] sm:text-sm">{job.workplace}</p>
+                <p className="text-[11px] font-semibold text-[#78716C]">Location</p>
+                <p className="text-xs font-semibold text-[#1C1917] sm:text-sm">{job.workplace}</p>
               </div>
             </div>
             <div className="flex items-start gap-2.5">
               <Users className="mt-0.5 h-4 w-4 shrink-0 text-[#DC1F26]" />
               <div>
-                <p className="text-[11px] font-semibold text-[#78716C]">শূন্যপদ</p>
-                <p className="text-xs font-bold text-[#1C1917] sm:text-sm">
-                  {toBengaliDigits(job.vacancies)} জন
+                <p className="text-[11px] font-semibold text-[#78716C]">Vacancies</p>
+                <p className="text-xs font-semibold tabular-nums text-[#1C1917] sm:text-sm">
+                  {job.vacancies}
                 </p>
               </div>
             </div>
             <div className="flex items-start gap-2.5">
               <Briefcase className="mt-0.5 h-4 w-4 shrink-0 text-[#DC1F26]" />
               <div>
-                <p className="text-[11px] font-semibold text-[#78716C]">বেতন</p>
-                <p className="text-xs font-bold text-[#1C1917] sm:text-sm">
+                <p className="text-[11px] font-semibold text-[#78716C]">Compensation</p>
+                <p className="text-xs font-semibold text-[#1C1917] sm:text-sm">
                   {job.salary}
                   {job.salaryType ? ` (${job.salaryType})` : ''}
                 </p>
@@ -202,9 +210,9 @@ export function JobDetailPage() {
             <div className="flex items-start gap-2.5">
               <Clock className="mt-0.5 h-4 w-4 shrink-0 text-[#DC1F26]" />
               <div>
-                <p className="text-[11px] font-semibold text-[#78716C]">চাকরির ধরন</p>
-                <p className="text-xs font-bold text-[#1C1917] sm:text-sm">
-                  {getEmploymentTypeBn(job.employmentType)}
+                <p className="text-[11px] font-semibold text-[#78716C]">Employment Type</p>
+                <p className="text-xs font-semibold text-[#1C1917] sm:text-sm">
+                  {getEmploymentTypeEn(job.employmentType)}
                   {job.workingHours ? ` · ${job.workingHours}` : ''}
                 </p>
               </div>
@@ -212,18 +220,18 @@ export function JobDetailPage() {
             <div className="flex items-start gap-2.5">
               <CalendarClock className="mt-0.5 h-4 w-4 shrink-0 text-[#DC1F26]" />
               <div>
-                <p className="text-[11px] font-semibold text-[#78716C]">আবেদন শুরু</p>
-                <p className="text-xs font-bold text-[#1C1917] sm:text-sm">
-                  {formatRecruitmentDateBn(job.startDate)}
+                <p className="text-[11px] font-semibold text-[#78716C]">Applications Open</p>
+                <p className="text-xs font-semibold tabular-nums text-[#1C1917] sm:text-sm">
+                  {formatRecruitmentDateEn(job.startDate)}
                 </p>
               </div>
             </div>
             <div className="flex items-start gap-2.5">
               <CalendarClock className="mt-0.5 h-4 w-4 shrink-0 text-[#DC1F26]" />
               <div>
-                <p className="text-[11px] font-semibold text-[#78716C]">আবেদনের শেষ তারিখ</p>
-                <p className="text-xs font-bold text-[#DC1F26] sm:text-sm">
-                  {formatRecruitmentDateBn(job.deadline)}
+                <p className="text-[11px] font-semibold text-[#78716C]">Application Deadline</p>
+                <p className="text-xs font-semibold tabular-nums text-[#DC1F26] sm:text-sm">
+                  {formatRecruitmentDateEn(job.deadline)}
                 </p>
               </div>
             </div>
@@ -235,17 +243,17 @@ export function JobDetailPage() {
               <>
                 <div>
                   <p className="text-sm font-bold text-[#1C1917]">
-                    আপনি কি এই পদের জন্য যোগ্য ও আগ্রহী?
+                    Interested and qualified for this position?
                   </p>
                   <p className="text-xs text-[#57534E]">
-                    সঠিক তথ্য দিয়ে অনলাইনে আবেদন ফর্ম পূরণ করুন।
+                    Complete our online application form with accurate details.
                   </p>
                 </div>
                 <Link
                   to={`/apply/${job.slug}`}
-                  className="inline-flex min-h-[46px] w-full shrink-0 items-center justify-center gap-2 rounded-xl bg-[#DC1F26] px-6 py-3 text-sm font-bold text-white transition-colors hover:bg-[#B91C1C] sm:w-auto"
+                  className="inline-flex min-h-[46px] w-full shrink-0 items-center justify-center gap-2 rounded-xl bg-[#DC1F26] px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-[#B91C1C] sm:w-auto"
                 >
-                  <span>আবেদন করুন</span>
+                  <span>Apply Online</span>
                   <ArrowRight className="h-4 w-4" />
                 </Link>
               </>
@@ -255,8 +263,8 @@ export function JobDetailPage() {
                   <p className="text-sm font-bold text-[#1C1917]">{statusLabel}</p>
                   <p className="text-xs text-[#57534E]">
                     {winState === 'upcoming'
-                      ? `আবেদন গ্রহণ শুরু হবে ${formatRecruitmentDateBn(job.startDate)} তারিখে।`
-                      : 'এই পদের আবেদনের সময়সীমা শেষ হয়েছে।'}
+                      ? `Applications will open on ${formatRecruitmentDateEn(job.startDate)}.`
+                      : 'The application deadline for this role has passed.'}
                   </p>
                 </div>
                 <button
@@ -264,7 +272,7 @@ export function JobDetailPage() {
                   disabled
                   className="min-h-[44px] w-full cursor-not-allowed rounded-xl bg-[#E7E5E4] px-6 py-2.5 text-sm font-semibold text-[#78716C] sm:w-auto"
                 >
-                  {winState === 'upcoming' ? 'আবেদন এখনো শুরু হয়নি' : 'আবেদনের সময় শেষ'}
+                  {winState === 'upcoming' ? 'Opening Soon' : 'Applications Closed'}
                 </button>
               </>
             )}
@@ -274,7 +282,8 @@ export function JobDetailPage() {
         {/* Detailed Sections */}
         <div className="mt-6 space-y-6">
           <section className="rounded-2xl border border-[#E7E5E4] bg-white p-6 sm:p-8">
-            <h2 className="font-display text-xl font-bold text-[#1C1917]">কাজের বিবরণ</h2>
+            <h2 className="font-display text-xl font-bold text-[#1C1917]">Role Overview</h2>
+            <p className="font-bn text-xs text-[#78716C]">কাজের বিবরণ</p>
             <p className="mt-3 whitespace-pre-line text-sm leading-relaxed text-[#44403C]">
               {job.description}
             </p>
@@ -283,8 +292,9 @@ export function JobDetailPage() {
           {job.responsibilities && job.responsibilities.length > 0 && (
             <section className="rounded-2xl border border-[#E7E5E4] bg-white p-6 sm:p-8">
               <h2 className="font-display text-xl font-bold text-[#1C1917]">
-                দায়িত্ব ও কর্তব্য
+                Key Responsibilities
               </h2>
+              <p className="font-bn text-xs text-[#78716C]">দায়িত্ব ও কর্তব্য</p>
               <ul className="mt-4 space-y-2.5 text-sm text-[#44403C]">
                 {job.responsibilities.map((item, idx) => (
                   <li key={idx} className="flex items-start gap-2.5">
@@ -298,15 +308,16 @@ export function JobDetailPage() {
 
           <section className="rounded-2xl border border-[#E7E5E4] bg-white p-6 sm:p-8">
             <h2 className="font-display text-xl font-bold text-[#1C1917]">
-              যোগ্যতা ও অভিজ্ঞতা
+              Qualifications &amp; Experience
             </h2>
+            <p className="font-bn text-xs text-[#78716C]">যোগ্যতা ও অভিজ্ঞতা</p>
 
             <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
               {job.educationRequirement && (
                 <div className="rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-4">
                   <div className="flex items-center gap-2 text-xs font-bold text-[#1C1917]">
                     <GraduationCap className="h-4 w-4 text-[#DC1F26]" />
-                    <span>শিক্ষাগত যোগ্যতা</span>
+                    <span>Education Requirement</span>
                   </div>
                   <p className="mt-1.5 text-sm text-[#44403C]">{job.educationRequirement}</p>
                 </div>
@@ -315,7 +326,7 @@ export function JobDetailPage() {
                 <div className="rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-4">
                   <div className="flex items-center gap-2 text-xs font-bold text-[#1C1917]">
                     <Briefcase className="h-4 w-4 text-[#DC1F26]" />
-                    <span>অভিজ্ঞতা</span>
+                    <span>Experience</span>
                   </div>
                   <p className="mt-1.5 text-sm text-[#44403C]">{job.experienceRequirement}</p>
                 </div>
@@ -337,8 +348,9 @@ export function JobDetailPage() {
           {job.benefits && job.benefits.length > 0 && (
             <section className="rounded-2xl border border-[#E7E5E4] bg-white p-6 sm:p-8">
               <h2 className="font-display text-xl font-bold text-[#1C1917]">
-                অন্যান্য সুবিধা
+                Benefits &amp; Perks
               </h2>
+              <p className="font-bn text-xs text-[#78716C]">অন্যান্য সুবিধা</p>
               <ul className="mt-4 space-y-2.5 text-sm text-[#44403C]">
                 {job.benefits.map((b, idx) => (
                   <li key={idx} className="flex items-start gap-2.5">
@@ -353,8 +365,9 @@ export function JobDetailPage() {
           {(job.instructions || job.contactInfo) && (
             <section className="rounded-2xl border border-[#E7E5E4] bg-white p-6 sm:p-8">
               <h2 className="font-display text-xl font-bold text-[#1C1917]">
-                নির্দেশনা ও যোগাযোগ
+                Instructions &amp; Contact
               </h2>
+              <p className="font-bn text-xs text-[#78716C]">নির্দেশনা ও যোগাযোগ</p>
               {job.instructions && (
                 <p className="mt-3 whitespace-pre-line text-sm leading-relaxed text-[#44403C]">
                   {job.instructions}
@@ -375,19 +388,19 @@ export function JobDetailPage() {
 
       {/* Mobile Sticky Apply CTA */}
       {isOpen && (
-        <div className="fixed inset-x-0 bottom-[calc(4rem+env(safe-area-inset-bottom))] z-30 border-t border-[#E7E5E4] bg-white/95 px-4 py-3 backdrop-blur md:hidden">
+        <div className="fixed inset-x-0 bottom-[calc(4rem+env(safe-area-inset-bottom))] z-30 border-t border-[#E7E5E4] bg-white px-4 py-3 shadow-sm md:hidden">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
-              <p className="truncate text-xs font-bold text-[#1C1917]">{job.title}</p>
-              <p className="text-[11px] text-[#DC1F26]">
-                শেষ তারিখ: {formatRecruitmentDateBn(job.deadline)}
+              <p className="truncate text-xs font-bold text-[#1C1917]">{titlePair.primary}</p>
+              <p className="text-[11px] tabular-nums text-[#DC1F26]">
+                Deadline: {formatRecruitmentDateEn(job.deadline)}
               </p>
             </div>
             <Link
               to={`/apply/${job.slug}`}
-              className="inline-flex min-h-[42px] shrink-0 items-center gap-1.5 rounded-xl bg-[#DC1F26] px-5 text-xs font-bold text-white"
+              className="inline-flex min-h-[42px] shrink-0 items-center gap-1.5 rounded-xl bg-[#DC1F26] px-5 text-xs font-semibold text-white"
             >
-              <span>আবেদন করুন</span>
+              <span>Apply Now</span>
               <ArrowRight className="h-3.5 w-3.5" />
             </Link>
           </div>

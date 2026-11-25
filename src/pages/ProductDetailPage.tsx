@@ -1,6 +1,18 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ExternalLink, ArrowLeft, Check, Info, MapPin, Navigation, Phone, Scale, Sparkles, Store, UtensilsCrossed } from 'lucide-react';
+import {
+  ArrowLeft,
+  Calendar,
+  Check,
+  ExternalLink,
+  Info,
+  MapPin,
+  Navigation,
+  Phone,
+  Scale,
+  Store,
+  UtensilsCrossed,
+} from 'lucide-react';
 import { ProductCard } from '../components/ProductCard';
 import { useStore } from '../context/StoreContext';
 import { isDemoOrDummyShowroom } from '../data/outletsData';
@@ -10,6 +22,7 @@ import {
   getProductText,
   getShowroomText,
   matchesProductCategory,
+  resolveBilingualPair,
 } from '../lib/bilingual';
 import { formatBdtPrice } from '../lib/utils';
 
@@ -37,15 +50,18 @@ export function ProductDetailPage() {
 
   useEffect(() => {
     if (text && product) {
-      document.title =
-        product.seoTitle || `${text.nameEn} (${text.nameBn}) – Home Recipe Foods`;
+      const titlePair = resolveBilingualPair(text.nameEn, text.nameBn);
+      document.title = product.seoTitle || `${titlePair.primary} – Home Recipe Foods`;
     }
   }, [text, product]);
 
   if (productsLoading && !product) {
     return (
       <div className="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
-        <div className="h-[480px] animate-pulse rounded-2xl bg-[#F5F4F0]" />
+        <div className="flex min-h-[380px] flex-col items-center justify-center rounded-xl border border-[#E7E5E4] bg-[#F5F4F0]/60 text-center">
+          <div className="h-7 w-7 animate-spin rounded-full border-2 border-[#E7E5E4] border-t-[#DC1F26]" />
+          <p className="mt-3 text-sm font-medium text-[#1C1917]">Loading product details...</p>
+        </div>
       </div>
     );
   }
@@ -53,22 +69,28 @@ export function ProductDetailPage() {
   if (!product || !text) {
     return (
       <div className="mx-auto max-w-3xl px-4 py-20 text-center">
-        <h1 className="font-display text-3xl font-bold text-[#1C1917]">
-          পণ্যটি খুঁজে পাওয়া যায়নি
+        <h1 className="font-display text-3xl font-semibold text-[#1C1917]">
+          Product Not Found
         </h1>
+        <p className="font-bn mt-1 text-xs text-[#78716C]">পণ্যটি খুঁজে পাওয়া যায়নি</p>
         <p className="mt-2 text-sm text-[#57534E]">
-          অনুগ্রহ করে আমাদের সম্পূর্ণ প্রোডাক্ট শো-কেস থেকে আপনার পছন্দের খাবারটি খুঁজে দেখুন।
+          Please browse our complete menu showcase to explore available items.
         </p>
         <Link
           to="/products"
           className="mt-6 inline-flex items-center gap-2 rounded-lg bg-[#1C1917] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#DC1F26]"
         >
           <ArrowLeft className="h-4 w-4" />
-          <span>সব পণ্যে ফিরে যান</span>
+          <span>Back to All Products</span>
         </Link>
       </div>
     );
   }
+
+  const titlePair = resolveBilingualPair(text.nameEn, text.nameBn);
+  const catPair = resolveBilingualPair(text.categoryNameEn, text.categoryNameBn);
+  const shortDescPair = resolveBilingualPair(text.shortDescriptionEn, text.shortDescriptionBn);
+  const fullDescPair = resolveBilingualPair(text.descriptionEn, text.descriptionBn);
 
   const gallery = Array.from(
     new Set(
@@ -107,9 +129,9 @@ export function ProductDetailPage() {
   const structuredData = {
     '@context': 'https://schema.org',
     '@type': 'Product',
-    name: `${text.nameEn} (${text.nameBn})`,
-    description: text.descriptionEn || text.descriptionBn,
-    category: text.categoryNameEn || text.categoryNameBn,
+    name: titlePair.primary,
+    description: fullDescPair.primary || shortDescPair.primary,
+    category: catPair.primary,
     brand: { '@type': 'Brand', name: 'Home Recipe Foods' },
     offers: {
       '@type': 'Offer',
@@ -122,8 +144,8 @@ export function ProductDetailPage() {
     },
   };
 
-  const showBn = languageMode !== 'en';
-  const showEn = languageMode !== 'bn';
+  const showEnPrimary = languageMode !== 'bn';
+  const showBnSecondary = languageMode !== 'en';
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-12 lg:px-8">
@@ -133,41 +155,40 @@ export function ProductDetailPage() {
       />
 
       {/* Breadcrumb */}
-      <nav className="mb-6 flex flex-wrap items-center gap-2 text-xs text-[#78716C]">
+      <nav aria-label="Breadcrumb" className="mb-6 flex flex-wrap items-center gap-2 text-xs text-[#78716C]">
         <Link to="/" className="hover:text-[#1C1917]">
           Home
         </Link>
         <span>/</span>
         <Link to={`/category/${product.category}`} className="hover:text-[#1C1917]">
-          {text.categoryNameBn}
-          {text.categoryNameEn ? ` · ${text.categoryNameEn}` : ''}
+          {catPair.primary}
         </Link>
         <span>/</span>
-        <span className="font-medium text-[#1C1917]">{text.nameBn}</span>
+        <span className="font-medium text-[#1C1917]">{titlePair.primary}</span>
       </nav>
 
       {/* Main Product Showcase Split */}
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-12 lg:gap-12">
         {/* Left: Large Image + Gallery */}
         <div className="lg:col-span-6">
-          <div className="overflow-hidden rounded-2xl border border-[#E7E5E4] bg-white">
+          <div className="overflow-hidden rounded-xl border border-[#E7E5E4] bg-white">
             <div className="aspect-[4/3] w-full bg-[#F5F4F0]">
               {hasRealImage && !imgError ? (
                 <img
                   src={currentImg}
-                  alt={`${text.nameBn} - ${text.nameEn}`}
+                  alt={titlePair.primary}
                   referrerPolicy="no-referrer"
                   onError={() => setImgError(true)}
                   className="h-full w-full object-cover"
                 />
               ) : (
-                <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-gradient-to-br from-[#F5F4F0] to-[#E7E5E4] p-6 text-center">
-                  <UtensilsCrossed className="h-10 w-10 text-[#B91C1C]/60" />
-                  <p className="font-display text-lg font-bold text-[#1C1917]">
-                    {text.nameBn}
+                <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-[#F5F4F0] p-6 text-center">
+                  <UtensilsCrossed className="h-9 w-9 text-[#A8A29E]" aria-hidden="true" />
+                  <p className="font-display text-lg font-semibold text-[#1C1917]">
+                    {titlePair.primary}
                   </p>
                   <p className="text-xs text-[#78716C]">
-                    এই পণ্যের ছবি শীঘ্রই Admin Panel থেকে যুক্ত করা হবে
+                    Product photography will be added soon.
                   </p>
                 </div>
               )}
@@ -181,15 +202,15 @@ export function ProductDetailPage() {
                   key={`${img}-${idx}`}
                   type="button"
                   onClick={() => setActiveImageIdx(idx)}
-                  className={`aspect-[4/3] cursor-pointer overflow-hidden rounded-xl border transition-all ${
+                  className={`aspect-[4/3] cursor-pointer overflow-hidden rounded-lg border transition-colors ${
                     idx === activeImageIdx
-                      ? 'border-[#DC1F26] ring-2 ring-[#DC1F26]/20'
+                      ? 'border-[#DC1F26]'
                       : 'border-[#E7E5E4] opacity-75 hover:opacity-100'
                   }`}
                 >
                   <img
                     src={resolveAssetUrl(img)}
-                    alt={`${text.nameEn} view ${idx + 1}`}
+                    alt={`${titlePair.primary} view ${idx + 1}`}
                     referrerPolicy="no-referrer"
                     className="h-full w-full object-cover"
                   />
@@ -204,100 +225,110 @@ export function ProductDetailPage() {
           <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-[#78716C]">
             <Link
               to={`/category/${product.category}`}
-              className="text-[#DC1F26] hover:underline"
+              className="text-[#B91C1C] hover:underline"
             >
-              {text.categoryNameBn}
-              {text.categoryNameEn ? ` (${text.categoryNameEn})` : ''}
+              {catPair.primary}
             </Link>
-            <span aria-hidden="true">·</span>
-            <span>{product.productType}</span>
+            {product.productType && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>{product.productType}</span>
+              </>
+            )}
             <span aria-hidden="true">·</span>
             <span
               className={
                 product.availability === 'Out of Stock'
-                  ? 'text-red-700'
-                  : 'font-semibold text-[#14532D]'
+                  ? 'text-[#B91C1C]'
+                  : 'font-semibold text-[#166534]'
               }
             >
               {product.availability}
             </span>
           </div>
 
-          {showBn && (
-            <h1 className="font-display mt-2 text-3xl font-bold leading-tight text-[#1C1917] sm:text-4xl">
-              {text.nameBn}
+          {showEnPrimary ? (
+            <>
+              <h1 className="font-display mt-2 text-3xl font-semibold leading-tight text-[#1C1917] sm:text-4xl">
+                {titlePair.primary}
+              </h1>
+              {showBnSecondary && titlePair.secondaryBn && (
+                <p className="font-bn mt-1 text-base font-normal text-[#57534E] sm:text-lg">
+                  {titlePair.secondaryBn}
+                </p>
+              )}
+            </>
+          ) : (
+            <h1 className="font-bn mt-2 text-3xl font-semibold leading-tight text-[#1C1917] sm:text-4xl">
+              {text.nameBn || titlePair.primary}
             </h1>
-          )}
-          {showEn && (
-            <p
-              className={
-                showBn
-                  ? 'mt-1 text-base font-medium text-[#78716C]'
-                  : 'font-display mt-2 text-3xl font-bold leading-tight text-[#1C1917] sm:text-4xl'
-              }
-            >
-              {text.nameEn}
-            </p>
           )}
 
           {/* Price Block */}
           <div className="mt-5 flex flex-wrap items-baseline gap-3 border-y border-[#E7E5E4] py-4">
-            <span className="font-mono tabular-nums text-3xl font-bold text-[#1C1917]">
+            <span className="tabular-nums text-3xl font-semibold text-[#1C1917]">
               {product.price_label || formatBdtPrice(product.price)}
             </span>
             {typeof product.old_price === 'number' && product.old_price > product.price && (
-              <span className="font-mono tabular-nums text-lg text-[#78716C] line-through">
+              <span className="tabular-nums text-lg text-[#78716C] line-through">
                 {formatBdtPrice(product.old_price)}
               </span>
             )}
             {product.discount && (
-              <span className="rounded bg-red-50 px-2.5 py-0.5 text-xs font-bold text-[#DC1F26]">
-                {product.discount}
+              <span className="text-xs font-semibold text-[#DC1F26]">{product.discount}</span>
+            )}
+            {(text.unit || product.priceUnit) && (
+              <span className="text-sm text-[#57534E]">
+                / {text.unit || product.priceUnit}
               </span>
             )}
-            <span className="text-sm text-[#57534E]">
-              {text.unit || product.priceUnit}
-            </span>
           </div>
 
-          {/* Bilingual Short & Full Description */}
+          {/* English-First Short & Full Description */}
           <div className="mt-5 space-y-3">
-            {showBn && (
-              <>
-                <p className="text-sm font-medium leading-relaxed text-[#1C1917] sm:text-base">
-                  {text.shortDescriptionBn}
-                </p>
-                <p className="text-sm leading-relaxed text-[#57534E]">
-                  {text.descriptionBn}
-                </p>
-              </>
+            {showEnPrimary && (shortDescPair.primary || fullDescPair.primary) && (
+              <div className="space-y-1.5">
+                {shortDescPair.primary && (
+                  <p className="text-sm font-medium leading-relaxed text-[#1C1917] sm:text-base">
+                    {shortDescPair.primary}
+                  </p>
+                )}
+                {fullDescPair.primary && fullDescPair.primary !== shortDescPair.primary && (
+                  <p className="text-sm leading-relaxed text-[#44403C]">
+                    {fullDescPair.primary}
+                  </p>
+                )}
+              </div>
             )}
-            {showEn &&
-              (text.shortDescriptionEn || text.descriptionEn) && (
-                <div className={showBn ? 'border-t border-[#F5F4F0] pt-3' : ''}>
-                  {text.shortDescriptionEn &&
-                    text.shortDescriptionEn !== text.shortDescriptionBn && (
-                      <p className="text-xs font-medium leading-relaxed text-[#44403C] sm:text-sm">
-                        {text.shortDescriptionEn}
-                      </p>
-                    )}
-                  {text.descriptionEn &&
-                    text.descriptionEn !== text.descriptionBn && (
-                      <p className="mt-1.5 text-xs leading-relaxed text-[#78716C] sm:text-sm">
-                        {text.descriptionEn}
-                      </p>
-                    )}
-                </div>
-              )}
+
+            {showBnSecondary && (shortDescPair.secondaryBn || fullDescPair.secondaryBn) && (
+              <div
+                className={
+                  showEnPrimary ? 'border-t border-[#F5F4F0] pt-3 space-y-1' : 'space-y-1.5'
+                }
+              >
+                {shortDescPair.secondaryBn && (
+                  <p className="font-bn text-xs font-medium leading-relaxed text-[#57534E] sm:text-[13px]">
+                    {shortDescPair.secondaryBn}
+                  </p>
+                )}
+                {fullDescPair.secondaryBn &&
+                  fullDescPair.secondaryBn !== shortDescPair.secondaryBn && (
+                    <p className="font-bn text-xs leading-relaxed text-[#78716C] sm:text-[13px]">
+                      {fullDescPair.secondaryBn}
+                    </p>
+                  )}
+              </div>
+            )}
           </div>
 
           {/* Specs Grid */}
           <div className="mt-6 space-y-4 border-t border-[#E7E5E4] pt-5">
             {product.weight && (
               <div className="flex items-start gap-3 text-sm">
-                <Scale className="mt-0.5 h-4 w-4 shrink-0 text-[#DC1F26]" />
+                <Scale className="mt-0.5 h-4 w-4 shrink-0 text-[#DC1F26]" aria-hidden="true" />
                 <div>
-                  <span className="font-semibold text-[#1C1917]">ওজন / পরিমাণ: </span>
+                  <span className="font-semibold text-[#1C1917]">Weight / Portion: </span>
                   <span className="text-[#57534E]">{product.weight}</span>
                 </div>
               </div>
@@ -305,7 +336,7 @@ export function ProductDetailPage() {
 
             {productSizes.length > 0 && (
               <div className="text-sm">
-                <p className="font-semibold text-[#1C1917]">উপলব্ধ সাইজ / ভ্যারিয়েন্ট:</p>
+                <p className="font-semibold text-[#1C1917]">Available Sizes / Variants</p>
                 <div className="mt-1.5 flex flex-wrap gap-2">
                   {productSizes.map((sz) => (
                     <span
@@ -321,11 +352,11 @@ export function ProductDetailPage() {
 
             {productIngredients.length > 0 && (
               <div className="text-sm">
-                <p className="font-semibold text-[#1C1917]">প্রধান উপাদানসমূহ:</p>
+                <p className="font-semibold text-[#1C1917]">Key Ingredients</p>
                 <ul className="mt-1.5 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
                   {productIngredients.map((ing) => (
                     <li key={ing} className="flex items-center gap-2 text-xs text-[#57534E] sm:text-sm">
-                      <Check className="h-3.5 w-3.5 shrink-0 text-[#DC1F26]" />
+                      <Check className="h-3.5 w-3.5 shrink-0 text-[#DC1F26]" aria-hidden="true" />
                       <span>{ing}</span>
                     </li>
                   ))}
@@ -336,22 +367,24 @@ export function ProductDetailPage() {
             {productOccasions.length > 0 && (
               <div className="text-sm">
                 <p className="inline-flex items-center gap-1.5 font-semibold text-[#1C1917]">
-                  <Sparkles className="h-4 w-4 text-[#DC1F26]" />
-                  <span>কোন উপলক্ষের জন্য উপযোগী:</span>
+                  <Calendar className="h-4 w-4 text-[#DC1F26]" aria-hidden="true" />
+                  <span>Ideal Occasions</span>
                 </p>
                 <div className="mt-1.5 flex flex-wrap gap-2">
                   {productOccasions.map((occ) => {
                     const ot = getOccasionText(occ);
+                    const occPair = resolveBilingualPair(ot.nameEn, ot.nameBn);
                     return (
                       <Link
                         key={occ.id}
                         to={`/occasion/${occ.slug}`}
                         className="inline-flex items-center gap-1.5 rounded-lg border border-[#E7E5E4] bg-[#FAFAF8] px-3 py-1.5 text-xs font-medium text-[#1C1917] transition-colors hover:border-[#DC1F26]"
                       >
-                        <span>{occ.icon}</span>
-                        <span>{ot.nameBn}</span>
-                        {ot.nameEn && (
-                          <span className="text-[11px] text-[#78716C]">· {ot.nameEn}</span>
+                        <span>{occPair.primary}</span>
+                        {occPair.secondaryBn && (
+                          <span className="font-bn text-[11px] text-[#78716C]">
+                            · {occPair.secondaryBn}
+                          </span>
                         )}
                       </Link>
                     );
@@ -362,50 +395,53 @@ export function ProductDetailPage() {
 
             {product.importantNotes && (
               <div className="flex items-start gap-2.5 rounded-xl border border-[#E7E5E4] bg-[#F5F4F0] p-4 text-xs leading-relaxed text-[#44403C]">
-                <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#DC1F26]" />
+                <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#DC1F26]" aria-hidden="true" />
                 <div>
-                  <span className="font-semibold text-[#1C1917]">গুরুত্বপূর্ণ তথ্য: </span>
+                  <span className="font-semibold text-[#1C1917]">Important Note: </span>
                   {product.importantNotes}
                 </div>
               </div>
             )}
           </div>
 
-          {/* Primary Business Rule Actions — NO Cart / NO Buy Now */}
+          {/* Primary Business Rule Actions — Showroom Consultation Only */}
           <div className="mt-7 flex flex-col gap-3 sm:flex-row">
             <button
               type="button"
               onClick={() => setShowContactSheet((v) => !v)}
-              className="inline-flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-lg bg-[#1C1917] px-6 py-3.5 text-sm font-semibold text-white transition-colors hover:bg-[#DC1F26]"
+              className="inline-flex min-h-[46px] flex-1 cursor-pointer items-center justify-center gap-2 rounded-lg bg-[#1C1917] px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-[#DC1F26]"
             >
               <Phone className="h-4 w-4" />
-              <span>শোরুমে যোগাযোগ করুন</span>
+              <span>Contact a Showroom</span>
             </button>
             <Link
               to="/outlets"
-              className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg border border-[#D6D3D1] bg-white px-6 py-3.5 text-sm font-semibold text-[#1C1917] transition-colors hover:border-[#1C1917]"
+              className="inline-flex min-h-[46px] flex-1 items-center justify-center gap-2 rounded-lg border border-[#D6D3D1] bg-white px-6 py-3 text-sm font-semibold text-[#1C1917] transition-colors hover:border-[#1C1917]"
             >
               <Store className="h-4 w-4" />
-              <span>শোরুমের তথ্য দেখুন</span>
+              <span>View All Outlets</span>
             </Link>
           </div>
 
           {/* Available Showrooms Direct Contact Drawer */}
           {(showContactSheet || productShowrooms.length > 0) && (
             <div className="mt-6 rounded-xl border border-[#E7E5E4] bg-white p-5">
-              <p className="text-xs font-semibold text-[#DC1F26]">
-                যে সকল শোরুমে পাওয়া যাচ্ছে · Available Outlets
+              <p className="text-xs font-semibold uppercase tracking-wider text-[#B91C1C]">
+                Available Showrooms
               </p>
               <div className="mt-3 space-y-3">
                 {(productShowrooms.length > 0 ? productShowrooms : approvedShowrooms).length ===
                 0 ? (
                   <p className="text-xs text-[#57534E]">
-                    এই মুহূর্তে কোনো শো-রুম তথ্য পাওয়া যায়নি।
+                    No showroom contacts are currently listed.
                   </p>
                 ) : (
                   (productShowrooms.length > 0 ? productShowrooms : approvedShowrooms).map(
                     (sr) => {
                       const st = getShowroomText(sr);
+                      const srName = resolveBilingualPair(st.nameEn, st.nameBn);
+                      const srAddr = resolveBilingualPair(st.addressEn || st.areaEn, st.addressBn || st.areaBn);
+                      const srHours = resolveBilingualPair(st.openingHoursEn, st.openingHoursBn);
                       return (
                         <div
                           key={sr.id}
@@ -413,22 +449,22 @@ export function ProductDetailPage() {
                         >
                           <div>
                             <p className="text-sm font-semibold text-[#1C1917]">
-                              {st.nameBn}
-                              {st.nameEn && st.nameEn !== st.nameBn && (
-                                <span className="ml-1.5 text-xs font-normal text-[#78716C]">
-                                  · {st.nameEn}
+                              {srName.primary}
+                              {srName.secondaryBn && (
+                                <span className="font-bn ml-1.5 text-xs font-normal text-[#78716C]">
+                                  · {srName.secondaryBn}
                                 </span>
                               )}
                               {sr.id === 'shah-garibullah-hs' && (
-                                <span className="ml-2 text-[11px] font-bold text-[#B91C1C]">
+                                <span className="ml-2 text-[11px] font-semibold text-[#B91C1C]">
                                   Office &amp; Outlet
                                 </span>
                               )}
                             </p>
                             <p className="flex items-center gap-1 text-xs text-[#57534E]">
-                              <MapPin className="h-3 w-3 shrink-0 text-[#DC1F26]" />
+                              <MapPin className="h-3 w-3 shrink-0 text-[#DC1F26]" aria-hidden="true" />
                               <span>
-                                {st.addressBn || st.areaBn} · {st.openingHoursBn}
+                                {srAddr.primary} · {srHours.primary}
                               </span>
                             </p>
                           </div>
@@ -445,7 +481,7 @@ export function ProductDetailPage() {
                                 href={sr.mapUrl}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                aria-label={`Get directions to ${st.nameEn || st.nameBn}`}
+                                aria-label={`Get directions to ${srName.primary}`}
                                 className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-lg border border-[#D6D3D1] px-2.5 py-1.5 text-xs font-semibold text-[#1C1917] transition-colors hover:border-[#1C1917]"
                               >
                                 <Navigation className="h-3 w-3 text-[#DC1F26]" />
@@ -467,9 +503,14 @@ export function ProductDetailPage() {
       {/* Related Products */}
       {relatedProducts.length > 0 && (
         <section className="mt-16 border-t border-[#E7E5E4] pt-12">
-          <h2 className="font-display text-2xl font-bold text-[#1C1917] sm:text-3xl">
-            একই ক্যাটাগরির আরও পণ্য · Related Products
-          </h2>
+          <div>
+            <h2 className="font-display text-2xl font-semibold text-[#1C1917] sm:text-3xl">
+              Related Products
+            </h2>
+            <p className="font-bn mt-0.5 text-xs text-[#78716C] sm:text-sm">
+              একই ক্যাটাগরির আরও পণ্য
+            </p>
+          </div>
           <div className="mt-6 grid grid-cols-2 gap-3.5 sm:gap-5 md:grid-cols-3 lg:grid-cols-4 lg:gap-6">
             {relatedProducts.map((item) => (
               <ProductCard key={item.id} product={item} />

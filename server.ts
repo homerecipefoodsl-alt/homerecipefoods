@@ -122,7 +122,7 @@ app.use('/api', (req, res, next) => {
 });
 
 const PRIMARY_SUPER_ADMIN_EMAIL = 'mdmahmudulhashan0@gmail.com';
-const EXPECTED_FIREBASE_PROJECT_ID = 'ai-studio-applet-webapp-e4b0f';
+const EXPECTED_FIREBASE_PROJECT_ID = 'homerecipefoods';
 const FIREBASE_CERTS_URL =
   'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com';
 
@@ -180,20 +180,29 @@ const DEFAULT_ROLE_PERMISSIONS: Record<StaffRole, string[]> = {
   support_agent: ['dashboard_view', 'complaints_manage', 'chat_manage'],
 };
 
+const useServerAppletConfigFirst =
+  (appletConfig.projectId || '').trim() === EXPECTED_FIREBASE_PROJECT_ID;
+const envServerDbId = (process.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID || '').trim();
+const appletServerDbId = (appletConfig.firestoreDatabaseId || '').trim();
+
 const firebaseProjectId = (
+  (useServerAppletConfigFirst ? appletConfig.projectId : '') ||
   process.env.VITE_FIREBASE_PROJECT_ID ||
   appletConfig.projectId ||
   EXPECTED_FIREBASE_PROJECT_ID
 ).trim();
 const firebaseApiKey = (
+  (useServerAppletConfigFirst ? appletConfig.apiKey : '') ||
   process.env.VITE_FIREBASE_API_KEY ||
   appletConfig.apiKey ||
   ''
 ).trim();
 const firestoreDatabaseId = (
-  process.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID ||
-  appletConfig.firestoreDatabaseId ||
-  '(default)'
+  useServerAppletConfigFirst && appletServerDbId && appletServerDbId !== '(default)'
+    ? appletServerDbId
+    : envServerDbId && envServerDbId !== '(default)'
+    ? envServerDbId
+    : appletServerDbId || envServerDbId || '(default)'
 ).trim();
 
 function sendError(

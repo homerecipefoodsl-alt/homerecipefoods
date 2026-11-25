@@ -1,8 +1,9 @@
 @import "tailwindcss";
 
 @theme {
-  --font-display: "Cormorant Garamond", Georgia, serif;
-  --font-sans: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  --font-display: "Playfair Display", "Hind Siliguri", Georgia, serif;
+  --font-sans: "DM Sans", "Hind Siliguri", system-ui, -apple-system, sans-serif;
+  --font-bn: "Hind Siliguri", "DM Sans", system-ui, -apple-system, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
   --color-brand-red: #DC1F26;
   --color-brand-red-dark: #B91C1C;
@@ -16,14 +17,37 @@
     font-family: var(--font-sans);
     background-color: #FAFAF8;
     color: #1C1917;
+    text-rendering: optimizeLegibility;
   }
 
-  h1, h2, h3, .font-display {
+  h1, h2, .font-display {
     font-family: var(--font-display);
+  }
+
+  .font-bn {
+    font-family: var(--font-bn);
+  }
+
+  .bn-sub {
+    font-family: var(--font-bn);
+    font-size: 0.74em;
+    line-height: 1.45;
+    font-weight: 400;
+  }
+
+  .bn-copy {
+    font-family: var(--font-bn);
+    font-size: 0.84em;
+    line-height: 1.65;
   }
 
   .tabular-nums {
     font-variant-numeric: tabular-nums;
+  }
+
+  :focus-visible {
+    outline: 2px solid #DC1F26;
+    outline-offset: 2px;
   }
 }
 
@@ -32,7 +56,7 @@
     transform: scale(1) translate3d(0, 0, 0);
   }
   100% {
-    transform: scale(1.08) translate3d(-1.2%, -0.8%, 0);
+    transform: scale(1.06) translate3d(-0.8%, -0.5%, 0);
   }
 }
 
@@ -67,4 +91,3 @@
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
-

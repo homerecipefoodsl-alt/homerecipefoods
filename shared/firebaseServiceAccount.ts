@@ -1,4 +1,4 @@
-export const EXPECTED_FIREBASE_PROJECT_ID = 'ai-studio-applet-webapp-e4b0f';
+export const EXPECTED_FIREBASE_PROJECT_ID = 'homerecipefoods';
 
 export interface ServiceAccountConfig {
   project_id: string;

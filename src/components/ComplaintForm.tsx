@@ -17,6 +17,32 @@ const DEFAULT_COMPLAINT_CATEGORIES: ComplaintCategory[] = [
   'অন্যান্য',
 ];
 
+const COMPLAINT_CATEGORY_LABELS_EN: Record<string, string> = {
+  'পণ্যের মান': 'Product Quality',
+  'সেবার মান': 'Service Quality',
+  'কর্মচারীর আচরণ': 'Staff Behaviour',
+  'মূল্য সংক্রান্ত': 'Pricing & Billing',
+  'শোরুম সংক্রান্ত': 'Showroom Environment',
+  'অন্যান্য': 'Other Feedback',
+};
+
+function formatCategoryOptionLabel(cat: string): string {
+  const en = COMPLAINT_CATEGORY_LABELS_EN[cat];
+  return en ? `${en} — ${cat}` : cat;
+}
+
+function formatOutletTitleEn(raw: string): string {
+  const cleaned = (raw || '').trim();
+  if (!cleaned) return '';
+  if (cleaned !== cleaned.toUpperCase()) return cleaned;
+  return cleaned
+    .toLowerCase()
+    .replace(/\b([a-z])/g, (m) => m.toUpperCase())
+    .replace(/\bH\/S\b/gi, 'H/S')
+    .replace(/\bG\.e\.c\b/gi, 'G.E.C')
+    .replace(/\bA\.k\b/gi, 'A.K');
+}
+
 interface ShowroomOption {
   id: string;
   label: string;
@@ -39,7 +65,7 @@ export function ComplaintForm() {
     const seenIds = new Set<string>();
     const seenNames = new Set<string>();
 
-    // Official Home Recipe Foods outlets ("আমার শো-রুম")
+    // Official Home Recipe Foods outlets
     CHATTOGRAM_OUTLETS.forEach((outlet) => {
       if (outlet.status !== 'active') return;
       const safeId = outlet.id.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 128);
@@ -48,8 +74,11 @@ export function ComplaintForm() {
       seenNames.add(normalizeLookupName(outlet.nameEn));
       seenNames.add(normalizeLookupName(outlet.nameBn));
 
-      const baseLabel = `${outlet.nameBn} — ${outlet.nameEn}`;
-      const displayLabel = outlet.type ? `${baseLabel} (${outlet.type})` : baseLabel;
+      const enTitle = formatOutletTitleEn(outlet.nameEn);
+      const baseLabel = outlet.nameBn && outlet.nameBn !== enTitle
+        ? `${enTitle} (${outlet.nameBn})`
+        : enTitle;
+      const displayLabel = outlet.type ? `${baseLabel} · ${outlet.type}` : baseLabel;
 
       list.push({
         id: safeId,
@@ -77,8 +106,8 @@ export function ComplaintForm() {
       if (normBn) seenNames.add(normBn);
       if (normEn) seenNames.add(normEn);
 
-      const primaryName = st.nameBn || sr.name || st.nameEn || safeId;
-      const areaLabel = st.areaBn || sr.area || '';
+      const primaryName = formatOutletTitleEn(st.nameEn || sr.nameEn || st.nameBn || sr.name || safeId);
+      const areaLabel = st.areaEn || sr.area || '';
       const fullLabel = areaLabel ? `${primaryName} (${areaLabel})` : primaryName;
 
       list.push({
@@ -131,7 +160,7 @@ export function ComplaintForm() {
       setAttachmentImage(compressed);
       setError(null);
     } catch {
-      setError('ছবিটি প্রক্রিয়া করতে সমস্যা হয়েছে। অনুগ্রহ করে অন্য একটি ছবি দিন।');
+      setError('Unable to process this image. Please choose a valid JPG or PNG file.');
     }
   };
 
@@ -140,24 +169,24 @@ export function ComplaintForm() {
     setError(null);
 
     if (!db) {
-      setError('ডাটাবেস সংযোগ সক্রিয় নয়। অনুগ্রহ করে শোরুম ফোনে যোগাযোগ করুন।');
+      setError('Database connection is unavailable right now. Please call our hotline.');
       return;
     }
 
     if (customerName.trim().length < 2) {
-      setError('অনুগ্রহ করে আপনার পূর্ণ নাম লিখুন।');
+      setError('Please enter your full name.');
       return;
     }
     if (phone.trim().length < 6) {
-      setError('অনুগ্রহ করে সঠিক ফোন নম্বর দিন।');
+      setError('Please enter a valid contact phone number.');
       return;
     }
     if (!showroomId) {
-      setError('অনুগ্রহ করে সংশ্লিষ্ট শোরুম নির্বাচন করুন।');
+      setError('Please select the relevant showroom.');
       return;
     }
     if (message.trim().length < 5) {
-      setError('অনুগ্রহ করে আপনার অভিযোগ বিস্তারিত লিখুন (কমপক্ষে ৫ অক্ষর)।');
+      setError('Please describe your concern in detail (at least 5 characters).');
       return;
     }
 
@@ -180,7 +209,7 @@ export function ComplaintForm() {
         email: email.trim().slice(0, 254),
         category,
         showroomId: selectedOption?.id ?? 'general',
-        showroomName: selectedOption?.saveName ?? 'সাধারণ / একাধিক শোরুম',
+        showroomName: selectedOption?.saveName ?? 'General / Multiple Outlets',
         message: message.trim().slice(0, 3000),
         attachmentImage,
         status: 'New',
@@ -197,7 +226,7 @@ export function ComplaintForm() {
       setMessage('');
       setAttachmentImage('');
     } catch (err) {
-      setError('অভিযোগ জমা দিতে সমস্যা হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।');
+      setError('Unable to submit your complaint right now. Please try again.');
       try {
         handleFirestoreError(err, OperationType.CREATE, `complaints/${id}`);
       } catch {
@@ -215,13 +244,15 @@ export function ComplaintForm() {
           <CheckCircle2 className="h-6 w-6" />
         </div>
         <h3 className="font-display mt-4 text-2xl font-bold text-[#1C1917]">
-          অভিযোগ গ্রহণ করা হয়েছে
+          Complaint Received
         </h3>
-        <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-[#44403C]">
-          আপনার অভিযোগ সফলভাবে গ্রহণ করা হয়েছে। আমাদের টিম বিষয়টি পর্যালোচনা করবে।
+        <p className="font-bn mt-0.5 text-xs text-[#78716C]">আপনার অভিযোগ সফলভাবে গ্রহণ করা হয়েছে</p>
+        <p className="mx-auto mt-2.5 max-w-md text-sm leading-relaxed text-[#44403C]">
+          Thank you for bringing this to our attention. Our management team will review your note
+          and follow up promptly.
         </p>
         <div className="mx-auto mt-5 inline-block rounded-lg border border-[#E7E5E4] bg-[#FAFAF8] px-5 py-3">
-          <p className="text-xs text-[#78716C]">রেফারেন্স নম্বর</p>
+          <p className="text-xs text-[#78716C]">Reference Number</p>
           <p className="font-mono tabular-nums mt-0.5 text-lg font-bold text-[#DC1F26]">
             {submittedRef}
           </p>
@@ -232,7 +263,7 @@ export function ComplaintForm() {
             onClick={() => setSubmittedRef(null)}
             className="cursor-pointer rounded-lg bg-[#1C1917] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#DC1F26]"
           >
-            আরও একটি মতামত / অভিযোগ পাঠান
+            Submit Another Feedback
           </button>
         </div>
       </div>
@@ -248,10 +279,14 @@ export function ComplaintForm() {
         <Lock className="mt-0.5 h-5 w-5 shrink-0 text-[#DC1F26]" />
         <div>
           <h3 className="font-display text-xl font-bold text-[#1C1917]">
-            সম্পূর্ণ গোপনীয় অভিযোগ ফর্ম
+            Confidential Feedback Form
           </h3>
           <p className="mt-0.5 text-xs text-[#57534E]">
-            আপনার অভিযোগ সম্পূর্ণ গোপন রাখা হয়। শুধুমাত্র অনুমোদিত ম্যানেজমেন্ট টিম এটি দেখতে পারবেন—অন্য কোনো ক্রেতা এটি দেখতে পাবেন না।
+            Your submission is strictly private and visible only to our authorized management team—never
+            to other visitors.
+          </p>
+          <p className="font-bn mt-0.5 text-[11px] text-[#78716C]">
+            আপনার অভিযোগ সম্পূর্ণ গোপন রাখা হয়।
           </p>
         </div>
       </div>
@@ -269,7 +304,7 @@ export function ComplaintForm() {
             htmlFor="complaint-name"
             className="mb-1.5 block text-xs font-semibold text-[#1C1917]"
           >
-            আপনার নাম <span className="text-red-600">*</span>
+            Your Full Name <span className="text-red-600">*</span>
           </label>
           <input
             id="complaint-name"
@@ -278,7 +313,7 @@ export function ComplaintForm() {
             maxLength={120}
             value={customerName}
             onChange={(e) => setCustomerName(e.target.value)}
-            placeholder="আপনার পূর্ণ নাম"
+            placeholder="e.g. Tanvir Ahmed"
             className="min-h-[44px] w-full rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
           />
         </div>
@@ -288,7 +323,7 @@ export function ComplaintForm() {
             htmlFor="complaint-phone"
             className="mb-1.5 block text-xs font-semibold text-[#1C1917]"
           >
-            ফোন নম্বর <span className="text-red-600">*</span>
+            Phone Number <span className="text-red-600">*</span>
           </label>
           <input
             id="complaint-phone"
@@ -307,7 +342,7 @@ export function ComplaintForm() {
             htmlFor="complaint-email"
             className="mb-1.5 block text-xs font-semibold text-[#1C1917]"
           >
-            ইমেইল (ঐচ্ছিক)
+            Email (Optional)
           </label>
           <input
             id="complaint-email"
@@ -325,7 +360,7 @@ export function ComplaintForm() {
             htmlFor="complaint-category"
             className="mb-1.5 block text-xs font-semibold text-[#1C1917]"
           >
-            অভিযোগের ধরন <span className="text-red-600">*</span>
+            Feedback Category <span className="text-red-600">*</span>
           </label>
           <select
             id="complaint-category"
@@ -335,7 +370,7 @@ export function ComplaintForm() {
           >
             {categoriesList.map((cat) => (
               <option key={cat} value={cat}>
-                {cat}
+                {formatCategoryOptionLabel(cat)}
               </option>
             ))}
           </select>
@@ -347,12 +382,12 @@ export function ComplaintForm() {
               htmlFor="complaint-showroom"
               className="block text-xs font-semibold text-[#1C1917]"
             >
-              আমার শো-রুম / সংশ্লিষ্ট শোরুম <span className="text-red-600">*</span>
+              Showroom / Outlet <span className="text-red-600">*</span>
             </label>
             {showroomsLoading && (
               <span className="inline-flex items-center gap-1 text-[11px] font-medium text-[#78716C]">
                 <Loader2 className="h-3 w-3 animate-spin" />
-                <span>শোরুম লোড হচ্ছে...</span>
+                <span>Loading outlets...</span>
               </span>
             )}
           </div>
@@ -364,7 +399,7 @@ export function ComplaintForm() {
             className="min-h-[44px] w-full rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
           >
             {showroomOptions.length === 0 ? (
-              <option value="general">সাধারণ / একাধিক শোরুম (General)</option>
+              <option value="general">General / Multiple Outlets</option>
             ) : (
               <>
                 {showroomOptions.map((sr) => (
@@ -372,7 +407,7 @@ export function ComplaintForm() {
                     {sr.label}
                   </option>
                 ))}
-                <option value="general">সাধারণ / একাধিক শোরুম (General)</option>
+                <option value="general">General / Multiple Outlets (সাধারণ)</option>
               </>
             )}
           </select>
@@ -386,7 +421,7 @@ export function ComplaintForm() {
             htmlFor="complaint-message"
             className="mb-1.5 block text-xs font-semibold text-[#1C1917]"
           >
-            বিস্তারিত অভিযোগ <span className="text-red-600">*</span>
+            Details <span className="text-red-600">*</span>
           </label>
           <textarea
             id="complaint-message"
@@ -395,14 +430,14 @@ export function ComplaintForm() {
             maxLength={3000}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
-            placeholder="কী ঘটেছে, তারিখ ও সময়সহ বিস্তারিত লিখুন..."
+            placeholder="Please share what happened, including approximate date, time, and item details..."
             className="w-full rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-2.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
           />
         </div>
 
         <div className="sm:col-span-2">
           <label className="mb-1.5 block text-xs font-semibold text-[#1C1917]">
-            ছবি সংযুক্ত করুন (ঐচ্ছিক)
+            Attach Photo (Optional)
           </label>
           {attachmentImage ? (
             <div className="relative inline-block overflow-hidden rounded-lg border border-[#D6D3D1]">
@@ -423,7 +458,7 @@ export function ComplaintForm() {
           ) : (
             <label className="flex cursor-pointer items-center justify-center gap-2 rounded-lg border border-dashed border-[#D6D3D1] bg-[#FAFAF8] px-4 py-4 text-xs font-medium text-[#57534E] transition-colors hover:border-[#DC1F26] hover:text-[#1C1917]">
               <Upload className="h-4 w-4" />
-              <span>ছবি আপলোড করতে ক্লিক করুন (JPG / PNG)</span>
+              <span>Click to attach a photo (JPG / PNG)</span>
               <input
                 type="file"
                 accept="image/*"
@@ -437,14 +472,14 @@ export function ComplaintForm() {
 
       <div className="mt-6 flex flex-col items-center justify-between gap-3 border-t border-[#F5F4F0] pt-5 sm:flex-row">
         <span className="text-xs text-[#78716C]">
-          জমা দেওয়ার সাথে সাথেই একটি গোপনীয় রেফারেন্স নম্বর পাবেন।
+          You will receive a confidential reference code immediately upon submission.
         </span>
         <button
           type="submit"
           disabled={submitting}
           className="min-h-[44px] w-full cursor-pointer rounded-lg bg-[#1C1917] px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-[#DC1F26] disabled:opacity-50 sm:w-auto"
         >
-          {submitting ? 'জমা দেওয়া হচ্ছে...' : 'অভিযোগ জমা দিন'}
+          {submitting ? 'Submitting...' : 'Submit Feedback'}
         </button>
       </div>
     </form>

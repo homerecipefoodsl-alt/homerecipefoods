@@ -83,7 +83,7 @@ interface Env {
 }
 
 const PRIMARY_SUPER_ADMIN_EMAIL = 'mdmahmudulhashan0@gmail.com';
-const EXPECTED_FIREBASE_PROJECT_ID = 'ai-studio-applet-webapp-e4b0f';
+const EXPECTED_FIREBASE_PROJECT_ID = 'homerecipefoods';
 const FIREBASE_JWK_URL =
   'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com';
 
@@ -375,17 +375,29 @@ async function verifyFirebaseIdTokenWorker(
 }
 
 function getFirebaseRuntimeConfig(env: Env) {
+  const useWorkerAppletConfigFirst =
+    (firebaseConfig.projectId || '').trim() === EXPECTED_FIREBASE_PROJECT_ID;
+  const envWorkerDbId = (env.VITE_FIREBASE_FIRESTORE_DATABASE_ID || '').trim();
+  const appletWorkerDbId = (firebaseConfig.firestoreDatabaseId || '').trim();
   return {
     projectId: (
+      (useWorkerAppletConfigFirst ? firebaseConfig.projectId : '') ||
       env.VITE_FIREBASE_PROJECT_ID ||
       firebaseConfig.projectId ||
       EXPECTED_FIREBASE_PROJECT_ID
     ).trim(),
-    apiKey: (env.VITE_FIREBASE_API_KEY || firebaseConfig.apiKey || '').trim(),
+    apiKey: (
+      (useWorkerAppletConfigFirst ? firebaseConfig.apiKey : '') ||
+      env.VITE_FIREBASE_API_KEY ||
+      firebaseConfig.apiKey ||
+      ''
+    ).trim(),
     firestoreDatabaseId: (
-      env.VITE_FIREBASE_FIRESTORE_DATABASE_ID ||
-      firebaseConfig.firestoreDatabaseId ||
-      '(default)'
+      useWorkerAppletConfigFirst && appletWorkerDbId && appletWorkerDbId !== '(default)'
+        ? appletWorkerDbId
+        : envWorkerDbId && envWorkerDbId !== '(default)'
+        ? envWorkerDbId
+        : appletWorkerDbId || envWorkerDbId || '(default)'
     ).trim(),
   };
 }

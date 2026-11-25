@@ -5,6 +5,7 @@ import {
   BadgeCheck,
   BarChart3,
   Briefcase,
+  Calendar,
   CheckCircle2,
   Database,
   Eye,
@@ -26,7 +27,6 @@ import {
   Settings,
   Shield,
   ShieldAlert,
-  Sparkles,
   UserCog,
   Users,
 } from 'lucide-react';
@@ -243,10 +243,10 @@ class AdminPanelErrorBoundary extends React.Component<
             <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-[#DC1F26]" />
             <div>
               <h3 className="font-display text-lg font-bold text-[#1C1917]">
-                এই অ্যাডমিন প্যানেলটি লোড করতে সমস্যা হয়েছে
+                Unable to load this admin panel
               </h3>
               <p className="mt-1 text-xs text-[#57534E]">
-                {this.state.errorMessage || 'অনুগ্রহ করে পুনরায় চেষ্টা করুন অথবা পৃষ্ঠা রিলোড করুন।'}
+                {this.state.errorMessage || 'Please try again or reload the page.'}
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
@@ -327,7 +327,7 @@ export function MahmudLoginScreen() {
       setResetError(
         err instanceof Error
           ? err.message
-          : 'Unable to send reset email right now. Verify Firebase Auth settings for ai-studio-applet-webapp-e4b0f.'
+          : 'Unable to send reset email right now. Verify Firebase Auth settings for homerecipefoods.'
       );
     } finally {
       setResetSending(false);
@@ -368,7 +368,7 @@ export function MahmudLoginScreen() {
                   </p>
                   <p className="mt-1 leading-relaxed">
                     Configure public <code className="font-mono">VITE_FIREBASE_*</code> environment variables for existing project{' '}
-                    <code className="font-mono font-bold">ai-studio-applet-webapp-e4b0f</code> before signing in.
+                    <code className="font-mono font-bold">homerecipefoods</code> before signing in.
                   </p>
                   {firebaseMissingFields.length > 0 && (
                     <p className="mt-1 font-mono text-[10px] text-amber-900">
@@ -720,7 +720,7 @@ export function AdminPage() {
     if (hasPermission('categories_manage')) {
       items.push(
         { id: 'categories', label: 'Categories', icon: <Grid className="h-4 w-4" /> },
-        { id: 'occasions', label: 'Occasions', icon: <Sparkles className="h-4 w-4" /> }
+        { id: 'occasions', label: 'Occasions', icon: <Calendar className="h-4 w-4" /> }
       );
     }
 
@@ -768,7 +768,7 @@ export function AdminPage() {
     if (canRecruitment) {
       items.push({
         id: 'recruitment',
-        label: 'Recruitment · নিয়োগ',
+        label: 'Recruitment',
         icon: <Briefcase className="h-4 w-4" />,
       });
     }
@@ -874,7 +874,7 @@ export function AdminPage() {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center bg-[#FAFAF8] px-4 py-24 text-center">
         <div className="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-[#E7E5E4] border-t-[#DC1F26]" />
-        <p className="mt-4 text-sm text-[#57534E]">অ্যাডমিন সেশন যাচাই করা হচ্ছে...</p>
+        <p className="mt-4 text-sm text-[#57534E]">Verifying administrator session...</p>
       </div>
     );
   }
@@ -894,20 +894,23 @@ export function AdminPage() {
             <ShieldAlert className="mx-auto h-10 w-10 text-[#DC1F26]" />
             <h1 className="font-display mt-3 text-2xl font-bold text-[#1C1917]">
               {accountStatus === 'suspended'
-                ? 'অ্যাকাউন্ট স্থগিত করা হয়েছে (Suspended)'
+                ? 'Account Suspended'
                 : accountStatus === 'disabled'
-                ? 'অ্যাকাউন্ট নিষ্ক্রিয় করা হয়েছে'
-                : 'প্রবেশাধিকার সংরক্ষিত (403)'}
+                ? 'Account Disabled'
+                : 'Access Restricted (403)'}
             </h1>
             <p className="mt-2 text-xs leading-relaxed text-[#57534E]">
-              আপনার অ্যাকাউন্টটি ({user.email}) অনুমোদিত অ্যাডমিন, ম্যানেজার বা সাপোর্ট তালিকায় সক্রিয় নয় অথবা পাসওয়ার্ড-ভিত্তিক অ্যাডমিন লগইন নয়।
+              Your account ({user.email}) is not active in the authorized admin, manager, or support directory, or requires a password-based administrator sign-in.
+            </p>
+            <p className="font-bn mt-1.5 text-[11px] text-[#78716C]">
+              আপনার অ্যাকাউন্টটি অনুমোদিত অ্যাডমিন বা ম্যানেজার তালিকায় সক্রিয় নয়।
             </p>
             <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
               <Link
                 to="/"
                 className="inline-flex items-center rounded-lg border border-[#D6D3D1] px-4 py-2.5 text-xs font-semibold text-[#1C1917] hover:border-[#1C1917]"
               >
-                হোমপেজে ফিরে যান
+                Back to Home
               </Link>
               <button
                 type="button"
@@ -915,7 +918,7 @@ export function AdminPage() {
                 className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#DC1F26]"
               >
                 <LogOut className="h-4 w-4" />
-                <span>সাইন আউট করুন</span>
+                <span>Sign Out</span>
               </button>
             </div>
           </div>
@@ -952,7 +955,7 @@ export function AdminPage() {
                 </span>
               </div>
               <h1 className="font-display mt-1 text-2xl font-bold text-white sm:text-3xl">
-                ম্যানেজমেন্ট ড্যাশবোর্ড
+                Management Dashboard
               </h1>
               <p className="mt-0.5 text-[11px] text-[#D6D3D1]">{roleMeta.scope}</p>
             </div>
@@ -972,7 +975,7 @@ export function AdminPage() {
                 className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#DC1F26] px-4 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C]"
               >
                 <Database className="h-4 w-4" />
-                <span>{seeding ? 'সেভ হচ্ছে...' : 'নিরাপদে ডেমো ডাটা যুক্ত করুন'}</span>
+                <span>{seeding ? 'Saving...' : 'Seed Missing Catalog Items'}</span>
               </button>
             )}
             <span className="font-mono text-xs text-[#D6D3D1]">{user.email}</span>
@@ -1040,13 +1043,13 @@ export function AdminPage() {
                         <div>
                           <span className="inline-flex items-center gap-1.5 rounded bg-[#DC1F26] px-2.5 py-0.5 text-[11px] font-bold text-white">
                             <Shield className="h-3 w-3" />
-                            <span>Super Admin — Enterprise Governance</span>
+                            <span>Super Admin — Full Governance</span>
                           </span>
                           <h2 className="font-display mt-2 text-xl font-bold text-white">
-                            সম্পূর্ণ ডাইনামিক ওয়েবসাইট, সিএমএস, ম্যানেজার এবং সিকিউরিটি নিয়ন্ত্রণ সক্রিয়
+                            Full Storefront, Catalog, Operations &amp; Access Control Active
                           </h2>
                           <p className="mt-1 text-xs text-[#D6D3D1]">
-                            প্রোডাক্ট, ক্যাটাগরি, শোরুম, হোমপেজ সেকশন, ব্যানার, গ্রিটিংস, মিডিয়া, এসইও, অভিযোগ, লাইভ চ্যাট এবং Admin/Manager পারমিশন এখান থেকে পরিচালনা করুন।
+                            Manage products, categories, showrooms, homepage sections, banners, greetings, media, SEO, complaints, live chat, recruitment, and staff permissions from this workspace.
                           </p>
                         </div>
                       </div>
@@ -1057,10 +1060,10 @@ export function AdminPage() {
                     <div className="flex flex-col justify-between gap-3 rounded-xl border border-[#FDE047] bg-[#FEFCE8] p-5 sm:flex-row sm:items-center">
                       <div>
                         <h3 className="text-sm font-bold text-[#1C1917]">
-                          Firestore ডাটাবেসে অনুপস্থিত ডিফল্ট ক্যাটালগ যোগ করুন
+                          Add Missing Default Catalog Records to Firestore
                         </h3>
                         <p className="mt-0.5 text-xs text-[#57534E]">
-                          এটি নন-ডেস্ট্রাক্টিভ: শুধুমাত্র অনুপস্থিত ডকুমেন্টগুলো যোগ করবে এবং বিদ্যমান কোনো ডাটা পরিবর্তন করবে না।
+                          Non-destructive import: adds only missing catalog documents without altering existing records.
                         </p>
                       </div>
                       <button
@@ -1069,7 +1072,7 @@ export function AdminPage() {
                         disabled={seeding}
                         className="shrink-0 cursor-pointer rounded-lg bg-[#DC1F26] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#B91C1C]"
                       >
-                        {seeding ? 'সেভ হচ্ছে...' : 'নিরাপদে সেভ করুন'}
+                        {seeding ? 'Saving...' : 'Seed Missing Records'}
                       </button>
                     </div>
                   )}
@@ -1151,7 +1154,7 @@ export function AdminPage() {
                   {/* Quick Actions */}
                   <div className="rounded-xl border border-[#E7E5E4] bg-white p-6">
                     <h3 className="font-display text-xl font-bold text-[#1C1917]">
-                      দ্রুত ব্যবস্থাপনা (Quick Actions)
+                      Quick Actions
                     </h3>
                     <div className="mt-4 flex flex-wrap gap-3">
                       {hasPermission('products_view') && (
@@ -1160,7 +1163,7 @@ export function AdminPage() {
                           onClick={() => selectTab('products')}
                           className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
                         >
-                          + পণ্য যোগ / এডিট
+                          + Add / Edit Products
                         </button>
                       )}
                       {hasPermission('categories_manage') && (
@@ -1169,7 +1172,7 @@ export function AdminPage() {
                           onClick={() => selectTab('categories')}
                           className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
                         >
-                          ক্যাটাগরি ও উপলক্ষ
+                          Categories &amp; Occasions
                         </button>
                       )}
                       {hasPermission('showrooms_manage') && (
@@ -1178,7 +1181,7 @@ export function AdminPage() {
                           onClick={() => selectTab('showrooms')}
                           className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
                         >
-                          শোরুম ব্যবস্থাপনা
+                          Showroom Directory
                         </button>
                       )}
                       {hasPermission('banners_manage') && (
@@ -1188,14 +1191,14 @@ export function AdminPage() {
                             onClick={() => selectTab('homepage')}
                             className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
                           >
-                            হোমপেজ সেকশন সাজান
+                            Homepage Sections
                           </button>
                           <button
                             type="button"
                             onClick={() => selectTab('banners')}
                             className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
                           >
-                            হিরো ব্যানার পরিবর্তন
+                            Hero Banners
                           </button>
                         </>
                       )}
@@ -1205,7 +1208,7 @@ export function AdminPage() {
                           onClick={() => selectTab('complaints')}
                           className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
                         >
-                          অভিযোগ দেখুন ({openComplaints})
+                          Complaints ({openComplaints})
                         </button>
                       )}
                       {canChat && (
@@ -1214,7 +1217,7 @@ export function AdminPage() {
                           onClick={() => selectTab('chat')}
                           className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
                         >
-                          লাইভ চ্যাট ও AI ({activeChats})
+                          Live Chat &amp; AI ({activeChats})
                         </button>
                       )}
                       {canRecruitment && (
@@ -1223,7 +1226,7 @@ export function AdminPage() {
                           onClick={() => selectTab('recruitment')}
                           className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold hover:border-[#DC1F26]"
                         >
-                          নিয়োগ ও আবেদন (Recruitment)
+                          Recruitment &amp; Applications
                         </button>
                       )}
                       {hasPermission('reports_view') && (
@@ -1266,7 +1269,7 @@ export function AdminPage() {
                       </div>
                       {recentActivities.length === 0 ? (
                         <p className="py-6 text-center text-xs text-[#78716C]">
-                          এখনো কোনো সাম্প্রতিক অ্যাক্টিভিটি লগ পাওয়া যায়নি।
+                          No recent activity logs found yet.
                         </p>
                       ) : (
                         <div className="divide-y divide-[#F5F4F0] text-xs">
@@ -1343,7 +1346,7 @@ export function AdminPage() {
                           </div>
                           {complaints.length === 0 ? (
                             <p className="py-5 text-center text-xs text-[#78716C]">
-                              কোনো অভিযোগ জমা পড়েনি।
+                              No complaints submitted yet.
                             </p>
                           ) : (
                             <div className="divide-y divide-[#F5F4F0] text-xs">

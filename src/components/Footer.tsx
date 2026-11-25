@@ -14,10 +14,11 @@ export function Footer({ onOpenChat }: FooterProps) {
     ['shah-garibullah-hs', 'kusumbagh-khulshi', 'gec-more', 'kotwali', 'agrabad'].includes(o.id)
   );
 
-  const footerDesc =
-    languageMode === 'en'
-      ? siteSettings.footerTextEn || siteSettings.footerTextBn
-      : siteSettings.footerTextBn || siteSettings.footerTextEn;
+  const footerDescEn =
+    siteSettings.footerTextEn ||
+    siteSettings.shortDescriptionEn ||
+    'Artisanal cakes, pastries, breads, traditional sweets, and luxury Akd gift boxes crafted fresh daily across our Chattogram showrooms.';
+  const footerDescBn = siteSettings.footerTextBn || siteSettings.shortDescriptionBn;
 
   return (
     <footer className="border-t border-[#292524] bg-[#1C1917] pb-[calc(4.75rem+env(safe-area-inset-bottom))] text-[#E7E5E4] md:pb-0">
@@ -32,10 +33,16 @@ export function Footer({ onOpenChat }: FooterProps) {
             >
               <BrandLogo variant="footer" />
             </Link>
-            <p className="mt-4 text-sm leading-relaxed text-[#A8A29E]">
-              {footerDesc ||
-                'খাঁটি উপাদান, ঘরোয়া যত্ন ও আধুনিক বেকিং শিল্পের সমন্বয়ে তৈরি বাংলাদেশের অন্যতম প্রিমিয়াম ফুড ব্র্যান্ড। দেখুন, জানুন এবং সরাসরি আমাদের শোরুম থেকে সংগ্রহ করুন।'}
-            </p>
+            {languageMode !== 'bn' && (
+              <p className="mt-4 text-sm leading-relaxed text-[#D6D3D1]">
+                {footerDescEn}
+              </p>
+            )}
+            {languageMode !== 'en' && footerDescBn && (
+              <p className="font-bn mt-2 text-xs leading-relaxed text-[#A8A29E]">
+                {footerDescBn}
+              </p>
+            )}
             <div className="mt-5 flex items-center gap-3">
               {siteSettings.facebookUrl && (
                 <a
@@ -99,12 +106,12 @@ export function Footer({ onOpenChat }: FooterProps) {
               </li>
               <li>
                 <Link to="/outlets" className="transition-colors hover:text-[#FACC15]">
-                  Our Outlets · আমাদের শো-রুম
+                  Our Outlets
                 </Link>
               </li>
               <li>
                 <Link to="/jobs" className="transition-colors hover:text-[#FACC15]">
-                  JobApplications / নিয়োগ
+                  Careers
                 </Link>
               </li>
               <li>
@@ -187,7 +194,7 @@ export function Footer({ onOpenChat }: FooterProps) {
                   className="inline-flex cursor-pointer items-center gap-2 transition-colors hover:text-white"
                 >
                   <MessageCircle className="h-4 w-4 text-[#DC1F26]" />
-                  <span>AI &amp; Live Representative Chat</span>
+                  <span>Live Concierge Chat</span>
                 </button>
               </li>
             </ul>
@@ -196,7 +203,10 @@ export function Footer({ onOpenChat }: FooterProps) {
           {/* Outlets */}
           <div>
             <h4 className="text-sm font-semibold text-white">
-              আমাদের শো-রুম <span className="font-normal text-[#A8A29E]">· Our Outlets</span>
+              Our Outlets
+              <span className="font-bn ml-2 text-xs font-normal text-[#A8A29E]">
+                আমাদের শো-রুম
+              </span>
             </h4>
             <ul className="mt-4 space-y-3 text-xs text-[#A8A29E]">
               {featuredFooterOutlets.map((outlet) => (
@@ -207,10 +217,10 @@ export function Footer({ onOpenChat }: FooterProps) {
                   >
                     <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#DC1F26]" />
                     <span>
-                      {outlet.nameBn}
-                      <span className="block text-[11px] font-normal text-[#A8A29E]">
-                        {outlet.nameEn}
-                        {outlet.type ? ` · ${outlet.type}` : ''}
+                      {outlet.nameEn}
+                      {outlet.type ? ` · ${outlet.type}` : ''}
+                      <span className="font-bn block text-[11px] font-normal text-[#A8A29E]">
+                        {outlet.nameBn}
                       </span>
                     </span>
                   </Link>
@@ -229,7 +239,7 @@ export function Footer({ onOpenChat }: FooterProps) {
                   to="/outlets"
                   className="inline-flex items-center gap-1 text-xs font-semibold text-[#FACC15] hover:underline"
                 >
-                  <span>সব শো-রুম দেখুন · View all outlets →</span>
+                  <span>View all 16 outlets →</span>
                 </Link>
               </li>
             </ul>
@@ -238,7 +248,7 @@ export function Footer({ onOpenChat }: FooterProps) {
 
         <div className="mt-12 flex flex-col items-center justify-between gap-4 border-t border-[#292524] pt-6 text-xs text-[#78716C] sm:flex-row">
           <p>© {siteSettings.brandName || 'Home Recipe Foods'}. All rights reserved.</p>
-          <p>Showroom Purchase &amp; Consultation Only · No Online Ordering</p>
+          <p>Showroom Purchase &amp; Consultation Only</p>
         </div>
       </div>
     </footer>

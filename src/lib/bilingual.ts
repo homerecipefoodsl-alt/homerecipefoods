@@ -17,6 +17,23 @@ export function getDynamicEnglishDate(date: Date = new Date()): string {
   });
 }
 
+/**
+ * Enforces English-first display hierarchy:
+ * - primary: English text (falls back to Bengali only if English is absent)
+ * - secondaryBn: Bengali text only when present and distinct from primary
+ */
+export function resolveBilingualPair(
+  en?: string | null,
+  bn?: string | null
+): { primary: string; secondaryBn: string } {
+  const cleanEn = (en ?? '').trim();
+  const cleanBn = (bn ?? '').trim();
+  const primary = cleanEn || cleanBn;
+  const secondaryBn =
+    cleanBn && cleanBn.toLowerCase() !== primary.toLowerCase() ? cleanBn : '';
+  return { primary, secondaryBn };
+}
+
 export function getCategoryText(cat: Category) {
   const nameBn = (cat.name_bn || cat.name || '').trim();
   const nameEn = (cat.name_en || cat.nameEn || '').trim();

@@ -38,12 +38,15 @@ import {
   CONFIRMED_DEMO_SHOWROOM_IDS,
   isDemoOrDummyShowroom,
 } from '../../data/outletsData';
+import { getCatalogStudioPhotos } from '../../data/productPhotoMap';
+import { SEED_PRODUCTS } from '../../data/seedData';
 import { resolveAssetUrl } from '../../lib/assets';
 import {
   getCategoryText,
   getOccasionText,
   getProductText,
   getShowroomText,
+  resolveBilingualPair,
 } from '../../lib/bilingual';
 import { OperationType, auth, handleFirestoreError, requireDb } from '../../lib/firebase';
 import {
@@ -931,6 +934,7 @@ export function AdminProductsPanel() {
     hasPermission,
     logAdminActivity,
     importProductMasterList,
+    assignMissingStudioPhotos,
     masterImportStats,
     masterImportRunning,
     lastMasterImportSummary,
@@ -1013,6 +1017,8 @@ export function AdminProductsPanel() {
       occasions: p.occasions,
       showrooms: p.showrooms,
       availability: p.availability,
+      sku: (p.sku ?? '').trim(),
+      stock: p.stock ?? null,
       importantNotes: p.importantNotes.trim(),
       featured: Boolean(p.featured),
       popular: Boolean(p.popular),
@@ -1162,6 +1168,84 @@ export function AdminProductsPanel() {
     setEditorUploadError(null);
     setEditorUploadSuccess(null);
     setFeedback(null);
+  };
+
+  const duplicateProduct = (prod: Product) => {
+    void cleanupUncommittedSessionUploads();
+    const t = getProductText(prod, allCategories);
+    const ing = (Array.isArray(prod.ingredients) ? prod.ingredients : []).join(', ');
+    const sz = (Array.isArray(prod.sizes) ? prod.sizes : []).join(', ');
+    const rawCandidates = [
+      prod.imageUrl,
+      prod.image,
+      ...(Array.isArray(prod.images) ? prod.images : []),
+    ].filter(
+      (u): u is string =>
+        typeof u === 'string' && u.trim().length > 0 && !isForbiddenInlineImageUrl(u)
+    );
+    const normalizedImages = Array.from(new Set(rawCandidates)).slice(0, 6);
+    const primaryImg = normalizedImages[0] || '';
+    const suffix = Date.now().toString().slice(-4);
+    const baseSlug = toSlug(prod.slug || t.nameEn || t.nameBn || 'product');
+    const cloned: Product = {
+      ...prod,
+      id: `prod-${Date.now()}`,
+      name: `${t.nameBn} (কপি)`.slice(0, 160),
+      nameBn: `${t.nameBn} (কপি)`.slice(0, 160),
+      nameEn: `${t.nameEn} (Copy)`.slice(0, 160),
+      name_bn: `${t.nameBn} (কপি)`.slice(0, 160),
+      name_en: `${t.nameEn} (Copy)`.slice(0, 160),
+      slug: `${baseSlug}-copy-${suffix}`.slice(0, 140),
+      masterKey: undefined,
+      sku: prod.sku ? `${prod.sku}-COPY`.slice(0, 80) : '',
+      unit: t.unit || prod.priceUnit,
+      priceUnit: prod.priceUnit || t.unit || 'Piece',
+      image: primaryImg,
+      imageUrl: primaryImg,
+      imageKey: primaryImg ? extractR2ImageKey(primaryImg) : '',
+      images: normalizedImages,
+      shortDescription: t.shortDescriptionBn,
+      shortDescriptionEn: t.shortDescriptionEn,
+      short_description_bn: t.shortDescriptionBn,
+      short_description_en: t.shortDescriptionEn,
+      description: t.descriptionBn,
+      descriptionEn: t.descriptionEn,
+      description_bn: t.descriptionBn,
+      description_en: t.descriptionEn,
+      categoryName: prod.categoryName || t.categoryNameBn,
+      categoryNameEn: prod.categoryNameEn || t.categoryNameEn,
+      featured: false,
+      popular: false,
+      visible: true,
+      deleted: false,
+      status: 'published',
+      display_order: allProducts.length + 1,
+    };
+
+    setIsNew(true);
+    setEditing(cloned);
+    setEditorImageSlots(
+      normalizedImages.map((url, idx) => ({
+        id: `dup-${idx}-${url.slice(-16)}`,
+        url,
+        imageKey: extractR2ImageKey(url),
+      }))
+    );
+    setPrimaryImageUrlInput(primaryImg);
+    setIngredientsText(ing);
+    setSizesText(sz);
+    setOriginalSnapshot('');
+    setImageUrlCopied(false);
+    setImagePreviewFailed(false);
+    setEditorUploadProgress(null);
+    setEditorUploadLabel('');
+    setEditorUploadPreviewUrl(null);
+    setEditorUploadError(null);
+    setEditorUploadSuccess(null);
+    setFeedback({
+      type: 'success',
+      message: `"${t.nameEn}" ডুপ্লিকেট ফর্ম খোলা হয়েছে। প্রয়োজনীয় তথ্য পরিবর্তন করে Save Product-এ ক্লিক করুন।`,
+    });
   };
 
   const syncPrimarySlotFromUrl = (rawUrl: string) => {
@@ -1397,11 +1481,16 @@ export function AdminProductsPanel() {
       ? source.availability
       : 'In Showroom';
     const primaryImg = cleanImages[0] ?? '';
-    const resolvedImageKey =
-      (primaryImg ? extractR2ImageKey(primaryImg) : '') ||
-      (primaryImg && typeof source.imageKey === 'string' && source.imageKey.trim()
-        ? source.imageKey.trim().slice(0, 320)
-        : '');
+    const resolvedImageKey = primaryImg
+      ? extractR2ImageKey(primaryImg) ||
+        (typeof source.imageKey === 'string' &&
+        source.imageKey.trim() &&
+        source.imageKey.trim() !== 'no-photo'
+          ? source.imageKey.trim().slice(0, 320)
+          : '')
+      : source.imageKey === 'no-photo'
+      ? 'no-photo'
+      : '';
 
     const payload: Record<string, unknown> = {
       id: preservedValidId,
@@ -1512,24 +1601,23 @@ export function AdminProductsPanel() {
       payload.rating = rawRating;
     }
 
-    const rawStock =
-      typeof source.stock === 'number'
-        ? source.stock
-        : typeof existingData?.stock === 'number'
-        ? existingData.stock
-        : NaN;
-    if (Number.isInteger(rawStock) && rawStock >= 0 && rawStock <= 1000000) {
-      payload.stock = rawStock;
+    if (typeof source.stock === 'number' && Number.isInteger(source.stock) && source.stock >= 0 && source.stock <= 1000000) {
+      payload.stock = source.stock;
+    } else if (source.stock === undefined && !forFullSet && existingData && 'stock' in existingData) {
+      payload.stock = deleteField();
+    } else if (forFullSet && typeof existingData?.stock === 'number' && Number.isInteger(existingData.stock) && existingData.stock >= 0 && existingData.stock <= 1000000) {
+      payload.stock = existingData.stock;
     }
 
-    const preserveSku =
-      typeof source.sku === 'string' && source.sku.trim()
-        ? source.sku.trim().slice(0, 80)
-        : typeof existingData?.sku === 'string' && existingData.sku.trim()
-        ? existingData.sku.trim().slice(0, 80)
-        : '';
-    if (preserveSku) {
-      payload.sku = preserveSku;
+    if (typeof source.sku === 'string') {
+      const trimmedSku = source.sku.trim().slice(0, 80);
+      if (trimmedSku) {
+        payload.sku = trimmedSku;
+      } else if (!forFullSet && existingData && 'sku' in existingData) {
+        payload.sku = deleteField();
+      }
+    } else if (typeof existingData?.sku === 'string' && existingData.sku.trim()) {
+      payload.sku = existingData.sku.trim().slice(0, 80);
     }
 
     const preserveSeoTitle =
@@ -1932,6 +2020,32 @@ export function AdminProductsPanel() {
     }
   };
 
+  const handleAssignStudioPhotosClick = async () => {
+    setFeedback(null);
+    let authSession: VerifiedWriteSession | null = null;
+    try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'products_edit',
+      });
+      const res = await assignMissingStudioPhotos();
+      setFeedback({
+        type: 'success',
+        message: `স্টুডিও ফটো সিঙ্ক সম্পন্ন: ${res.updatedCount}টি প্রডাক্টে নতুন ছবি যুক্ত হয়েছে, ${res.skippedCount}টি বিদ্যমান/অপরিবর্তিত রাখা হয়েছে।`,
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        message: mapCatalogSaveError(err, 'studio_photo_sync', {
+          path: 'products/studio_photo_sync',
+          operation: 'WRITE',
+          staffRole,
+          authSession,
+        }),
+      });
+    }
+  };
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editing || saving || editorUploadProgress !== null) return;
@@ -2033,13 +2147,26 @@ export function AdminProductsPanel() {
         .map((slot) => slot.url);
       const rawOrderedUrls = validatedManualUrl
         ? [validatedManualUrl, ...slotUrls.filter((u) => u !== validatedManualUrl)]
+        : editorImageSlots.length === 0
+        ? []
         : trimmedPrimaryUrl === '' && editorImageSlots.length === 1 && slotUrls.length === 1
         ? []
         : slotUrls;
       const nextImages = sanitizeStoredImageUrls(rawOrderedUrls);
       const primaryImage = nextImages[0] ?? '';
+      const hasDefaultCatalogPhoto =
+        getCatalogStudioPhotos({
+          id: editing.id,
+          slug: editing.slug,
+          nameEn: editing.nameEn,
+        }).length > 0 ||
+        SEED_PRODUCTS.some(
+          (s) => s.id === editing.id || (editing.slug && s.slug === editing.slug)
+        );
       const primaryImageKey = primaryImage
         ? validatedManualKey || extractR2ImageKey(primaryImage) || ''
+        : hasDefaultCatalogPhoto
+        ? 'no-photo'
         : '';
 
       // 4. Firestore Product create/update
@@ -2541,7 +2668,10 @@ export function AdminProductsPanel() {
             Product Management
           </h2>
           <p className="text-xs text-[#57534E]">
-            মোট {allProducts.length}টি পণ্য · সরাসরি ছবি আপলোড, বাংলা ও English নাম, একক এবং মূল্য ব্যবস্থাপনা করুন।
+            <span className="tabular-nums font-semibold text-[#1C1917]">
+              {allProducts.length}
+            </span>{' '}
+            products · Manage English &amp; Bengali names, categories, units, pricing, and Cloudflare R2 photos.
           </p>
         </div>
         {canAdd && (
@@ -2551,7 +2681,7 @@ export function AdminProductsPanel() {
             className="inline-flex shrink-0 cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#DC1F26]"
           >
             <Plus className="h-4 w-4" />
-            <span>নতুন পণ্য যোগ করুন</span>
+            <span>Add Product</span>
           </button>
         )}
       </div>
@@ -2563,48 +2693,66 @@ export function AdminProductsPanel() {
             <div className="space-y-1">
               <div className="flex items-center gap-2 text-xs font-bold text-[#1C1917]">
                 <Database className="h-4 w-4 text-[#DC1F26]" />
-                <span>Product Master List Status (১৩৬টি পণ্য)</span>
+                <span>
+                  Product Master List Status (
+                  <span className="tabular-nums">{masterImportStats.totalMaster}</span> items)
+                </span>
               </div>
               <p className="text-xs text-[#57534E]">
-                সিঙ্কড:{' '}
-                <strong className="font-mono text-[#1C1917]">
+                Synced:{' '}
+                <strong className="font-mono tabular-nums text-[#1C1917]">
                   {masterImportStats.syncedCount}/{masterImportStats.totalMaster}
                 </strong>{' '}
-                · অনুপস্থিত:{' '}
-                <strong className="font-mono text-[#DC1F26]">
+                · Missing:{' '}
+                <strong className="font-mono tabular-nums text-[#DC1F26]">
                   {masterImportStats.missingCount}
                 </strong>{' '}
-                · ছবি ছাড়া পণ্য:{' '}
-                <strong className="font-mono text-amber-700">
+                · Missing Photo:{' '}
+                <strong className="font-mono tabular-nums text-amber-700">
                   {masterImportStats.missingImageCount}
                 </strong>
               </p>
               {lastMasterImportSummary && (
-                <p className="text-[11px] font-medium text-emerald-700">
-                  সর্বশেষ সিঙ্ক: মোট {lastMasterImportSummary.totalMasterCount} · পূর্বে ছিল{' '}
-                  {lastMasterImportSummary.existingProductCount} · নতুন যোগ{' '}
-                  {lastMasterImportSummary.newlyAddedCount} · স্কিপ{' '}
+                <p className="text-[11px] font-medium text-emerald-700 tabular-nums">
+                  Last Sync: Total {lastMasterImportSummary.totalMasterCount} · Existing{' '}
+                  {lastMasterImportSummary.existingProductCount} · Newly Added{' '}
+                  {lastMasterImportSummary.newlyAddedCount} · Skipped{' '}
                   {lastMasterImportSummary.skippedExistingCount}
                 </p>
               )}
             </div>
-            <button
-              type="button"
-              onClick={handleMasterImportClick}
-              disabled={masterImportRunning}
-              className="inline-flex shrink-0 cursor-pointer items-center gap-2 rounded-lg border border-[#1C1917] bg-white px-3.5 py-2 text-xs font-semibold text-[#1C1917] transition-colors hover:bg-[#1C1917] hover:text-white disabled:opacity-50"
-            >
-              <RefreshCw
-                className={`h-3.5 w-3.5 ${masterImportRunning ? 'animate-spin' : ''}`}
-              />
-              <span>
-                {masterImportRunning
-                  ? 'ইমপোর্ট হচ্ছে...'
-                  : masterImportStats.missingCount > 0
-                  ? `মাস্টার তালিকা ইমপোর্ট করুন (${masterImportStats.missingCount}টি বাকি)`
-                  : 'মাস্টার তালিকা পুনরায় যাচাই করুন'}
-              </span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              {canEdit && masterImportStats.unsyncedStudioPhotoCount > 0 && (
+                <button
+                  type="button"
+                  onClick={handleAssignStudioPhotosClick}
+                  disabled={masterImportRunning}
+                  className="inline-flex shrink-0 cursor-pointer items-center gap-2 rounded-lg border border-amber-700 bg-amber-50 px-3.5 py-2 text-xs font-semibold text-amber-900 transition-colors hover:bg-amber-700 hover:text-white disabled:opacity-50"
+                >
+                  <Camera className="h-3.5 w-3.5" />
+                  <span>
+                    Sync Studio Photos ({masterImportStats.unsyncedStudioPhotoCount})
+                  </span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleMasterImportClick}
+                disabled={masterImportRunning}
+                className="inline-flex shrink-0 cursor-pointer items-center gap-2 rounded-lg border border-[#1C1917] bg-white px-3.5 py-2 text-xs font-semibold text-[#1C1917] transition-colors hover:bg-[#1C1917] hover:text-white disabled:opacity-50"
+              >
+                <RefreshCw
+                  className={`h-3.5 w-3.5 ${masterImportRunning ? 'animate-spin' : ''}`}
+                />
+                <span>
+                  {masterImportRunning
+                    ? 'Syncing...'
+                    : masterImportStats.missingCount > 0
+                    ? `Import Master List (${masterImportStats.missingCount} missing)`
+                    : 'Verify Master List'}
+                </span>
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2634,7 +2782,7 @@ export function AdminProductsPanel() {
         >
           <div className="mb-4 flex items-center justify-between border-b border-[#F5F4F0] pb-3">
             <h3 className="font-display text-xl font-bold text-[#1C1917]">
-              {isNew ? 'নতুন পণ্য যোগ করুন' : `সম্পাদনা: ${editing.name}`}
+              {isNew ? 'Add New Product' : `Edit Product: ${editing.nameEn || editing.name}`}
             </h3>
             <button
               type="button"
@@ -2648,20 +2796,24 @@ export function AdminProductsPanel() {
           {!isNew && (
             <div className="mb-5 rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-4">
               <p className="mb-2 text-[11px] font-bold uppercase tracking-wider text-[#78716C]">
-                Product Information
+                Product Summary
               </p>
               <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-3 lg:grid-cols-6">
                 <div>
-                  <span className="block text-[10px] text-[#78716C]">বাংলা নাম</span>
-                  <span className="font-semibold text-[#1C1917]">{editing.name}</span>
+                  <span className="block text-[10px] text-[#78716C]">English Name</span>
+                  <span className="font-semibold text-[#1C1917]">
+                    {editing.nameEn || editing.name}
+                  </span>
                 </div>
                 <div>
-                  <span className="block text-[10px] text-[#78716C]">English Name</span>
-                  <span className="font-semibold text-[#1C1917]">{editing.nameEn}</span>
+                  <span className="block text-[10px] text-[#78716C]">Bengali Name</span>
+                  <span className="font-bn font-medium text-[#57534E]">{editing.name}</span>
                 </div>
                 <div>
                   <span className="block text-[10px] text-[#78716C]">Category</span>
-                  <span className="font-semibold text-[#1C1917]">{editing.categoryName}</span>
+                  <span className="font-semibold text-[#1C1917]">
+                    {editing.categoryNameEn || editing.categoryName}
+                  </span>
                 </div>
                 <div>
                   <span className="block text-[10px] text-[#78716C]">Unit</span>
@@ -2671,7 +2823,7 @@ export function AdminProductsPanel() {
                 </div>
                 <div>
                   <span className="block text-[10px] text-[#78716C]">Price</span>
-                  <span className="font-mono font-bold text-[#1C1917]">
+                  <span className="font-mono tabular-nums font-bold text-[#1C1917]">
                     ৳{Number(editing.price) || 0}
                   </span>
                 </div>
@@ -2683,8 +2835,8 @@ export function AdminProductsPanel() {
                     }`}
                   >
                     {editorImageSlots.length > 0
-                      ? `${editorImageSlots.length}টি ছবি যুক্ত`
-                      : 'ছবি আপলোড বাকি'}
+                      ? `${editorImageSlots.length} photo${editorImageSlots.length > 1 ? 's' : ''} linked`
+                      : 'Photo pending'}
                   </span>
                 </div>
               </div>
@@ -2759,7 +2911,7 @@ export function AdminProductsPanel() {
 
             <div>
               <label className="mb-1 block text-xs font-semibold text-[#1C1917]">
-                মূল্য (৳ BDT) *
+                Price (৳ BDT) *
               </label>
               <input
                 type="number"
@@ -2785,7 +2937,7 @@ export function AdminProductsPanel() {
                     old_price: e.target.value ? Number(e.target.value) : undefined,
                   })
                 }
-                placeholder="পূর্বের দাম"
+                placeholder="Previous price"
                 className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 font-mono text-sm"
               />
             </div>
@@ -2798,14 +2950,14 @@ export function AdminProductsPanel() {
                 type="text"
                 value={editing.discount ?? ''}
                 onChange={(e) => setEditing({ ...editing, discount: e.target.value })}
-                placeholder="যেমন: 10% OFF বা Festive Offer"
+                placeholder="e.g. 10% OFF or Festive Offer"
                 className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
               />
             </div>
 
             <div>
               <label className="mb-1 block text-xs font-semibold text-[#1C1917]">
-                একক / Unit (যেমন: Piece, Kg, Box)
+                Unit (e.g. Piece, Kg, Box)
               </label>
               <input
                 type="text"
@@ -2829,7 +2981,7 @@ export function AdminProductsPanel() {
                 type="text"
                 value={editing.price_label ?? ''}
                 onChange={(e) => setEditing({ ...editing, price_label: e.target.value })}
-                placeholder="যেমন: ৳১,২০০ থেকে শুরু"
+                placeholder="e.g. Starting from ৳ 1,200"
                 className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
               />
             </div>
@@ -2866,13 +3018,13 @@ export function AdminProductsPanel() {
 
             <div>
               <label className="mb-1 block text-xs font-semibold text-[#1C1917]">
-                ওজন / Weight
+                Weight / Pack Size
               </label>
               <input
                 type="text"
                 value={editing.weight}
                 onChange={(e) => setEditing({ ...editing, weight: e.target.value })}
-                placeholder="যেমন: ১ কেজি"
+                placeholder="e.g. 1 kg"
                 className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
               />
             </div>
@@ -2897,6 +3049,43 @@ export function AdminProductsPanel() {
                   onChange={(e) => setEditing({ ...editing, slug: e.target.value })}
                   placeholder="auto-slug"
                   className="flex-1 rounded-lg border border-[#D6D3D1] px-3 py-2 font-mono text-xs"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-[#1C1917]">
+                SKU &amp; Stock Quantity (Optional)
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  maxLength={80}
+                  value={editing.sku ?? ''}
+                  onChange={(e) => setEditing({ ...editing, sku: e.target.value })}
+                  placeholder="SKU-CODE"
+                  className="flex-1 rounded-lg border border-[#D6D3D1] px-3 py-2 font-mono text-xs"
+                />
+                <input
+                  type="number"
+                  min={0}
+                  max={1000000}
+                  step={1}
+                  value={typeof editing.stock === 'number' ? editing.stock : ''}
+                  onChange={(e) => {
+                    const raw = e.target.value.trim();
+                    if (!raw) {
+                      setEditing({ ...editing, stock: undefined });
+                      return;
+                    }
+                    const parsed = Math.max(0, Math.round(Number(raw)));
+                    setEditing({
+                      ...editing,
+                      stock: Number.isFinite(parsed) ? parsed : undefined,
+                    });
+                  }}
+                  placeholder="Stock"
+                  className="w-24 rounded-lg border border-[#D6D3D1] px-2 py-2 font-mono text-xs"
                 />
               </div>
             </div>
@@ -2985,20 +3174,20 @@ export function AdminProductsPanel() {
 
             <div className="sm:col-span-2">
               <label className="mb-1 block text-xs font-semibold text-[#1C1917]">
-                উপাদান (কমা দিয়ে আলাদা করুন)
+                Ingredients (comma-separated)
               </label>
               <input
                 type="text"
                 value={ingredientsText}
                 onChange={(e) => setIngredientsText(e.target.value)}
-                placeholder="দুধ, ছানা, জাফরান, পেস্তা"
+                placeholder="Pure milk, chhana, saffron, pistachio"
                 className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
               />
             </div>
 
             <div>
               <label className="mb-1 block text-xs font-semibold text-[#1C1917]">
-                সাইজ / ভ্যারিয়েন্ট (কমা দিয়ে আলাদা করুন)
+                Sizes / Variants (comma-separated)
               </label>
               <input
                 type="text"
@@ -3011,7 +3200,7 @@ export function AdminProductsPanel() {
 
             <div className="sm:col-span-2 lg:col-span-3">
               <label className="mb-1 block text-xs font-semibold text-[#1C1917]">
-                গুরুত্বপূর্ণ নোট (Important Notes)
+                Important Notes
               </label>
               <input
                 type="text"
@@ -3025,10 +3214,11 @@ export function AdminProductsPanel() {
 
             {/* Occasions Checkboxes */}
             <div className="sm:col-span-2 lg:col-span-3">
-              <p className="mb-1.5 text-xs font-semibold text-[#1C1917]">উপলক্ষ নির্বাচন করুন</p>
+              <p className="mb-1.5 text-xs font-semibold text-[#1C1917]">Assign Occasions</p>
               <div className="flex flex-wrap gap-2">
                 {allOccasions.map((occ) => {
                   const checked = editing.occasions.includes(occ.slug);
+                  const occLabel = occ.nameEn || occ.name;
                   return (
                     <button
                       key={occ.id}
@@ -3047,8 +3237,7 @@ export function AdminProductsPanel() {
                           : 'border-[#E7E5E4] bg-[#FAFAF8] text-[#44403C]'
                       }`}
                     >
-                      <span>{occ.icon}</span>
-                      <span>{occ.name}</span>
+                      <span>{occLabel}</span>
                     </button>
                   );
                 })}
@@ -3060,14 +3249,14 @@ export function AdminProductsPanel() {
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <p className="text-xs font-bold text-[#1C1917]">
-                    পণ্যের ছবি ও URL ব্যবস্থাপনা (Cloudflare R2)
+                    Product Photos &amp; URL Manager (Cloudflare R2)
                   </p>
                   <p className="text-[11px] text-[#57534E]">
-                    JPG, PNG, WEBP বা GIF ফাইল নির্বাচন/ড্র্যাগ করুন (সরাসরি R2-তে আপলোড হয়ে নিচের Image URL ঘরে স্বয়ংক্রিয়ভাবে যুক্ত হবে), অথবা বাহ্যিক HTTPS ছবির লিংক দিন।
+                    Select or drag JPG, PNG, WEBP, or GIF files to upload directly to Cloudflare R2, or paste a verified HTTPS image URL below.
                   </p>
                 </div>
-                <span className="font-mono text-[11px] font-semibold text-[#57534E]">
-                  {editorImageSlots.length}/6 ছবি
+                <span className="font-mono text-[11px] font-semibold tabular-nums text-[#57534E]">
+                  {editorImageSlots.length}/6 photos
                 </span>
               </div>
 
@@ -3087,8 +3276,8 @@ export function AdminProductsPanel() {
                         <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[#DC1F26]" />
                         <span className="truncate">
                           {editorUploadProgress === 0
-                            ? `প্রস্তুত হচ্ছে: ${editorUploadLabel}`
-                            : `Cloudflare R2-তে আপলোড হচ্ছে: ${editorUploadLabel}`}
+                            ? `Preparing: ${editorUploadLabel}`
+                            : `Uploading to Cloudflare R2: ${editorUploadLabel}`}
                         </span>
                       </span>
                       <span className="font-mono tabular-nums text-[#DC1F26]">
@@ -3134,7 +3323,7 @@ export function AdminProductsPanel() {
                   <div className="grid grid-cols-1 gap-4 rounded-xl border border-[#E7E5E4] bg-white p-3.5 md:grid-cols-12">
                     <div className="md:col-span-4">
                       <p className="mb-1.5 text-[11px] font-semibold text-[#57534E]">
-                        প্রধান ছবির প্রিভিউ (Preview)
+                        Primary Photo Preview
                       </p>
                       <div className="relative aspect-[4/3] w-full overflow-hidden rounded-lg border border-[#E7E5E4] bg-[#F5F4F0]">
                         {trimmedUrl && !imagePreviewFailed && !isForbiddenInlineImageUrl(trimmedUrl) ? (
@@ -3149,8 +3338,8 @@ export function AdminProductsPanel() {
                             <ImageOff className="h-5 w-5" />
                             <span className="text-[11px]">
                               {imagePreviewFailed
-                                ? 'URL থেকে ছবি লোড করা যায়নি'
-                                : 'কোনো ছবি নির্বাচন করা হয়নি'}
+                                ? 'Could not load image from URL'
+                                : 'No photo selected'}
                             </span>
                           </div>
                         )}
@@ -3165,7 +3354,7 @@ export function AdminProductsPanel() {
                         >
                           <span className="inline-flex items-center gap-1.5">
                             <Link2 className="h-3.5 w-3.5 text-[#DC1F26]" />
-                            <span>Product Image URL (স্বয়ংক্রিয় R2 অথবা বাহ্যিক HTTPS লিংক)</span>
+                            <span>Product Image URL (Auto-filled R2 or HTTPS URL)</span>
                           </span>
                           {urlCheck && (
                             <span
@@ -3175,9 +3364,9 @@ export function AdminProductsPanel() {
                             >
                               {urlCheck.valid
                                 ? urlCheck.isR2
-                                  ? '✓ Cloudflare R2 যাচাইকৃত'
-                                  : '✓ বৈধ HTTPS URL'
-                                : '✕ অবৈধ URL'}
+                                  ? 'Verified Cloudflare R2'
+                                  : 'Valid HTTPS URL'
+                                : 'Invalid URL'}
                             </span>
                           )}
                         </label>
@@ -3204,18 +3393,54 @@ export function AdminProductsPanel() {
                             {imageUrlCopied ? (
                               <>
                                 <Check className="h-3.5 w-3.5 text-emerald-700" />
-                                <span className="text-emerald-700">কপি হয়েছে</span>
+                                <span className="text-emerald-700">Copied</span>
                               </>
                             ) : (
                               <>
                                 <Copy className="h-3.5 w-3.5" />
-                                <span>URL কপি</span>
+                                <span>Copy URL</span>
                               </>
                             )}
                           </button>
+                          {(trimmedUrl || editorImageSlots.length > 0) && (
+                            <button
+                              type="button"
+                              disabled={saving || editorUploadProgress !== null}
+                              onClick={() => {
+                                const firstSlot = editorImageSlots[0];
+                                if (firstSlot?.isSessionUpload && firstSlot.imageKey) {
+                                  sessionUploadedR2KeysRef.current.delete(firstSlot.imageKey);
+                                  void deleteCatalogImageFromStorage({
+                                    imageKey: firstSlot.imageKey,
+                                    imageUrl: firstSlot.url,
+                                  }).catch(() => undefined);
+                                }
+                                const remainingSlots =
+                                  editorImageSlots.length > 1 ? editorImageSlots.slice(1) : [];
+                                const nextUrls = remainingSlots.map((s) => s.url);
+                                const nextPrimary = remainingSlots[0];
+                                setEditorImageSlots(remainingSlots);
+                                setPrimaryImageUrlInput(nextPrimary?.url ?? '');
+                                setImagePreviewFailed(false);
+                                setEditorUploadError(null);
+                                setEditorUploadSuccess(null);
+                                setEditing({
+                                  ...editing,
+                                  image: nextPrimary?.url ?? '',
+                                  imageUrl: nextPrimary?.url ?? '',
+                                  imageKey: nextPrimary?.imageKey ?? '',
+                                  images: nextUrls,
+                                });
+                              }}
+                              className="inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-lg border border-red-200 bg-red-50 px-2.5 py-2 text-xs font-semibold text-red-700 transition-colors hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                              <span>Remove</span>
+                            </button>
+                          )}
                         </div>
                         <p className="mt-1.5 text-[11px] text-[#57534E]">
-                          ফাইল আপলোড করলে এই ঘরে R2 URL স্বয়ংক্রিয়ভাবে বসে যাবে—আলাদাভাবে URL লেখা বাধ্যতামূলক নয়।
+                          Uploading a photo automatically populates the R2 URL here—manual entry is optional.
                         </p>
                       </div>
 
@@ -3254,23 +3479,23 @@ export function AdminProductsPanel() {
                         />
                         {i === 0 && (
                           <span className="absolute left-1.5 top-1.5 rounded bg-[#1C1917]/85 px-1.5 py-0.5 text-[9px] font-bold text-[#FACC15]">
-                            প্রধান ছবি
+                            Primary
                           </span>
                         )}
                         {slot.isSessionUpload && (
                           <span className="absolute inset-x-1.5 bottom-1.5 rounded bg-emerald-700/90 px-1.5 py-0.5 text-center text-[9px] font-bold text-white">
-                            R2 আপলোডকৃত · সেভ বাকি
+                            R2 Uploaded · Unsaved
                           </span>
                         )}
                         {isLegacyInline && (
                           <span className="absolute inset-x-1.5 bottom-1.5 rounded bg-amber-600/95 px-1.5 py-0.5 text-center text-[9px] font-bold text-white">
-                            পুরোনো ইনলাইন ছবি — বদলান
+                            Legacy Inline — Replace
                           </span>
                         )}
                         <button
                           type="button"
                           disabled={saving || editorUploadProgress !== null}
-                          title="তালিকা থেকে সরান"
+                          title="Remove from list"
                           onClick={() => {
                             if (slot.isSessionUpload && slot.imageKey) {
                               sessionUploadedR2KeysRef.current.delete(slot.imageKey);
@@ -3322,7 +3547,7 @@ export function AdminProductsPanel() {
                           }}
                           className="cursor-pointer border-t border-[#F5F4F0] bg-white px-2 py-1 text-[10px] font-semibold text-[#57534E] hover:bg-[#FAFAF8] hover:text-[#DC1F26] disabled:opacity-40"
                         >
-                          প্রধান করুন
+                          Make Primary
                         </button>
                       )}
                     </div>
@@ -3357,7 +3582,7 @@ export function AdminProductsPanel() {
                       <ImagePlus className="h-5 w-5 text-[#DC1F26]" />
                     )}
                     <span>
-                      {editorUploadProgress !== null ? 'R2-তে আপলোড হচ্ছে...' : 'ছবি আপলোড / টেনে আনুন'}
+                      {editorUploadProgress !== null ? 'Uploading to R2...' : 'Upload or Drag Photos'}
                     </span>
                     <input
                       type="file"
@@ -3401,22 +3626,37 @@ export function AdminProductsPanel() {
             </div>
           </div>
 
-          <div className="mt-5 flex justify-end gap-3 border-t border-[#F5F4F0] pt-4">
-            <button
-              type="button"
-              disabled={saving || editorUploadProgress !== null}
-              onClick={() => closeEditor()}
-              className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold text-[#44403C] disabled:opacity-50"
-            >
-              বাতিল
-            </button>
-            <button
-              type="submit"
-              disabled={saving || editorUploadProgress !== null}
-              className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C] disabled:opacity-50"
-            >
-              {saving ? 'সংরক্ষণ হচ্ছে...' : 'সংরক্ষণ করুন'}
-            </button>
+          <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-[#F5F4F0] pt-4">
+            <div>
+              {!isNew && editing.deleted && canDelete && (
+                <button
+                  type="button"
+                  disabled={saving || editorUploadProgress !== null}
+                  onClick={() => setPendingDeleteProduct(editing)}
+                  className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>Delete Permanently</span>
+                </button>
+              )}
+            </div>
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                disabled={saving || editorUploadProgress !== null}
+                onClick={() => closeEditor()}
+                className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold text-[#44403C] disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={saving || editorUploadProgress !== null}
+                className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C] disabled:opacity-50"
+              >
+                {saving ? 'Saving...' : 'Save Product'}
+              </button>
+            </div>
           </div>
         </form>
       )}
@@ -3432,7 +3672,7 @@ export function AdminProductsPanel() {
                 setSearch(e.target.value);
                 setPage(1);
               }}
-              placeholder="পণ্য খুঁজুন (বাংলা বা English)..."
+              placeholder="Search products (English or Bengali)..."
               className="w-full max-w-xs rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3 py-2 text-xs focus:border-[#DC1F26] focus:outline-none"
             />
             <select
@@ -3443,10 +3683,10 @@ export function AdminProductsPanel() {
               }}
               className="rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3 py-2 text-xs text-[#1C1917] focus:border-[#DC1F26] focus:outline-none"
             >
-              <option value="all">সকল ক্যাটাগরি</option>
+              <option value="all">All Categories</option>
               {allCategories.map((c) => (
                 <option key={c.id} value={c.slug}>
-                  {c.name}
+                  {c.nameEn ? `${c.nameEn} (${c.name})` : c.name}
                 </option>
               ))}
             </select>
@@ -3463,7 +3703,9 @@ export function AdminProductsPanel() {
               }`}
             >
               <ImageOff className="h-3.5 w-3.5" />
-              <span>ছবি নেই ({masterImportStats.missingImageCount})</span>
+              <span className="tabular-nums">
+                Missing Photo ({masterImportStats.missingImageCount})
+              </span>
             </button>
           </div>
           <div className="flex gap-1.5 text-xs">
@@ -3490,26 +3732,31 @@ export function AdminProductsPanel() {
           <table className="w-full text-left text-xs">
             <thead className="border-b border-[#E7E5E4] bg-[#FAFAF8] text-[#57534E]">
               <tr>
-                <th className="px-4 py-3 font-semibold">পণ্য ও ছবি</th>
-                <th className="px-4 py-3 font-semibold">ক্যাটাগরি</th>
-                <th className="px-4 py-3 font-semibold">একক</th>
-                <th className="px-4 py-3 font-semibold">মূল্য</th>
-                <th className="px-4 py-3 font-semibold">দৃশ্যমানতা</th>
+                <th className="px-4 py-3 font-semibold">Product &amp; Image</th>
+                <th className="px-4 py-3 font-semibold">Category</th>
+                <th className="px-4 py-3 font-semibold">Unit</th>
+                <th className="px-4 py-3 font-semibold">Price</th>
+                <th className="px-4 py-3 font-semibold">Visibility</th>
                 <th className="px-4 py-3 font-semibold">Featured</th>
-                <th className="px-4 py-3 text-right font-semibold">অ্যাকশন</th>
+                <th className="px-4 py-3 text-right font-semibold">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#F5F4F0]">
               {paginated.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="px-4 py-8 text-center text-[#78716C]">
-                    কোনো পণ্য পাওয়া যায়নি।
+                    No products matched your current filter.
                   </td>
                 </tr>
               ) : (
                 paginated.map((p) => {
                   const thumbSrc = p.imageUrl || p.image || p.images?.[0] || '';
                   const pt = getProductText(p, allCategories);
+                  const titlePair = resolveBilingualPair(pt.nameEn, pt.nameBn);
+                  const categoryPair = resolveBilingualPair(
+                    pt.categoryNameEn,
+                    p.categoryName || pt.categoryNameBn
+                  );
                   return (
                     <tr key={p.id} className="hover:bg-[#FAFAF8]">
                       <td className="px-4 py-3">
@@ -3517,7 +3764,7 @@ export function AdminProductsPanel() {
                           {thumbSrc ? (
                             <img
                               src={resolveAssetUrl(thumbSrc)}
-                              alt={pt.nameBn}
+                              alt={titlePair.primary}
                               className="h-10 w-12 shrink-0 rounded-md border border-[#E7E5E4] object-cover"
                             />
                           ) : (
@@ -3526,13 +3773,17 @@ export function AdminProductsPanel() {
                             </div>
                           )}
                           <div className="min-w-0">
-                            <p className="font-semibold text-[#1C1917]">{pt.nameBn}</p>
-                            <p className="text-[11px] text-[#78716C]">{pt.nameEn}</p>
+                            <p className="font-semibold text-[#1C1917]">{titlePair.primary}</p>
+                            {titlePair.secondaryBn && (
+                              <p className="font-bn text-[11px] text-[#78716C]">
+                                {titlePair.secondaryBn}
+                              </p>
+                            )}
                           </div>
                         </div>
                       </td>
                       <td className="px-4 py-3 text-[#44403C]">
-                        {p.categoryName || pt.categoryNameBn}
+                        <span>{categoryPair.primary}</span>
                       </td>
                       <td className="px-4 py-3 font-medium text-[#57534E]">
                         {pt.unit || '—'}
@@ -3583,7 +3834,7 @@ export function AdminProductsPanel() {
                           {canEdit && (
                             <>
                               <label
-                                title="পণ্যের ছবি আপলোড করুন"
+                                title="Upload product photo"
                                 className={`inline-flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1.5 text-[11px] font-semibold transition-colors ${
                                   thumbSrc
                                     ? 'border-[#E7E5E4] text-[#57534E] hover:border-[#1C1917] hover:text-[#1C1917]'
@@ -3599,10 +3850,10 @@ export function AdminProductsPanel() {
                                   {uploadingRowId === p.id
                                     ? rowUploadProgress !== null
                                       ? `${rowUploadProgress}%`
-                                      : 'আপলোড...'
+                                      : 'Uploading...'
                                     : thumbSrc
-                                    ? 'ছবি বদলান'
-                                    : 'ছবি যোগ'}
+                                    ? 'Change Photo'
+                                    : 'Add Photo'}
                                 </span>
                                 <input
                                   type="file"
@@ -3620,6 +3871,16 @@ export function AdminProductsPanel() {
                               >
                                 <Edit3 className="h-3.5 w-3.5" />
                               </button>
+                              {canAdd && (
+                                <button
+                                  type="button"
+                                  title="Duplicate Product"
+                                  onClick={() => duplicateProduct(p)}
+                                  className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-[#57534E] hover:border-[#1C1917] hover:text-[#1C1917]"
+                                >
+                                  <Copy className="h-3.5 w-3.5" />
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 title={p.deleted ? 'Restore' : 'Safe Archive'}
@@ -3655,9 +3916,9 @@ export function AdminProductsPanel() {
         </div>
         {totalPages > 1 && (
           <div className="flex items-center justify-between border-t border-[#E7E5E4] px-4 py-3 text-xs text-[#57534E]">
-            <span>
-              দেখানো হচ্ছে {(safePage - 1) * PAGE_SIZE + 1}–
-              {Math.min(safePage * PAGE_SIZE, filtered.length)} / {filtered.length}টি পণ্য
+            <span className="tabular-nums">
+              Showing {(safePage - 1) * PAGE_SIZE + 1}–
+              {Math.min(safePage * PAGE_SIZE, filtered.length)} of {filtered.length} products
             </span>
             <div className="flex items-center gap-1.5">
               <button
@@ -3666,9 +3927,9 @@ export function AdminProductsPanel() {
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
                 className="cursor-pointer rounded border border-[#D6D3D1] px-2.5 py-1 font-semibold disabled:opacity-40"
               >
-                পূর্ববর্তী
+                Previous
               </button>
-              <span className="px-2 font-mono font-semibold">
+              <span className="px-2 font-mono tabular-nums font-semibold">
                 {safePage}/{totalPages}
               </span>
               <button
@@ -3677,7 +3938,7 @@ export function AdminProductsPanel() {
                 onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                 className="cursor-pointer rounded border border-[#D6D3D1] px-2.5 py-1 font-semibold disabled:opacity-40"
               >
-                পরবর্তী
+                Next
               </button>
             </div>
           </div>
@@ -3698,15 +3959,18 @@ export function AdminProductsPanel() {
               </div>
               <div>
                 <h3 className="font-display text-xl font-bold text-[#1C1917]">
-                  পণ্য স্থায়ীভাবে ডিলিট করবেন?
+                  Delete Product Permanently?
                 </h3>
                 <p className="mt-1 text-xs leading-relaxed text-[#57534E]">
-                  আপনি{' '}
+                  You are about to permanently remove{' '}
                   <strong className="text-[#1C1917]">
-                    {pendingDeleteProduct.nameBn || pendingDeleteProduct.name} (
-                    {pendingDeleteProduct.nameEn})
-                  </strong>{' '}
-                  স্থায়ীভাবে ডিলিট করতে যাচ্ছেন। ডিলিট করলে এটি আর পুনরুদ্ধার করা যাবে না।
+                    {pendingDeleteProduct.nameEn || pendingDeleteProduct.name}
+                    {(pendingDeleteProduct.nameBn || pendingDeleteProduct.name) &&
+                    pendingDeleteProduct.nameEn
+                      ? ` (${pendingDeleteProduct.nameBn || pendingDeleteProduct.name})`
+                      : ''}
+                  </strong>
+                  . This action cannot be undone.
                 </p>
               </div>
             </div>
@@ -3717,7 +3981,7 @@ export function AdminProductsPanel() {
                 onClick={() => setPendingDeleteProduct(null)}
                 className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold text-[#1C1917] hover:bg-[#FAFAF8]"
               >
-                বাতিল
+                Cancel
               </button>
               <button
                 type="button"
@@ -3726,7 +3990,7 @@ export function AdminProductsPanel() {
                 className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-[#DC1F26] px-4 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C] disabled:opacity-50"
               >
                 {deletingProduct && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                <span>স্থায়ীভাবে ডিলিট করুন</span>
+                <span>Delete Permanently</span>
               </button>
             </div>
           </div>
@@ -4033,7 +4297,7 @@ export function AdminCategoriesPanel() {
             Category Management
           </h2>
           <p className="text-xs text-[#57534E]">
-            বাংলা ও English নামে ক্যাটাগরি যোগ, বিবরণ পরিবর্তন, Hide/Show ও অর্ডার সাজান।
+            Add or edit English &amp; Bengali category titles, descriptions, storefront visibility, and sort order.
           </p>
         </div>
         <button
@@ -4042,7 +4306,7 @@ export function AdminCategoriesPanel() {
           className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-4 py-2 text-xs font-semibold text-white hover:bg-[#DC1F26]"
         >
           <Plus className="h-4 w-4" />
-          <span>নতুন ক্যাটাগরি</span>
+          <span>Add Category</span>
         </button>
       </div>
 
@@ -4065,7 +4329,7 @@ export function AdminCategoriesPanel() {
           className="grid grid-cols-1 gap-4 rounded-xl border border-[#D6D3D1] bg-white p-5 sm:grid-cols-2"
         >
           <div>
-            <label className="mb-1 block text-xs font-semibold">নাম (বাংলা) *</label>
+            <label className="mb-1 block text-xs font-semibold">Name (বাংলা) *</label>
             <input
               type="text"
               value={editing.name}
@@ -4099,7 +4363,7 @@ export function AdminCategoriesPanel() {
           </div>
           <div>
             <label className="mb-1 block text-xs font-semibold">
-              ক্যাটাগরির ছবি (JPG, PNG, WEBP বা GIF · সর্বোচ্চ ৫ এমবি)
+              Category Image (JPG, PNG, WEBP, or GIF · Max 5 MB)
             </label>
             <div className="flex items-center gap-3">
               <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3 py-2 text-xs font-semibold text-[#1C1917] hover:border-[#DC1F26]">
@@ -4110,8 +4374,8 @@ export function AdminCategoriesPanel() {
                 )}
                 <span>
                   {catUploading
-                    ? `আপলোড হচ্ছে ${catUploadPct ?? 0}%`
-                    : 'ছবি নির্বাচন করুন'}
+                    ? `Uploading ${catUploadPct ?? 0}%`
+                    : 'Choose Image'}
                 </span>
                 <input
                   type="file"
@@ -4176,13 +4440,13 @@ export function AdminCategoriesPanel() {
               onClick={() => setEditing(null)}
               className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold"
             >
-              বাতিল
+              Cancel
             </button>
             <button
               type="submit"
               className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C]"
             >
-              সংরক্ষণ
+              Save Category
             </button>
           </div>
         </form>
@@ -4191,6 +4455,8 @@ export function AdminCategoriesPanel() {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {allCategories.map((cat) => {
           const ct = getCategoryText(cat);
+          const namePair = resolveBilingualPair(ct.nameEn, ct.nameBn);
+          const descPair = resolveBilingualPair(ct.descriptionEn, ct.descriptionBn);
           return (
             <div
               key={cat.id}
@@ -4200,24 +4466,30 @@ export function AdminCategoriesPanel() {
             >
               <img
                 src={resolveAssetUrl(cat.image)}
-                alt={ct.nameBn}
+                alt={namePair.primary}
                 className="aspect-[16/9] w-full object-cover"
               />
               <div className="flex flex-1 flex-col justify-between p-4">
                 <div>
                   <div className="flex items-center justify-between text-xs text-[#78716C]">
-                    <span>Order #{cat.order}</span>
+                    <span className="tabular-nums">Order #{cat.order}</span>
                     <span>{cat.visible === false ? 'Hidden' : cat.slug}</span>
                   </div>
                   <h3 className="font-display mt-1 text-xl font-bold text-[#1C1917]">
-                    {ct.nameBn}
+                    {namePair.primary}
                   </h3>
-                  {ct.nameEn && (
-                    <p className="text-xs font-semibold text-[#DC1F26]">{ct.nameEn}</p>
+                  {namePair.secondaryBn && (
+                    <p className="font-bn text-xs font-medium text-[#78716C]">
+                      {namePair.secondaryBn}
+                    </p>
                   )}
-                  <p className="mt-1.5 text-xs text-[#57534E]">{ct.descriptionBn}</p>
-                  {ct.descriptionEn && (
-                    <p className="mt-1 text-[11px] text-[#78716C]">{ct.descriptionEn}</p>
+                  {descPair.primary && (
+                    <p className="mt-1.5 text-xs text-[#57534E]">{descPair.primary}</p>
+                  )}
+                  {descPair.secondaryBn && (
+                    <p className="font-bn mt-0.5 text-[11px] text-[#78716C]">
+                      {descPair.secondaryBn}
+                    </p>
                   )}
                 </div>
                 <div className="mt-4 flex justify-end gap-2 border-t border-[#F5F4F0] pt-3">
@@ -4271,10 +4543,14 @@ export function AdminCategoriesPanel() {
         >
           <div className="w-full max-w-md rounded-2xl border border-[#E7E5E4] bg-white p-6 shadow-xl">
             <h3 className="font-display text-xl font-bold text-[#1C1917]">
-              ক্যাটাগরি ডিলিট করবেন?
+              Delete Category?
             </h3>
             <p className="mt-1 text-xs leading-relaxed text-[#57534E]">
-              আপনি <strong>{pendingDeleteCat.name}</strong> ক্যাটাগরিটি ডিলিট করতে যাচ্ছেন। এটি নিশ্চিত করতে নিচে চাপুন।
+              You are about to remove{' '}
+              <strong className="text-[#1C1917]">
+                {pendingDeleteCat.nameEn || pendingDeleteCat.name}
+              </strong>
+              . Confirm below to proceed.
             </p>
             <div className="mt-5 flex justify-end gap-2">
               <button
@@ -4282,7 +4558,7 @@ export function AdminCategoriesPanel() {
                 onClick={() => setPendingDeleteCat(null)}
                 className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold text-[#1C1917]"
               >
-                বাতিল
+                Cancel
               </button>
               <button
                 type="button"
@@ -4293,7 +4569,7 @@ export function AdminCategoriesPanel() {
                 }}
                 className="cursor-pointer rounded-lg bg-[#DC1F26] px-4 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C]"
               >
-                ডিলিট করুন
+                Delete Category
               </button>
             </div>
           </div>
@@ -4445,7 +4721,7 @@ export function AdminOccasionsPanel() {
             Occasion Management
           </h2>
           <p className="text-xs text-[#57534E]">
-            বাংলা ও English নামে উপলক্ষ যোগ/সম্পাদনা করুন এবং পণ্য নির্ধারণ করুন।
+            Manage occasions in English and Bengali and assign matching catalog products.
           </p>
         </div>
         <button
@@ -4460,7 +4736,7 @@ export function AdminOccasionsPanel() {
               name_bn: '',
               name_en: '',
               slug: '',
-              icon: '🎉',
+              icon: '',
               description: '',
               descriptionEn: '',
               description_bn: '',
@@ -4472,7 +4748,7 @@ export function AdminOccasionsPanel() {
           className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-4 py-2 text-xs font-semibold text-white hover:bg-[#DC1F26]"
         >
           <Plus className="h-4 w-4" />
-          <span>নতুন উপলক্ষ</span>
+          <span>Add Occasion</span>
         </button>
       </div>
 
@@ -4489,7 +4765,7 @@ export function AdminOccasionsPanel() {
           className="grid grid-cols-1 gap-4 rounded-xl border border-[#D6D3D1] bg-white p-5 sm:grid-cols-3"
         >
           <div>
-            <label className="mb-1 block text-xs font-semibold">Icon (Emoji)</label>
+            <label className="mb-1 block text-xs font-semibold">Icon Label (Optional)</label>
             <input
               type="text"
               value={editing.icon}
@@ -4498,7 +4774,7 @@ export function AdminOccasionsPanel() {
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs font-semibold">নাম (বাংলা) *</label>
+            <label className="mb-1 block text-xs font-semibold">Name (বাংলা) *</label>
             <input
               type="text"
               value={editing.name}
@@ -4561,13 +4837,13 @@ export function AdminOccasionsPanel() {
               onClick={() => setEditing(null)}
               className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold"
             >
-              বাতিল
+              Cancel
             </button>
             <button
               type="submit"
               className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C]"
             >
-              সংরক্ষণ
+              Save Occasion
             </button>
           </div>
         </form>
@@ -4576,6 +4852,8 @@ export function AdminOccasionsPanel() {
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {allOccasions.map((occ) => {
           const ot = getOccasionText(occ);
+          const namePair = resolveBilingualPair(ot.nameEn, ot.nameBn);
+          const descPair = resolveBilingualPair(ot.descriptionEn, ot.descriptionBn);
           const matchedCount = allProducts.filter((p) => p.occasions.includes(occ.slug)).length;
           return (
             <div
@@ -4584,15 +4862,23 @@ export function AdminOccasionsPanel() {
             >
               <div className="flex items-start justify-between gap-2">
                 <div>
-                  <h3 className="text-base font-bold text-[#1C1917]">
-                    {occ.icon} {ot.nameBn}{' '}
-                    <span className="text-xs font-normal text-[#78716C]">({ot.nameEn})</span>
+                  <h3 className="font-display text-lg font-bold text-[#1C1917]">
+                    {namePair.primary}
                   </h3>
-                  <p className="mt-1 text-xs text-[#57534E]">{ot.descriptionBn}</p>
-                  {ot.descriptionEn && (
-                    <p className="mt-0.5 text-[11px] text-[#78716C]">{ot.descriptionEn}</p>
+                  {namePair.secondaryBn && (
+                    <p className="font-bn text-xs font-medium text-[#78716C]">
+                      {namePair.secondaryBn}
+                    </p>
                   )}
-                  <p className="mt-2 font-mono text-[11px] text-[#DC1F26]">
+                  {descPair.primary && (
+                    <p className="mt-1 text-xs text-[#57534E]">{descPair.primary}</p>
+                  )}
+                  {descPair.secondaryBn && (
+                    <p className="font-bn mt-0.5 text-[11px] text-[#78716C]">
+                      {descPair.secondaryBn}
+                    </p>
+                  )}
+                  <p className="mt-2 font-mono tabular-nums text-[11px] text-[#DC1F26]">
                     {matchedCount} products assigned
                   </p>
                 </div>
@@ -4633,7 +4919,7 @@ export function AdminOccasionsPanel() {
                       try {
                         await deleteDoc(doc(requireDb(), 'occasions', occ.id));
                       } catch {
-                        setMsg('ডিলিট করা যায়নি।');
+                        setMsg('Could not delete occasion.');
                       }
                     }}
                     className="cursor-pointer rounded-md border border-[#E7E5E4] p-1 text-red-700"
@@ -4647,6 +4933,7 @@ export function AdminOccasionsPanel() {
                 <div className="mt-3 max-h-48 space-y-1.5 overflow-y-auto border-t border-[#F5F4F0] pt-3">
                   {allProducts.map((prod) => {
                     const checked = prod.occasions.includes(occ.slug);
+                    const prodPair = resolveBilingualPair(prod.nameEn, prod.name);
                     return (
                       <button
                         key={prod.id}
@@ -4655,7 +4942,8 @@ export function AdminOccasionsPanel() {
                         className="flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 text-left text-xs hover:bg-[#FAFAF8]"
                       >
                         <span className="text-[#1C1917]">
-                          {prod.name} {prod.nameEn ? `(${prod.nameEn})` : ''}
+                          {prodPair.primary}
+                          {prodPair.secondaryBn ? ` (${prodPair.secondaryBn})` : ''}
                         </span>
                         <span
                           className={`inline-flex h-4 w-4 items-center justify-center rounded border ${
@@ -4873,7 +5161,7 @@ export function AdminShowroomsPanel() {
             Showroom Management
           </h2>
           <p className="text-xs text-[#57534E]">
-            বাংলা ও English ভাষায় অনুমোদিত শোরুম ও অতিরিক্ত Firestore শাখার তথ্য পরিচালনা করুন।
+            Manage official Chattogram outlets and additional Firestore branch listings in English and Bengali.
           </p>
         </div>
         <button
@@ -4916,7 +5204,7 @@ export function AdminShowroomsPanel() {
           className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-4 py-2 text-xs font-semibold text-white hover:bg-[#DC1F26]"
         >
           <Plus className="h-4 w-4" />
-          <span>নতুন শোরুম</span>
+          <span>Add Showroom</span>
         </button>
       </div>
 
@@ -4931,10 +5219,10 @@ export function AdminShowroomsPanel() {
           <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
             <div>
               <p className="text-xs font-bold text-amber-950">
-                Firestore-এ পুরোনো Demo Showroom ডকুমেন্ট শনাক্ত হয়েছে ({legacyDemoShowrooms.length}টি)
+                Legacy Demo Showroom Documents Detected (<span className="tabular-nums">{legacyDemoShowrooms.length}</span>)
               </p>
               <p className="mt-1 text-[11px] text-amber-900">
-                ওয়েবসাইট UI ও অভিযোগ বক্স থেকে এগুলো ইতিমধ্যেই সম্পূর্ণ লুকানো হয়েছে। ডাটাবেস পরিষ্কার করতে চাইলে নিচের বাটনে ক্লিক করে শুধুমাত্র এই চিহ্নিত Demo রেকর্ডগুলো মুছে দিন (আসল কোনো শোরুম পরিবর্তন হবে না):
+                These records are already hidden from the storefront and complaint form. Click below to permanently remove only these flagged demo documents (official outlets remain untouched):
               </p>
               <ul className="mt-1.5 list-inside list-disc text-[11px] font-mono text-amber-900">
                 {legacyDemoShowrooms.map((d) => (
@@ -4955,7 +5243,7 @@ export function AdminShowroomsPanel() {
               ) : (
                 <Trash2 className="h-3.5 w-3.5" />
               )}
-              <span>চিহ্নিত Demo ডকুমেন্ট মুছুন</span>
+              <span>Remove Flagged Demo Records</span>
             </button>
           </div>
         </div>
@@ -5178,13 +5466,13 @@ export function AdminShowroomsPanel() {
               onClick={() => setEditing(null)}
               className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold"
             >
-              বাতিল
+              Cancel
             </button>
             <button
               type="submit"
               className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C]"
             >
-              সংরক্ষণ
+              Save Showroom
             </button>
           </div>
         </form>
@@ -5193,28 +5481,34 @@ export function AdminShowroomsPanel() {
       {/* Firestore Custom Showrooms */}
       <div className="space-y-3">
         <h3 className="text-sm font-bold text-[#1C1917]">
-          অতিরিক্ত ডাইনামিক শোরুম (Firestore)
+          Custom Firestore Showrooms
         </h3>
         {firestoreShowrooms.length === 0 ? (
           <div className="rounded-xl border border-[#E7E5E4] bg-white p-6 text-center text-xs text-[#57534E]">
-            Firestore-এ এই মুহূর্তে কোনো অতিরিক্ত শোরুম ডকুমেন্ট নেই। নতুন শোরুম যোগ করতে উপরের “নতুন শোরুম” বাটন ব্যবহার করুন।
+            No additional showroom documents are stored in Firestore. Use “Add Showroom” above to add a custom branch.
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             {firestoreShowrooms.map((sr) => {
               const st = getShowroomText(sr);
+              const namePair = resolveBilingualPair(st.nameEn, st.nameBn);
+              const areaPair = resolveBilingualPair(st.areaEn, st.areaBn);
+              const addrPair = resolveBilingualPair(st.addressEn, st.addressBn);
               return (
                 <div key={sr.id} className="rounded-xl border border-[#E7E5E4] bg-white p-5">
                   <div className="flex items-start justify-between">
                     <div>
                       <p className="text-xs font-semibold text-[#DC1F26]">
-                        {st.areaBn}
-                        {st.areaEn && st.areaEn !== st.areaBn ? ` · ${st.areaEn}` : ''}{' '}
-                        {sr.visible === false ? '· (Hidden)' : ''}
+                        {areaPair.primary}
+                        {sr.visible === false ? ' · (Hidden)' : ''}
                       </p>
-                      <h3 className="font-display text-xl font-bold text-[#1C1917]">{st.nameBn}</h3>
-                      {st.nameEn && (
-                        <p className="text-xs font-medium text-[#78716C]">{st.nameEn}</p>
+                      <h3 className="font-display text-xl font-bold text-[#1C1917]">
+                        {namePair.primary}
+                      </h3>
+                      {namePair.secondaryBn && (
+                        <p className="font-bn text-xs font-medium text-[#78716C]">
+                          {namePair.secondaryBn}
+                        </p>
                       )}
                     </div>
                     <div className="flex gap-1.5">
@@ -5273,16 +5567,19 @@ export function AdminShowroomsPanel() {
                       </button>
                     </div>
                   </div>
-                  <p className="mt-2 text-xs text-[#57534E]">{st.addressBn}</p>
-                  {st.addressEn && (
-                    <p className="mt-0.5 text-[11px] text-[#78716C]">{st.addressEn}</p>
+                  {addrPair.primary && (
+                    <p className="mt-2 text-xs text-[#57534E]">{addrPair.primary}</p>
+                  )}
+                  {addrPair.secondaryBn && (
+                    <p className="font-bn mt-0.5 text-[11px] text-[#78716C]">
+                      {addrPair.secondaryBn}
+                    </p>
                   )}
                   <p className="mt-2 font-mono text-xs font-semibold text-[#1C1917]">
                     {sr.phone} {sr.alternate_phone ? `· ${sr.alternate_phone}` : ''}
                   </p>
                   <p className="mt-1 text-xs text-[#78716C]">
-                    {st.openingHoursBn}
-                    {st.openingHoursEn ? ` · ${st.openingHoursEn}` : ''}
+                    {st.openingHoursEn || st.openingHoursBn}
                     {sr.weekly_holiday ? ` · ${sr.weekly_holiday}` : ''}
                   </p>
                 </div>
@@ -5296,35 +5593,47 @@ export function AdminShowroomsPanel() {
       <div className="space-y-3 border-t border-[#E7E5E4] pt-5">
         <div>
           <h3 className="text-sm font-bold text-[#1C1917]">
-            অনুমোদিত অফিশিয়াল শো-রুম · Official Chattogram Outlets
+            Official Chattogram Outlets
           </h3>
           <p className="text-[11px] text-[#57534E]">
-            ওয়েবসাইটের Our Outlets / আমাদের শো-রুম, Contact ও Complaint Box-এ ব্যবহৃত অনুমোদিত তালিকা।
+            Verified outlet directory referenced across Our Outlets, Contact, and the Complaint Box.
           </p>
         </div>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          {CHATTOGRAM_OUTLETS.map((outlet) => (
-            <div key={outlet.id} className="rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-4">
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <h4 className="font-display text-lg font-bold text-[#1C1917]">
-                    {outlet.nameBn}
-                  </h4>
-                  <p className="text-xs font-medium text-[#78716C]">{outlet.nameEn}</p>
+          {CHATTOGRAM_OUTLETS.map((outlet) => {
+            const outletName = resolveBilingualPair(outlet.nameEn, outlet.nameBn);
+            const outletAddr = resolveBilingualPair(outlet.addressEn, outlet.addressBn);
+            return (
+              <div key={outlet.id} className="rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-4">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <h4 className="font-display text-lg font-bold text-[#1C1917]">
+                      {outletName.primary}
+                    </h4>
+                    {outletName.secondaryBn && (
+                      <p className="font-bn text-xs font-medium text-[#78716C]">
+                        {outletName.secondaryBn}
+                      </p>
+                    )}
+                  </div>
+                  {outlet.type && (
+                    <span className="text-[11px] font-bold text-[#B91C1C]">
+                      {outlet.type}
+                    </span>
+                  )}
                 </div>
-                {outlet.type && (
-                  <span className="text-[11px] font-bold text-[#B91C1C]">
-                    {outlet.type}
-                  </span>
+                <p className="mt-2 text-xs text-[#57534E]">{outletAddr.primary}</p>
+                {outletAddr.secondaryBn && (
+                  <p className="font-bn mt-0.5 text-[11px] text-[#78716C]">
+                    {outletAddr.secondaryBn}
+                  </p>
                 )}
+                <p className="mt-2 font-mono text-xs font-semibold text-[#1C1917]">
+                  {outlet.phone}
+                </p>
               </div>
-              <p className="mt-2 text-xs text-[#57534E]">{outlet.addressBn}</p>
-              <p className="mt-0.5 text-[11px] text-[#78716C]">{outlet.addressEn}</p>
-              <p className="mt-2 font-mono text-xs font-semibold text-[#1C1917]">
-                {outlet.phone}
-              </p>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>

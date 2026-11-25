@@ -85,31 +85,32 @@ class AppErrorBoundary extends React.Component<
     if (this.state.hasError) {
       return (
         <div className="mx-auto max-w-lg px-4 py-24 text-center">
-          <h1 className="font-display text-3xl font-bold text-[#1C1917]">
-            সাময়িক ত্রুটি দেখা দিয়েছে
+          <h1 className="font-display text-3xl font-semibold text-[#1C1917]">
+            Something Went Wrong
           </h1>
-          <p className="mt-2 text-sm text-[#57534E]">
-            অনুগ্রহ করে পৃষ্ঠাটি রিলোড করুন অথবা একটু পর আবার চেষ্টা করুন।
+          <p className="bn-sub mt-1 text-[#57534E]">সাময়িক ত্রুটি দেখা দিয়েছে</p>
+          <p className="mt-3 text-sm text-[#57534E]">
+            Please reload the page or try again in a moment.
           </p>
           {this.state.errorDetail && (
             <p className="mt-3 rounded-lg border border-[#E7E5E4] bg-[#FAFAF8] px-3 py-2 font-mono text-[11px] text-[#57534E]">
               {this.state.errorDetail}
             </p>
           )}
-          <div className="mt-5 flex flex-wrap justify-center gap-2.5">
+          <div className="mt-6 flex flex-wrap justify-center gap-2.5">
             <button
               type="button"
               onClick={() => this.setState({ hasError: false, errorDetail: '' })}
-              className="cursor-pointer rounded-lg border border-[#D6D3D1] px-5 py-2.5 text-sm font-semibold text-[#1C1917] hover:border-[#1C1917]"
+              className="cursor-pointer rounded-lg border border-[#D6D3D1] px-5 py-2.5 text-sm font-semibold text-[#1C1917] transition hover:border-[#1C1917]"
             >
-              পুনরায় চেষ্টা করুন
+              Try Again
             </button>
             <button
               type="button"
               onClick={() => window.location.reload()}
-              className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#B91C1C]"
+              className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#B91C1C]"
             >
-              পৃষ্ঠা রিলোড করুন
+              Reload Page
             </button>
           </div>
         </div>
@@ -121,8 +122,12 @@ class AppErrorBoundary extends React.Component<
 
 function PageLoader() {
   return (
-    <div className="mx-auto max-w-7xl px-4 py-16 sm:px-6 lg:px-8">
-      <div className="h-64 animate-pulse rounded-2xl bg-[#F5F4F0]" />
+    <div className="mx-auto max-w-7xl px-4 py-20 sm:px-6 lg:px-8">
+      <div className="flex min-h-[260px] flex-col items-center justify-center rounded-xl border border-[#E7E5E4] bg-[#F5F4F0]/60 text-center">
+        <div className="h-7 w-7 animate-spin rounded-full border-2 border-[#E7E5E4] border-t-[#DC1F26]" />
+        <p className="mt-3 text-sm font-medium text-[#1C1917]">Loading Page...</p>
+        <p className="font-bn mt-0.5 text-xs text-[#78716C]">তথ্য লোড হচ্ছে</p>
+      </div>
     </div>
   );
 }
@@ -155,9 +160,9 @@ function UnauthorizedAdminCard({
     setNotice(null);
     try {
       await onResendVerification();
-      setNotice('Verification email sent! Please check your inbox and then click Refresh.');
+      setNotice('Verification email sent. Please check your inbox and click Refresh.');
     } catch {
-      setNotice('Could not send verification email right now. Please try again in a minute.');
+      setNotice('Could not send verification email right now. Please try again shortly.');
     } finally {
       setBusy(false);
     }
@@ -176,11 +181,20 @@ function UnauthorizedAdminCard({
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-[#FAFAF8] px-4 py-20 text-center">
-      <div className="w-full max-w-md rounded-2xl border border-red-200 bg-white p-8 shadow-sm">
-        <p className="font-mono text-xs font-bold uppercase tracking-wider text-[#DC1F26]">
+      <div className="w-full max-w-md rounded-2xl border border-red-200 bg-white p-8">
+        <p className="font-mono text-xs font-semibold uppercase tracking-wider text-[#DC1F26]">
           {needsVerification ? 'Email Verification Required' : '403 · Unauthorized Route Access'}
         </p>
-        <h1 className="font-display mt-2 text-2xl font-bold text-[#1C1917]">
+        <h1 className="font-display mt-2 text-2xl font-semibold text-[#1C1917]">
+          {needsVerification
+            ? 'Verify Your Email Address'
+            : adminDocMissing
+            ? 'Staff Record Not Found'
+            : disabled
+            ? 'Account Currently Inactive'
+            : 'Restricted Staff Portal'}
+        </h1>
+        <p className="font-bn mt-1 text-xs text-[#78716C]">
           {needsVerification
             ? 'ইমেইল ভেরিফাই করুন'
             : adminDocMissing
@@ -188,13 +202,13 @@ function UnauthorizedAdminCard({
             : disabled
             ? 'অ্যাকাউন্ট নিষ্ক্রিয় রয়েছে'
             : 'অ্যাডমিন প্যানেল সংরক্ষিত'}
-        </h1>
-        <p className="mt-2 text-xs leading-relaxed text-[#57534E]">
+        </p>
+        <p className="mt-3 text-xs leading-relaxed text-[#57534E]">
           {needsVerification
-            ? `${email || 'Your account'} ইমেইলটি Firebase Authentication-এ এখনো verified নয়। অ্যাডমিন ড্যাশবোর্ডে প্রবেশের আগে ইমেইল ভেরিফিকেশন সম্পন্ন করুন।`
+            ? `${email || 'Your account'} is not yet verified in Firebase Authentication. Complete verification before entering the dashboard.`
             : adminDocMissing
-            ? `Firestore-এ admins/${uid || 'uid'} ডকুমেন্টটি পাওয়া যায়নি বা সক্রিয় নয়।`
-            : `${email || 'Current session'} অ্যাকাউন্টটির জন্য কোনো অনুমোদিত অ্যাডমিন বা সাপোর্ট অনুমতি নেই।`}
+            ? `No active staff record was found at admins/${uid || 'uid'}.`
+            : `${email || 'Current session'} does not have authorized admin or support permissions.`}
         </p>
         {notice && (
           <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-800">
@@ -226,7 +240,7 @@ function UnauthorizedAdminCard({
             href="/"
             className="rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold text-[#1C1917] hover:border-[#1C1917]"
           >
-            হোমপেজে ফিরে যান
+            Back to Home
           </a>
           <button
             type="button"
@@ -259,8 +273,9 @@ function MahmudLoginRoute() {
   if (!authReady || adminCheckLoading) {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center bg-[#FAFAF8] px-4 py-24 text-center">
-        <div className="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-[#E7E5E4] border-t-[#DC1F26]" />
-        <p className="mt-4 text-sm text-[#57534E]">সেশন যাচাই করা হচ্ছে...</p>
+        <div className="mx-auto h-9 w-9 animate-spin rounded-full border-2 border-[#E7E5E4] border-t-[#DC1F26]" />
+        <p className="mt-4 text-sm font-medium text-[#1C1917]">Verifying staff session...</p>
+        <p className="font-bn mt-0.5 text-xs text-[#78716C]">সেশন যাচাই করা হচ্ছে...</p>
       </div>
     );
   }
@@ -305,8 +320,9 @@ function ProtectedMahmudRoute() {
   if (!authReady || adminCheckLoading) {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center bg-[#FAFAF8] px-4 py-24 text-center">
-        <div className="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-[#E7E5E4] border-t-[#DC1F26]" />
-        <p className="mt-4 text-sm text-[#57534E]">অ্যাডমিন অনুমোদন যাচাই করা হচ্ছে...</p>
+        <div className="mx-auto h-9 w-9 animate-spin rounded-full border-2 border-[#E7E5E4] border-t-[#DC1F26]" />
+        <p className="mt-4 text-sm font-medium text-[#1C1917]">Verifying admin authorization...</p>
+        <p className="font-bn mt-0.5 text-xs text-[#78716C]">অ্যাডমিন অনুমোদন যাচাই করা হচ্ছে...</p>
       </div>
     );
   }

@@ -15,7 +15,7 @@ const NAV_LINKS = [
   { label: 'Categories', to: '/#categories' },
   { label: 'Occasions', to: '/#occasions' },
   { label: 'Our Outlets', to: '/outlets' },
-  { label: 'JobApplications', to: '/jobs' },
+  { label: 'Careers', to: '/jobs' },
   { label: 'Complaint', to: '/complaint' },
 ];
 
@@ -46,14 +46,14 @@ export function Header({ onOpenChat }: HeaderProps) {
   };
 
   const announcementText =
-    languageMode === 'en'
-      ? siteSettings.announcementEn || siteSettings.announcementBn
-      : siteSettings.announcementBn || siteSettings.announcementEn;
+    languageMode === 'bn'
+      ? siteSettings.announcementBn || siteSettings.announcementEn
+      : siteSettings.announcementEn || siteSettings.announcementBn;
 
   return (
     <div className="sticky top-0 z-40" data-sticky-header="true">
       {siteSettings.announcementEnabled && announcementText && (
-        <div className="bg-[#DC1F26] px-3 py-1 text-center text-[11px] font-semibold text-white sm:text-xs">
+        <div className="bg-[#DC1F26] px-3 py-1 text-center text-[11px] font-medium text-white sm:text-xs">
           {siteSettings.announcementLink ? (
             <Link to={siteSettings.announcementLink} className="hover:underline">
               {announcementText}
@@ -126,8 +126,8 @@ export function Header({ onOpenChat }: HeaderProps) {
                 type="search"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="পণ্য খুঁজুন..."
-                aria-label="পণ্য খুঁজুন"
+                placeholder="Search cakes, sweets..."
+                aria-label="Search products"
                 className="min-w-0 flex-1 bg-transparent text-xs text-[#FAFAF8] placeholder:text-[#A8A29E] focus:outline-none"
               />
               {searchQuery && (
@@ -144,7 +144,7 @@ export function Header({ onOpenChat }: HeaderProps) {
 
             <Link
               to="/products"
-              aria-label="পণ্য খুঁজুন"
+              aria-label="Search products"
               className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[#44403C] bg-[#292524] text-[#FAFAF8] transition-colors hover:border-[#FACC15] md:hidden"
             >
               <Search className="h-3.5 w-3.5" />
@@ -155,7 +155,7 @@ export function Header({ onOpenChat }: HeaderProps) {
               className="inline-flex h-8 shrink-0 items-center gap-1 whitespace-nowrap rounded-lg bg-[#DC1F26] px-2.5 text-[11px] font-semibold text-white transition-colors hover:bg-[#B91C1C] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#FACC15] sm:h-9 sm:gap-1.5 sm:px-3.5 sm:text-xs"
             >
               <MapPin className="h-3.5 w-3.5" />
-              <span>আমাদের শো-রুম</span>
+              <span>Our Outlets</span>
             </Link>
 
             <button

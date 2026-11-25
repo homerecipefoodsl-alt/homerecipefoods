@@ -1170,7 +1170,7 @@ export const SEED_HOMEPAGE_SECTIONS: HomepageSection[] = [
     title_bn: 'আমাদের শোরুমসমূহ',
     title_en: 'Our Showrooms',
     subtitle_bn: 'সরাসরি ভিজিট ও ক্রয়',
-    subtitle_en: 'আপনার নিকটস্থ শোরুম নির্বাচন করে ঠিকানা, সময়সূচি ও গুগল ম্যাপ লোকেশন দেখুন।',
+    subtitle_en: 'Select your nearest showroom for address, counter hours, and Google Maps directions.',
     ctaTextBn: 'সব শোরুম বিস্তারিত',
     ctaTextEn: 'All Showrooms',
     ctaLink: '/showrooms',
@@ -1185,7 +1185,7 @@ export const SEED_HOMEPAGE_SECTIONS: HomepageSection[] = [
     title_bn: 'অভিযোগ বক্স ও কাস্টমার সাপোর্ট',
     title_en: 'Private Complaint Box & Live Concierge',
     subtitle_bn: 'সরাসরি ম্যানেজমেন্টের সাথে যোগাযোগ করুন',
-    subtitle_en: 'Confidential management feedback and instant AI/representative support.',
+    subtitle_en: 'Confidential management feedback and instant concierge support.',
     status: 'published',
   },
 ];
@@ -1219,7 +1219,8 @@ export const SEED_SITE_SETTINGS: SiteSettings = {
   whatsappUrl: '',
   footerTextBn:
     'খাঁটি উপাদান, ঘরোয়া যত্ন ও আধুনিক বেকিং শিল্পের সমন্বয়ে তৈরি বাংলাদেশের অন্যতম প্রিমিয়াম ফুড ব্র্যান্ড। দেখুন, জানুন এবং সরাসরি আমাদের শোরুম থেকে সংগ্রহ করুন।',
-  footerTextEn: 'Showroom Purchase & Consultation Only · No Online Ordering',
+  footerTextEn:
+    'Artisanal cakes, pastries, breads, traditional sweets, and luxury Akd gift boxes crafted fresh daily across our Chattogram showrooms.',
   announcementEnabled: false,
   announcementBn: 'আমাদের সকল শোরুমে বিয়ে ও জন্মদিনের কাস্টম কেক বুকিং চলছে।',
   announcementEn: 'Custom wedding & birthday cake consultations available across all showrooms.',

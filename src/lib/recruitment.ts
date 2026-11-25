@@ -23,17 +23,48 @@ export const JOB_CATEGORY_PRESETS = [
   'অন্যান্য',
 ] as const;
 
-export const EMPLOYMENT_TYPE_OPTIONS: ReadonlyArray<{ value: string; labelBn: string }> = [
-  { value: 'Full-time', labelBn: 'পূর্ণকালীন (Full-time)' },
-  { value: 'Part-time', labelBn: 'খণ্ডকালীন (Part-time)' },
-  { value: 'Contractual', labelBn: 'চুক্তিভিত্তিক (Contractual)' },
-  { value: 'Shift-based', labelBn: 'শিফট ভিত্তিক (Shift-based)' },
+export const JOB_CATEGORY_LABELS_EN: Record<string, string> = {
+  'গোডাউন কর্মচারী': 'Warehouse & Store Staff',
+  'ডেলিভারি ম্যান': 'Delivery Executive',
+  'সেলসম্যান': 'Showroom Sales Associate',
+  'অফিস ম্যানেজমেন্ট': 'Office Management',
+  'অফিস সহকারী': 'Office Assistant',
+  'হিসাবরক্ষক': 'Accountant',
+  'কাস্টমার সার্ভিস': 'Customer Service',
+  'মার্কেটিং': 'Marketing',
+  'ডিজিটাল মার্কেটিং': 'Digital Marketing',
+  'প্যাকেজিং কর্মী': 'Packaging Staff',
+  'কুক / বেকারি কর্মী': 'Bakery & Kitchen Staff',
+  'ড্রাইভার': 'Driver',
+  'অন্যান্য': 'Other Roles',
+};
+
+export function getJobCategoryDisplay(category: string): { en: string; bn: string } {
+  const trimmed = (category || '').trim();
+  const en = JOB_CATEGORY_LABELS_EN[trimmed] || trimmed || 'General Role';
+  const bn = en !== trimmed ? trimmed : '';
+  return { en, bn };
+}
+
+export const EMPLOYMENT_TYPE_OPTIONS: ReadonlyArray<{
+  value: string;
+  labelEn: string;
+  labelBn: string;
+}> = [
+  { value: 'Full-time', labelEn: 'Full-time', labelBn: 'পূর্ণকালীন' },
+  { value: 'Part-time', labelEn: 'Part-time', labelBn: 'খণ্ডকালীন' },
+  { value: 'Contractual', labelEn: 'Contractual', labelBn: 'চুক্তিভিত্তিক' },
+  { value: 'Shift-based', labelEn: 'Shift-based', labelBn: 'শিফট ভিত্তিক' },
 ];
 
-export const SALARY_TYPE_OPTIONS: ReadonlyArray<{ value: string; labelBn: string }> = [
-  { value: 'Fixed', labelBn: 'নির্ধারিত বেতন (Fixed)' },
-  { value: 'Range', labelBn: 'বেতন পরিসীমা (Range)' },
-  { value: 'Negotiable', labelBn: 'আলোচনা সাপেক্ষে (Negotiable)' },
+export const SALARY_TYPE_OPTIONS: ReadonlyArray<{
+  value: string;
+  labelEn: string;
+  labelBn: string;
+}> = [
+  { value: 'Fixed', labelEn: 'Fixed Salary', labelBn: 'নির্ধারিত বেতন' },
+  { value: 'Range', labelEn: 'Salary Range', labelBn: 'বেতন পরিসীমা' },
+  { value: 'Negotiable', labelEn: 'Negotiable', labelBn: 'আলোচনা সাপেক্ষে' },
 ];
 
 export const APPLICATION_STATUS_OPTIONS: JobApplicationStatus[] = [
@@ -94,12 +125,12 @@ export const APPLICATION_STATUS_META: Record<
     badgeClass: 'bg-red-50 text-red-800 border-red-200',
   },
   'On Hold': {
-    labelBn: 'অপেক্ষমাণ (On Hold)',
+    labelBn: 'অপেক্ষমাণ',
     labelEn: 'On Hold',
     badgeClass: 'bg-stone-100 text-stone-700 border-stone-300',
   },
   Withdrawn: {
-    labelBn: 'প্রত্যাহারকৃত (Withdrawn)',
+    labelBn: 'প্রত্যাহারকৃত',
     labelEn: 'Withdrawn',
     badgeClass: 'bg-neutral-100 text-neutral-600 border-neutral-300',
   },
@@ -124,6 +155,23 @@ export function getJobWindowState(job: JobPosting, todayIso = getLocalTodayIso()
   return 'open';
 }
 
+export function getJobWindowLabelEn(state: JobWindowState): string {
+  switch (state) {
+    case 'open':
+      return 'Accepting Applications';
+    case 'upcoming':
+      return 'Opening Soon';
+    case 'expired':
+      return 'Deadline Passed';
+    case 'closed':
+      return 'Recruitment Closed';
+    case 'draft':
+      return 'Draft';
+    case 'hidden':
+      return 'Hidden';
+  }
+}
+
 export function getJobWindowLabelBn(state: JobWindowState): string {
   switch (state) {
     case 'open':
@@ -141,6 +189,21 @@ export function getJobWindowLabelBn(state: JobWindowState): string {
   }
 }
 
+const EN_MONTHS = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+];
+
 const BN_MONTHS = [
   'জানুয়ারি',
   'ফেব্রুয়ারি',
@@ -156,6 +219,15 @@ const BN_MONTHS = [
   'ডিসেম্বর',
 ];
 
+export function formatRecruitmentDateEn(isoDate?: string): string {
+  if (!isoDate || !/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) {
+    return isoDate || '—';
+  }
+  const [y, m, d] = isoDate.split('-').map(Number);
+  const monthName = EN_MONTHS[(m || 1) - 1] || '';
+  return `${String(d).padStart(2, '0')} ${monthName} ${y}`;
+}
+
 export function formatRecruitmentDateBn(isoDate?: string): string {
   if (!isoDate || !/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) {
     return isoDate || '—';
@@ -163,6 +235,11 @@ export function formatRecruitmentDateBn(isoDate?: string): string {
   const [y, m, d] = isoDate.split('-').map(Number);
   const monthName = BN_MONTHS[(m || 1) - 1] || '';
   return `${toBengaliDigits(d)} ${monthName}, ${toBengaliDigits(y)}`;
+}
+
+export function getEmploymentTypeEn(val: string): string {
+  const found = EMPLOYMENT_TYPE_OPTIONS.find((opt) => opt.value === val);
+  return found ? found.labelEn : val || 'Full-time';
 }
 
 export function getEmploymentTypeBn(val: string): string {
@@ -283,10 +360,10 @@ export function validatePhotoFile(file: File): string | null {
   const validExt = /\.(jpe?g|png)$/.test(nameLower);
   const validMime = ['image/jpeg', 'image/jpg', 'image/png'].includes(file.type);
   if (!validMime && !validExt) {
-    return 'প্রার্থীর ছবি শুধু JPG, JPEG অথবা PNG ফরম্যাটে আপলোড করুন।';
+    return 'Please upload the candidate photo in JPG, JPEG, or PNG format only.';
   }
   if (file.size > MAX_PHOTO_BYTES) {
-    return 'প্রার্থীর ছবির আকার সর্বোচ্চ ২ মেগাবাইট (2MB) হতে পারবে।';
+    return 'Candidate photo size must not exceed 2 MB.';
   }
   return null;
 }
@@ -303,10 +380,10 @@ export function validateDocumentFile(file: File): string | null {
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   ].includes(file.type);
   if (!validMime && !validExt) {
-    return 'ডকুমেন্ট শুধু PDF, DOC, DOCX, JPG বা PNG ফরম্যাটে আপলোড করুন।';
+    return 'Please upload documents in PDF, DOC, DOCX, JPG, or PNG format only.';
   }
   if (file.size > MAX_DOC_BYTES) {
-    return 'প্রতিটি ডকুমেন্টের আকার সর্বোচ্চ ৫ মেগাবাইট (5MB) হতে পারবে।';
+    return 'Each document file must not exceed 5 MB.';
   }
   return null;
 }
@@ -324,6 +401,6 @@ export async function uploadRecruitmentFile(
   _file: File
 ): Promise<string> {
   throw new Error(
-    'ডকুমেন্ট আপলোড সেবা বর্তমানে সংরক্ষিত স্টোরেজের সাথে সংযুক্ত হচ্ছে। অনুগ্রহ করে পরে আবার চেষ্টা করুন।'
+    'Document upload storage is currently being connected. Please try again shortly.'
   );
 }

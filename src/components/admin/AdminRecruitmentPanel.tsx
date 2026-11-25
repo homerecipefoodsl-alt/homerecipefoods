@@ -1213,7 +1213,9 @@ export function AdminRecruitmentPanel() {
       {subTab === 'circulars' && (
         <div className="space-y-4">
           {loading ? (
-            <div className="h-40 animate-pulse rounded-xl border border-[#E7E5E4] bg-white" />
+            <div className="flex h-40 items-center justify-center rounded-xl border border-[#E7E5E4] bg-white text-xs text-[#78716C]">
+              Loading job circulars...
+            </div>
           ) : visibleJobs.length === 0 ? (
             <div className="rounded-xl border border-[#E7E5E4] bg-white p-10 text-center">
               <p className="text-sm font-semibold text-[#1C1917]">

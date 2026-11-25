@@ -38,34 +38,36 @@ export function DynamicGreetingStrip() {
 
   return (
     <div className="border-b border-[#E7E5E4] bg-[#F5F4F0]">
-      <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-3 py-0.5 sm:px-6 sm:py-1 lg:px-8">
+      <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-3 py-1 sm:px-6 lg:px-8">
         <div className="relative flex min-h-[18px] flex-1 items-center overflow-hidden sm:min-h-[20px]">
           <AnimatePresence mode="wait">
             <motion.p
-              key={`${index}-${current.bn}-${current.en}`}
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4 }}
-              transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
-              className="truncate text-[11px] font-semibold tracking-wide text-[#1C1917] sm:text-xs"
+              key={`${index}-${current.en}-${current.bn}`}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.25 }}
+              className="truncate text-[11px] font-medium text-[#1C1917] sm:text-xs"
             >
               <span className="mr-1.5 text-[#DC1F26]" aria-hidden="true">
                 ·
               </span>
-              {current.bn && <span>{current.bn}</span>}
-              {current.bn && current.en && (
-                <span className="mx-1.5 text-[#A8A29E]" aria-hidden="true">
-                  |
+              {current.en && <span>{current.en}</span>}
+              {current.en && current.bn && (
+                <span className="mx-2 text-[#A8A29E]" aria-hidden="true">
+                  ·
                 </span>
               )}
-              {current.en && (
-                <span className="font-medium text-[#57534E]">{current.en}</span>
+              {current.bn && (
+                <span className="font-bn text-[10.5px] font-normal text-[#57534E] sm:text-[11px]">
+                  {current.bn}
+                </span>
               )}
             </motion.p>
           </AnimatePresence>
         </div>
         <span className="hidden shrink-0 text-[11px] font-medium text-[#57534E] sm:inline">
-          দেখুন · জানুন · শোরুমে আসুন
+          Browse · Explore · Visit Showrooms
         </span>
       </div>
     </div>

@@ -1,12 +1,12 @@
 {
-  "projectId": "ai-studio-applet-webapp-e4b0f",
-  "appId": "1:771532162522:web:8dfcecb6033932861cace3",
-  "apiKey": "AIzaSyDyYmuR3DdgwFpLQtAQpkkipq-blq9KsaU",
-  "authDomain": "ai-studio-applet-webapp-e4b0f.firebaseapp.com",
+  "projectId": "homerecipefoods",
+  "appId": "1:45658754633:web:f5ed9aa0adf10de3bc3998",
+  "apiKey": "AIzaSyALirhFTopDUiKLdvdtsUN3iCsBe5wmqUg",
+  "authDomain": "homerecipefoods.firebaseapp.com",
   "firestoreDatabaseId": "ai-studio-8e160dd1-e90f-4eac-89d5-fbd11fce8ac3",
-  "storageBucket": "ai-studio-applet-webapp-e4b0f.firebasestorage.app",
-  "messagingSenderId": "771532162522",
+  "storageBucket": "homerecipefoods.firebasestorage.app",
+  "messagingSenderId": "45658754633",
   "measurementId": "",
-  "oAuthClientId": "771532162522-e0tlkgttnpchmjjji0incqmlqjvs4i81.apps.googleusercontent.com",
+  "oAuthClientId": "45658754633-aqdchvieq5m3tqtqgnh45tb8814vgiru.apps.googleusercontent.com",
   "recaptchaSiteKey": ""
 }

@@ -1,5 +1,5 @@
 import { useNavigate, useLocation } from 'react-router-dom';
-import { Grid, Home, MapPin, MessageCircle, Search, Sparkles } from 'lucide-react';
+import { Calendar, Grid, Home, MapPin, MessageCircle, Search } from 'lucide-react';
 
 interface MobileBottomNavProps {
   onOpenChat: (mode?: 'ai' | 'human') => void;
@@ -19,7 +19,7 @@ export function MobileBottomNav({ onOpenChat }: MobileBottomNavProps) {
   return (
     <nav
       aria-label="Mobile Bottom Navigation"
-      className="fixed bottom-0 left-0 right-0 z-30 border-t border-[#E7E5E4] bg-[#FAFAF8]/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-md md:hidden"
+      className="fixed bottom-0 left-0 right-0 z-30 border-t border-[#E7E5E4] bg-[#FAFAF8] pb-[env(safe-area-inset-bottom)] md:hidden"
     >
       <div className="grid h-12 grid-cols-6 items-center">
         <button
@@ -58,7 +58,7 @@ export function MobileBottomNav({ onOpenChat }: MobileBottomNavProps) {
           onClick={() => goSection('occasions')}
           className="flex h-full cursor-pointer flex-col items-center justify-center gap-0.5 text-[10px] font-medium text-[#57534E]"
         >
-          <Sparkles className="h-4 w-4" />
+          <Calendar className="h-4 w-4" />
           <span>Occasions</span>
         </button>
 

@@ -9,7 +9,7 @@ export function ApplicationStatusPage() {
   const initialMobile = searchParams.get('mobile') || '';
 
   useEffect(() => {
-    document.title = 'আবেদনের অবস্থা যাচাই (Application Status) – Home Recipe Foods';
+    document.title = 'Application Status Tracker – Home Recipe Foods';
   }, []);
 
   return (
@@ -21,12 +21,12 @@ export function ApplicationStatusPage() {
             className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#57534E] transition-colors hover:text-[#DC1F26]"
           >
             <ArrowLeft className="h-4 w-4" />
-            <span>সব নিয়োগ বিজ্ঞপ্তি দেখুন</span>
+            <span>All Job Openings</span>
           </Link>
 
           <span className="inline-flex items-center gap-1.5 rounded-md border border-[#E7E5E4] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#57534E]">
             <ShieldCheck className="h-3.5 w-3.5 text-[#DC1F26]" />
-            <span>গোপনীয়তা সুরক্ষিত পোর্টাল</span>
+            <span>Privacy-Protected Portal</span>
           </span>
         </div>
 
@@ -36,19 +36,23 @@ export function ApplicationStatusPage() {
         />
 
         <div className="mt-6 rounded-2xl border border-[#E7E5E4] bg-white p-5 text-xs leading-relaxed text-[#57534E]">
-          <p className="font-bold text-[#1C1917]">গুরুত্বপূর্ণ তথ্য:</p>
+          <p className="font-bold text-[#1C1917]">Important Notes:</p>
           <ul className="mt-2 list-disc space-y-1 pl-4">
             <li>
-              আবেদন জমা দেওয়ার পর প্রাপ্ত Application ID (যেমন:{' '}
+              Enter the Application ID issued at submission (e.g.{' '}
               <span className="font-mono font-semibold text-[#1C1917]">
                 SN-JOB-2026-00001
               </span>
-              ) এবং আবেদনকৃত মোবাইল নম্বর দিয়ে এখানে স্ট্যাটাস দেখা যাবে।
+              ) together with your registered mobile number to verify your progress.
             </li>
             <li>
-              পরীক্ষা বা ইন্টারভিউয়ের সময়সূচি নির্ধারিত হলে তা এখানে প্রদর্শিত হবে এবং প্রয়োজনীয় নির্দেশনাসহ ফোনে যোগাযোগ করা হবে।
+              Once an assessment or interview schedule is confirmed, date, time, and showroom or
+              office venue details will appear here and you will be contacted by phone.
             </li>
           </ul>
+          <p className="font-bn mt-2.5 text-[11px] text-[#78716C]">
+            আবেদন নম্বর ও মোবাইল নম্বর দিয়ে বর্তমান অবস্থা, পরীক্ষা ও ইন্টারভিউয়ের সময়সূচি দেখা যাবে।
+          </p>
         </div>
       </div>
     </div>

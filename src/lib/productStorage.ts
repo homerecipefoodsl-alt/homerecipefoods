@@ -535,7 +535,19 @@ export async function uploadCatalogImageToStorage(params: {
     throw new Error('ছবি আপলোডের পর বৈধ Cloudflare R2 লিংক পাওয়া যায়নি।');
   }
 
-  const accessible = await verifyUploadedImageAccessible(downloadUrl);
+  let resolvedDownloadUrl = downloadUrl;
+  let accessible = await verifyUploadedImageAccessible(downloadUrl);
+  if (!accessible) {
+    const sameOriginFallbackUrl = `/api/media/file/${storagePath.replace(/^\/+/, '')}`;
+    if (downloadUrl !== sameOriginFallbackUrl) {
+      const sameOriginOk = await verifyUploadedImageAccessible(sameOriginFallbackUrl);
+      if (sameOriginOk) {
+        resolvedDownloadUrl = sameOriginFallbackUrl;
+        accessible = true;
+      }
+    }
+  }
+
   if (!accessible) {
     try {
       await deleteCatalogImageFromStorage({ storagePath, downloadUrl });
@@ -549,9 +561,9 @@ export async function uploadCatalogImageToStorage(params: {
 
   params.onProgress?.(100);
   return {
-    downloadUrl,
+    downloadUrl: resolvedDownloadUrl,
     storagePath,
-    imageUrl: downloadUrl,
+    imageUrl: resolvedDownloadUrl,
     imageKey: storagePath,
     fileName: preparedFile.name,
     sizeBytes: response.body.sizeBytes || preparedFile.size,

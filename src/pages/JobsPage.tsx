@@ -11,14 +11,15 @@ import {
 } from 'lucide-react';
 import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { ApplicationStatusTracker } from '../components/ApplicationStatusTracker';
+import { resolveBilingualPair } from '../lib/bilingual';
 import { OperationType, db, handleFirestoreError } from '../lib/firebase';
 import {
-  formatRecruitmentDateBn,
-  getEmploymentTypeBn,
-  getJobWindowLabelBn,
+  formatRecruitmentDateEn,
+  getEmploymentTypeEn,
+  getJobCategoryDisplay,
+  getJobWindowLabelEn,
   getJobWindowState,
 } from '../lib/recruitment';
-import { toBengaliDigits } from '../lib/utils';
 import type { JobPosting } from '../types';
 
 export function JobsPage() {
@@ -29,7 +30,7 @@ export function JobsPage() {
   const [employmentFilter, setEmploymentFilter] = useState('all');
 
   useEffect(() => {
-    document.title = 'নিয়োগ বিজ্ঞপ্তি ও ক্যারিয়ার – Home Recipe Foods';
+    document.title = 'Careers & Job Openings – Home Recipe Foods';
   }, []);
 
   useEffect(() => {
@@ -108,23 +109,25 @@ export function JobsPage() {
         <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6 sm:py-14 lg:px-8">
           <div className="max-w-3xl">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <span className="inline-flex items-center gap-1.5 rounded-md bg-[#FEFCE8] px-2.5 py-1 text-xs font-bold text-[#9A3412] border border-[#FDE047]">
+              <span className="inline-flex items-center gap-1.5 rounded-md border border-[#E7E5E4] bg-[#FAFAF8] px-2.5 py-1 text-xs font-semibold text-[#1C1917]">
                 <Briefcase className="h-3.5 w-3.5 text-[#DC1F26]" />
-                <span>ক্যারিয়ার ও নিয়োগ · Home Recipe Foods</span>
+                <span>Careers &amp; Recruitment · Home Recipe Foods</span>
               </span>
               <Link
                 to="/application-status"
                 className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 py-1.5 text-xs font-semibold text-[#1C1917] transition-colors hover:border-[#DC1F26] hover:text-[#DC1F26]"
               >
-                <span>আবেদনের অবস্থা যাচাই করুন</span>
+                <span>Check Application Status</span>
                 <ArrowRight className="h-3.5 w-3.5" />
               </Link>
             </div>
             <h1 className="font-display mt-3 text-3xl font-bold tracking-tight text-[#1C1917] sm:text-4xl lg:text-5xl">
-              আমাদের টিমে যোগ দিন
+              Join Our Team
             </h1>
-            <p className="mt-3 text-sm leading-relaxed text-[#57534E] sm:text-base">
-              Home Recipe Foods-এর বেকারি, শোরুম, ডেলিভারি, অফিস ম্যানেজমেন্ট ও অন্যান্য বিভাগে চলমান নিয়োগ বিজ্ঞপ্তিগুলো দেখুন এবং সরাসরি অনলাইনে আবেদন করুন।
+            <p className="font-bn mt-0.5 text-sm text-[#78716C]">আমাদের টিমে যোগ দিন</p>
+            <p className="mt-2.5 text-sm leading-relaxed text-[#57534E] sm:text-base">
+              Explore current openings across Home Recipe Foods bakeries, showrooms, delivery
+              operations, and management in Chattogram, and submit your application online.
             </p>
           </div>
 
@@ -136,7 +139,7 @@ export function JobsPage() {
                 type="search"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="পদের নাম, কর্মস্থল বা বিভাগ খুঁজুন..."
+                placeholder="Search role title, location, or department..."
                 className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] pl-10 pr-4 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
               />
             </div>
@@ -145,15 +148,18 @@ export function JobsPage() {
               <select
                 value={categoryFilter}
                 onChange={(e) => setCategoryFilter(e.target.value)}
-                aria-label="ক্যাটাগরি ফিল্টার"
+                aria-label="Filter by role category"
                 className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
               >
-                <option value="all">সব ক্যাটাগরি</option>
-                {availableCategories.map((cat) => (
-                  <option key={cat} value={cat}>
-                    {cat}
-                  </option>
-                ))}
+                <option value="all">All Categories</option>
+                {availableCategories.map((cat) => {
+                  const catInfo = getJobCategoryDisplay(cat);
+                  return (
+                    <option key={cat} value={cat}>
+                      {catInfo.bn ? `${catInfo.en} — ${catInfo.bn}` : catInfo.en}
+                    </option>
+                  );
+                })}
               </select>
             </div>
 
@@ -161,14 +167,14 @@ export function JobsPage() {
               <select
                 value={employmentFilter}
                 onChange={(e) => setEmploymentFilter(e.target.value)}
-                aria-label="চাকরির ধরন ফিল্টার"
+                aria-label="Filter by employment type"
                 className="min-h-[44px] w-full rounded-xl border border-[#D6D3D1] bg-[#FAFAF8] px-3.5 text-sm text-[#1C1917] focus:border-[#DC1F26] focus:bg-white focus:outline-none"
               >
-                <option value="all">সব কাজের ধরন</option>
-                <option value="Full-time">পূর্ণকালীন (Full-time)</option>
-                <option value="Part-time">খণ্ডকালীন (Part-time)</option>
-                <option value="Contractual">চুক্তিভিত্তিক (Contractual)</option>
-                <option value="Shift-based">শিফট ভিত্তিক (Shift-based)</option>
+                <option value="all">All Work Types</option>
+                <option value="Full-time">Full-time</option>
+                <option value="Part-time">Part-time</option>
+                <option value="Contractual">Contractual</option>
+                <option value="Shift-based">Shift-based</option>
               </select>
             </div>
           </div>
@@ -178,24 +184,31 @@ export function JobsPage() {
       {/* Main Content */}
       <div className="mx-auto max-w-7xl space-y-12 px-4 pt-8 sm:px-6 lg:px-8">
         {loading ? (
-          <div className="grid grid-cols-1 gap-5 md:grid-cols-2 lg:grid-cols-3">
-            {[1, 2, 3].map((idx) => (
-              <div
-                key={idx}
-                className="h-64 animate-pulse rounded-2xl border border-[#E7E5E4] bg-white p-6"
-              />
-            ))}
+          <div className="space-y-4">
+            <p className="text-xs font-medium text-[#78716C]">Loading job openings...</p>
+            <div className="grid grid-cols-1 gap-5 md:grid-cols-2 lg:grid-cols-3">
+              {[1, 2, 3].map((idx) => (
+                <div
+                  key={idx}
+                  className="h-64 rounded-2xl border border-[#E7E5E4] bg-white p-6"
+                />
+              ))}
+            </div>
           </div>
         ) : activeJobs.length === 0 ? (
           <div className="rounded-2xl border border-[#E7E5E4] bg-white px-6 py-14 text-center">
-            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-[#FAFAF8] text-[#DC1F26] border border-[#E7E5E4]">
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-[#E7E5E4] bg-[#FAFAF8] text-[#DC1F26]">
               <Briefcase className="h-6 w-6" />
             </div>
             <h2 className="font-display mt-4 text-2xl font-bold text-[#1C1917]">
-              বর্তমানে কোনো সক্রিয় নিয়োগ বিজ্ঞপ্তি নেই
+              No Active Job Openings Right Now
             </h2>
+            <p className="font-bn mt-1 text-xs text-[#78716C]">
+              বর্তমানে কোনো সক্রিয় নিয়োগ বিজ্ঞপ্তি নেই
+            </p>
             <p className="mx-auto mt-2 max-w-md text-sm text-[#57534E]">
-              নতুন কোনো পদের জন্য নিয়োগ বিজ্ঞপ্তি প্রকাশিত হলে এখানে দেখা যাবে। আপনি ইতিমধ্যে আবেদন করে থাকলে নিচের ফর্ম থেকে আপনার আবেদনের অবস্থা দেখতে পারেন।
+              New career openings will appear here as soon as they are published. If you have
+              already submitted an application, you can check your status below.
             </p>
             {(searchQuery || categoryFilter !== 'all' || employmentFilter !== 'all') && (
               <button
@@ -207,39 +220,47 @@ export function JobsPage() {
                 }}
                 className="mt-5 cursor-pointer rounded-xl border border-[#D6D3D1] px-4 py-2 text-xs font-semibold text-[#1C1917] hover:border-[#DC1F26]"
               >
-                ফিল্টার রিসেট করুন
+                Reset Filters
               </button>
             )}
           </div>
         ) : (
           <div>
             <div className="mb-5 flex items-center justify-between gap-3">
-              <h2 className="font-display text-xl font-bold text-[#1C1917] sm:text-2xl">
-                চলমান নিয়োগ বিজ্ঞপ্তি ({toBengaliDigits(activeJobs.length)})
-              </h2>
+              <div>
+                <h2 className="font-display text-xl font-bold text-[#1C1917] sm:text-2xl">
+                  Current Openings{' '}
+                  <span className="font-sans text-base font-medium tabular-nums text-[#78716C]">
+                    ({activeJobs.length})
+                  </span>
+                </h2>
+                <p className="font-bn text-xs text-[#78716C]">চলমান নিয়োগ বিজ্ঞপ্তি</p>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 gap-5 md:grid-cols-2 lg:grid-cols-3">
               {activeJobs.map((job) => {
                 const winState = getJobWindowState(job);
-                const statusLabel = getJobWindowLabelBn(winState);
+                const statusLabel = getJobWindowLabelEn(winState);
                 const isOpen = winState === 'open';
+                const catInfo = getJobCategoryDisplay(job.category);
+                const titlePair = resolveBilingualPair(job.titleEn, job.title);
 
                 return (
                   <article
                     key={job.id}
-                    className="flex flex-col justify-between rounded-2xl border border-[#E7E5E4] bg-white p-5 transition-all hover:border-[#D6D3D1] hover:shadow-md sm:p-6"
+                    className="flex flex-col justify-between rounded-2xl border border-[#E7E5E4] bg-white p-5 transition-colors hover:border-[#D6D3D1] sm:p-6"
                   >
                     <div>
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="rounded-md bg-[#FAFAF8] px-2.5 py-1 text-[11px] font-bold text-[#57534E] border border-[#E7E5E4]">
-                          {job.department ? `${job.department} · ${job.category}` : job.category}
+                        <span className="rounded-md border border-[#E7E5E4] bg-[#FAFAF8] px-2.5 py-1 text-[11px] font-semibold text-[#57534E]">
+                          {job.department ? `${job.department} · ${catInfo.en}` : catInfo.en}
                         </span>
                         <span
-                          className={`rounded-md px-2.5 py-1 text-[11px] font-bold ${
+                          className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold ${
                             isOpen
-                              ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                              : 'bg-amber-50 text-amber-800 border border-amber-200'
+                              ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                              : 'border-amber-200 bg-amber-50 text-amber-800'
                           }`}
                         >
                           {statusLabel}
@@ -251,12 +272,12 @@ export function JobsPage() {
                           to={`/jobs/${job.slug}`}
                           className="transition-colors hover:text-[#DC1F26]"
                         >
-                          {job.title}
+                          {titlePair.primary}
                         </Link>
                       </h3>
-                      {job.titleEn && (
-                        <p className="mt-0.5 text-xs font-medium text-[#78716C]">
-                          {job.titleEn}
+                      {titlePair.secondaryBn && (
+                        <p className="font-bn mt-0.5 text-xs font-medium text-[#78716C]">
+                          {titlePair.secondaryBn}
                         </p>
                       )}
                       {job.description && (
@@ -272,20 +293,20 @@ export function JobsPage() {
                         </p>
                         <p className="flex items-center gap-2">
                           <Clock className="h-3.5 w-3.5 shrink-0 text-[#78716C]" />
-                          <span>{getEmploymentTypeBn(job.employmentType)}</span>
+                          <span>{getEmploymentTypeEn(job.employmentType)}</span>
                         </p>
-                        <p className="flex items-center gap-2">
+                        <p className="flex items-center gap-2 tabular-nums">
                           <Users className="h-3.5 w-3.5 shrink-0 text-[#78716C]" />
                           <span>
-                            শূন্যপদ: {toBengaliDigits(job.vacancies)} জন · বেতন: {job.salary}
+                            Vacancies: {job.vacancies} · Salary: {job.salary}
                           </span>
                         </p>
                         <p className="flex items-center gap-2">
                           <CalendarClock className="h-3.5 w-3.5 shrink-0 text-[#DC1F26]" />
                           <span>
-                            শেষ তারিখ:{' '}
-                            <strong className="font-semibold text-[#1C1917]">
-                              {formatRecruitmentDateBn(job.deadline)}
+                            Deadline:{' '}
+                            <strong className="font-semibold tabular-nums text-[#1C1917]">
+                              {formatRecruitmentDateEn(job.deadline)}
                             </strong>
                           </span>
                         </p>
@@ -297,19 +318,19 @@ export function JobsPage() {
                         to={`/jobs/${job.slug}`}
                         className="inline-flex min-h-[42px] items-center justify-center rounded-xl border border-[#D6D3D1] bg-white px-3 text-xs font-semibold text-[#1C1917] transition-colors hover:border-[#1C1917]"
                       >
-                        বিস্তারিত দেখুন
+                        View Details
                       </Link>
                       {isOpen ? (
                         <Link
                           to={`/apply/${job.slug}`}
                           className="inline-flex min-h-[42px] items-center justify-center gap-1 rounded-xl bg-[#DC1F26] px-3 text-xs font-semibold text-white transition-colors hover:bg-[#B91C1C]"
                         >
-                          <span>আবেদন করুন</span>
+                          <span>Apply Now</span>
                           <ArrowRight className="h-3.5 w-3.5" />
                         </Link>
                       ) : (
                         <span className="inline-flex min-h-[42px] cursor-not-allowed items-center justify-center rounded-xl bg-[#F5F4F0] px-3 text-xs font-semibold text-[#78716C]">
-                          শুরু হয়নি
+                          Opening Soon
                         </span>
                       )}
                     </div>
@@ -320,41 +341,51 @@ export function JobsPage() {
           </div>
         )}
 
-        {/* Expired Circulars Archive Section ("আবেদন শেষ") */}
+        {/* Expired Circulars Archive Section */}
         {!loading && expiredJobs.length > 0 && (
           <section className="border-t border-[#E7E5E4] pt-8">
             <h2 className="font-display text-lg font-bold text-[#57534E] sm:text-xl">
-              আবেদন শেষ হওয়া পূর্বের বিজ্ঞপ্তি ({toBengaliDigits(expiredJobs.length)})
+              Previous Recruitment Circulars{' '}
+              <span className="font-sans text-sm font-medium tabular-nums">
+                ({expiredJobs.length})
+              </span>
             </h2>
             <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {expiredJobs.map((job) => (
-                <article
-                  key={job.id}
-                  className="rounded-2xl border border-[#E7E5E4] bg-white/80 p-5"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="rounded bg-[#F5F4F0] px-2 py-0.5 text-[11px] font-semibold text-[#57534E]">
-                      {job.category}
-                    </span>
-                    <span className="rounded bg-stone-100 px-2 py-0.5 text-[11px] font-bold text-stone-600">
-                      আবেদন শেষ
-                    </span>
-                  </div>
-                  <h3 className="font-display mt-2.5 text-lg font-bold text-[#1C1917]">
-                    {job.title}
-                  </h3>
-                  <p className="mt-1 text-xs text-[#78716C]">
-                    {job.workplace} · শেষ তারিখ: {formatRecruitmentDateBn(job.deadline)}
-                  </p>
-                  <Link
-                    to={`/jobs/${job.slug}`}
-                    className="mt-4 inline-flex items-center gap-1 text-xs font-semibold text-[#DC1F26] hover:underline"
+              {expiredJobs.map((job) => {
+                const catInfo = getJobCategoryDisplay(job.category);
+                const titlePair = resolveBilingualPair(job.titleEn, job.title);
+                return (
+                  <article
+                    key={job.id}
+                    className="rounded-2xl border border-[#E7E5E4] bg-white/80 p-5"
                   >
-                    <span>বিজ্ঞপ্তি দেখুন</span>
-                    <ArrowRight className="h-3.5 w-3.5" />
-                  </Link>
-                </article>
-              ))}
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="rounded bg-[#F5F4F0] px-2 py-0.5 text-[11px] font-semibold text-[#57534E]">
+                        {catInfo.en}
+                      </span>
+                      <span className="rounded bg-stone-100 px-2 py-0.5 text-[11px] font-semibold text-stone-600">
+                        Closed
+                      </span>
+                    </div>
+                    <h3 className="font-display mt-2.5 text-lg font-bold text-[#1C1917]">
+                      {titlePair.primary}
+                    </h3>
+                    {titlePair.secondaryBn && (
+                      <p className="font-bn text-xs text-[#78716C]">{titlePair.secondaryBn}</p>
+                    )}
+                    <p className="mt-1 text-xs tabular-nums text-[#78716C]">
+                      {job.workplace} · Deadline: {formatRecruitmentDateEn(job.deadline)}
+                    </p>
+                    <Link
+                      to={`/jobs/${job.slug}`}
+                      className="mt-4 inline-flex items-center gap-1 text-xs font-semibold text-[#DC1F26] hover:underline"
+                    >
+                      <span>View Circular</span>
+                      <ArrowRight className="h-3.5 w-3.5" />
+                    </Link>
+                  </article>
+                );
+              })}
             </div>
           </section>
         )}

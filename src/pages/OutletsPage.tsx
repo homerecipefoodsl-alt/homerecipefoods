@@ -4,7 +4,7 @@ import { useStore } from '../context/StoreContext';
 
 const OUTLETS_PAGE_TITLE = 'Home Recipe Foods – Our Outlets | Chattogram';
 const OUTLETS_META_DESC =
-  'Home Recipe Foods-এর চট্টগ্রামের শো-রুমসমূহের ঠিকানা, ফোন নম্বর, কাউন্টার সময় ও Google Maps তথ্য।';
+  'Explore Home Recipe Foods showroom addresses, counter hours, direct phone numbers, and Google Maps directions across Chattogram.';
 
 export function OutletsPage() {
   const { seoSettings } = useStore();

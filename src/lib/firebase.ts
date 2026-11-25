@@ -15,16 +15,17 @@ import {
 } from 'firebase/firestore';
 import firebaseAppletConfig from '../../firebase-applet-config.json';
 
-export const EXPECTED_FIREBASE_PROJECT_ID = 'ai-studio-applet-webapp-e4b0f';
+export const EXPECTED_FIREBASE_PROJECT_ID = 'homerecipefoods';
 
-const env = import.meta.env ?? ({} as Record<string, string | undefined>);
-
-const rawDatabaseUrl = (env.VITE_FIREBASE_DATABASE_URL || '').trim();
+const rawDatabaseUrl = (import.meta.env?.VITE_FIREBASE_DATABASE_URL || '').trim();
 const isValidRealtimeDbUrl = (() => {
   if (!rawDatabaseUrl) return false;
   try {
     const parsed = new URL(rawDatabaseUrl);
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return false;
+    }
+    return parsed.hostname.toLowerCase().includes(EXPECTED_FIREBASE_PROJECT_ID);
   } catch {
     return false;
   }
@@ -32,33 +33,53 @@ const isValidRealtimeDbUrl = (() => {
 
 if (rawDatabaseUrl && !isValidRealtimeDbUrl) {
   console.warn(
-    'Ignoring invalid VITE_FIREBASE_DATABASE_URL (expected https://... URL; for Firestore Database ID use VITE_FIREBASE_FIRESTORE_DATABASE_ID).'
+    `Ignoring VITE_FIREBASE_DATABASE_URL that does not match project ${EXPECTED_FIREBASE_PROJECT_ID}.`
   );
 }
 
+const appletProjectId = (firebaseAppletConfig.projectId || '').trim();
+const useAppletConfigFirst = appletProjectId === EXPECTED_FIREBASE_PROJECT_ID;
+const envDbId = (import.meta.env?.VITE_FIREBASE_FIRESTORE_DATABASE_ID || '').trim();
+const appletDbId = (firebaseAppletConfig.firestoreDatabaseId || '').trim();
+
 const rawConfig = {
-  apiKey: (env.VITE_FIREBASE_API_KEY || firebaseAppletConfig.apiKey || '').trim(),
+  apiKey: (
+    (useAppletConfigFirst ? firebaseAppletConfig.apiKey : '') ||
+    import.meta.env?.VITE_FIREBASE_API_KEY ||
+    firebaseAppletConfig.apiKey ||
+    ''
+  ).trim(),
   authDomain: (
-    env.VITE_FIREBASE_AUTH_DOMAIN ||
+    (useAppletConfigFirst ? firebaseAppletConfig.authDomain : '') ||
+    import.meta.env?.VITE_FIREBASE_AUTH_DOMAIN ||
     firebaseAppletConfig.authDomain ||
     ''
   ).trim(),
   projectId: (
-    env.VITE_FIREBASE_PROJECT_ID ||
+    (useAppletConfigFirst ? firebaseAppletConfig.projectId : '') ||
+    import.meta.env?.VITE_FIREBASE_PROJECT_ID ||
     firebaseAppletConfig.projectId ||
     ''
   ).trim(),
   messagingSenderId: (
-    env.VITE_FIREBASE_MESSAGING_SENDER_ID ||
+    (useAppletConfigFirst ? firebaseAppletConfig.messagingSenderId : '') ||
+    import.meta.env?.VITE_FIREBASE_MESSAGING_SENDER_ID ||
     firebaseAppletConfig.messagingSenderId ||
     ''
   ).trim(),
-  appId: (env.VITE_FIREBASE_APP_ID || firebaseAppletConfig.appId || '').trim(),
+  appId: (
+    (useAppletConfigFirst ? firebaseAppletConfig.appId : '') ||
+    import.meta.env?.VITE_FIREBASE_APP_ID ||
+    firebaseAppletConfig.appId ||
+    ''
+  ).trim(),
   databaseURL: isValidRealtimeDbUrl ? rawDatabaseUrl : '',
   firestoreDatabaseId: (
-    env.VITE_FIREBASE_FIRESTORE_DATABASE_ID ||
-    firebaseAppletConfig.firestoreDatabaseId ||
-    '(default)'
+    (useAppletConfigFirst && appletDbId && appletDbId !== '(default)'
+      ? appletDbId
+      : envDbId && envDbId !== '(default)'
+      ? envDbId
+      : appletDbId || envDbId || '(default)')
   ).trim(),
 };
 
@@ -147,7 +168,7 @@ export async function applyAuthPersistence(rememberSession: boolean): Promise<vo
 export function requireDb(): Firestore {
   if (!dbInstance) {
     throw new Error(
-      'Firebase Firestore is not configured for project ai-studio-applet-webapp-e4b0f.'
+      'Firebase Firestore is not configured for project homerecipefoods.'
     );
   }
   return dbInstance;
@@ -156,7 +177,7 @@ export function requireDb(): Firestore {
 export function requireAuth(): Auth {
   if (!authInstance) {
     throw new Error(
-      'Firebase Auth is not configured for project ai-studio-applet-webapp-e4b0f.'
+      'Firebase Auth is not configured for project homerecipefoods.'
     );
   }
   return authInstance;
