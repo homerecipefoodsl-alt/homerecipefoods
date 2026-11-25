@@ -127,6 +127,85 @@ function isWithinScheduleWindow(startDate?: string, endDate?: string): boolean {
   return true;
 }
 
+async function bootstrapPrimarySuperAdminDocs(
+  activeDb: NonNullable<typeof db>,
+  currentUser: User
+): Promise<AdminRecord | null> {
+  const emailLower = (currentUser.email || '').trim().toLowerCase();
+  if (!currentUser.emailVerified || emailLower !== PRIMARY_SUPER_ADMIN_EMAIL) {
+    return null;
+  }
+
+  const now = serverTimestamp();
+  const adminRef = doc(activeDb, 'admins', currentUser.uid);
+  const rbacRef = doc(activeDb, 'rbac_roles', PRIMARY_SUPER_ADMIN_EMAIL);
+  const usernameRef = doc(activeDb, 'admin_usernames', PRIMARY_SUPER_ADMIN_USERNAME);
+
+  try {
+    const existingAdmin = await getDoc(adminRef);
+    if (existingAdmin.exists()) {
+      return existingAdmin.data() as AdminRecord;
+    }
+
+    await setDoc(adminRef, {
+      uid: currentUser.uid,
+      email: PRIMARY_SUPER_ADMIN_EMAIL,
+      username: PRIMARY_SUPER_ADMIN_USERNAME,
+      display_name: currentUser.displayName || 'Mahmud (Primary Super Admin)',
+      role: 'primary_super_admin',
+      active: true,
+      isActive: true,
+      status: 'active',
+      permissions: DEFAULT_ROLE_PERMISSIONS.primary_super_admin,
+      created_by: 'primary-super-admin-bootstrap',
+      created_at: now,
+      updated_at: now,
+      last_login_at: now,
+    });
+
+    try {
+      const existingRbac = await getDoc(rbacRef);
+      if (!existingRbac.exists()) {
+        await setDoc(rbacRef, {
+          email: PRIMARY_SUPER_ADMIN_EMAIL,
+          uid: currentUser.uid,
+          username: PRIMARY_SUPER_ADMIN_USERNAME,
+          displayName: currentUser.displayName || 'Mahmud (Primary Super Admin)',
+          role: 'primary_super_admin',
+          status: 'active',
+          permissions: DEFAULT_ROLE_PERMISSIONS.primary_super_admin,
+          addedByEmail: PRIMARY_SUPER_ADMIN_EMAIL,
+          createdBy: 'primary-super-admin-bootstrap',
+          createdAt: now,
+          updatedAt: now,
+          lastLoginAt: now,
+        });
+      }
+    } catch {
+      // Non-fatal if rbac_roles already exists
+    }
+
+    try {
+      const existingUsername = await getDoc(usernameRef);
+      if (!existingUsername.exists()) {
+        await setDoc(usernameRef, {
+          username: PRIMARY_SUPER_ADMIN_USERNAME,
+          email: PRIMARY_SUPER_ADMIN_EMAIL,
+          active: true,
+          updatedAt: now,
+        });
+      }
+    } catch {
+      // Non-fatal if admin_usernames/mahmud already exists
+    }
+
+    const createdAdmin = await getDoc(adminRef);
+    return createdAdmin.exists() ? (createdAdmin.data() as AdminRecord) : null;
+  } catch {
+    return null;
+  }
+}
+
 function upsertMetaTag(attr: 'name' | 'property', key: string, content: string): void {
   if (!content || typeof document === 'undefined') return;
   let el = document.querySelector(`meta[${attr}="${key}"]`) as HTMLMetaElement | null;
@@ -611,12 +690,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         }
 
         // Server-side session-init: syncs custom claims for active staff or server-bootstraps
-        // primary super admin admins/{uid} via Admin SDK if FIREBASE_SERVICE_ACCOUNT_JSON is configured
+        // primary super admin admins/{uid} via Admin SDK if FIREBASE_SERVICE_ACCOUNT_JSON is configured,
+        // with a verified client create-only bootstrap fallback when server Admin SDK is unconfigured.
         if (
           (initialAuth.status === 'active' && initialAuth.role !== 'customer') ||
           (initialAuth.docMissing && emailLower === PRIMARY_SUPER_ADMIN_EMAIL)
         ) {
           void (async () => {
+            let bootstrapped = false;
             try {
               const idToken = await currentUser.getIdToken();
               const resp = await fetch('/api/auth/session-init', {
@@ -632,11 +713,24 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                   await currentUser.getIdToken(true);
                 }
                 if (payload.adminDocCreated) {
+                  bootstrapped = true;
                   setAuthRefreshTick((t) => t + 1);
                 }
               }
             } catch {
-              // Non-blocking claims/bootstrap sync
+              // Fall through to verified primary super admin bootstrap if needed
+            }
+
+            if (
+              !bootstrapped &&
+              initialAuth.docMissing &&
+              emailLower === PRIMARY_SUPER_ADMIN_EMAIL &&
+              currentUser.emailVerified
+            ) {
+              const createdDoc = await bootstrapPrimarySuperAdminDocs(activeDb, currentUser);
+              if (createdDoc) {
+                setAuthRefreshTick((t) => t + 1);
+              }
             }
           })();
         }
@@ -1617,7 +1711,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       // Non-fatal
     }
 
-    // Attempt server-side bootstrap via Admin SDK if admins/{uid} is missing for verified primary super admin
+    // Attempt server-side bootstrap via Admin SDK if admins/{uid} is missing for verified primary super admin,
+    // falling back to verified create-only client bootstrap when Admin SDK secret is not configured.
     if (!adminEntry && emailLower === PRIMARY_SUPER_ADMIN_EMAIL) {
       try {
         const idToken = await cred.user.getIdToken();
@@ -1636,7 +1731,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           }
         }
       } catch {
-        // Non-fatal
+        // Fall through to verified client bootstrap
+      }
+
+      if (!adminEntry && cred.user.emailVerified) {
+        adminEntry = await bootstrapPrimarySuperAdminDocs(db, cred.user);
       }
     }
 

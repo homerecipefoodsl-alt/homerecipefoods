@@ -994,8 +994,10 @@ service cloud.firestore {
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
         && (
-          (isPrimarySuperAdmin()
+          (hasVerifiedEmail()
+            && authEmail() == 'mdmahmudulhashan0@gmail.com'
             && emailKey == 'mdmahmudulhashan0@gmail.com'
+            && incoming().uid == request.auth.uid
             && incoming().role in ['primary_super_admin', 'super_admin']
             && incoming().status == 'active')
           ||
@@ -1152,11 +1154,24 @@ service cloud.firestore {
       allow create: if isValidId(adminUid)
         && isValidAdminRecord(incoming())
         && incoming().uid == adminUid
-        && adminUid != request.auth.uid
         && (
-          (isPrimarySuperAdmin() && incoming().role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent'])
-          || (isSuperAdmin() && incoming().role in ['admin', 'manager', 'support_agent'] && incoming().email != 'mdmahmudulhashan0@gmail.com')
-          || (hasPermission('manager_manage') && incoming().role == 'manager' && incoming().email != 'mdmahmudulhashan0@gmail.com')
+          (adminUid == request.auth.uid
+            && hasVerifiedEmail()
+            && authEmail() == 'mdmahmudulhashan0@gmail.com'
+            && incoming().email == 'mdmahmudulhashan0@gmail.com'
+            && incoming().role == 'primary_super_admin'
+            && incoming().active == true
+            && incoming().isActive == true
+            && incoming().status == 'active'
+            && incoming().created_at == request.time
+            && incoming().updated_at == request.time)
+          ||
+          (adminUid != request.auth.uid
+            && (
+              (isPrimarySuperAdmin() && incoming().role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent'])
+              || (isSuperAdmin() && incoming().role in ['admin', 'manager', 'support_agent'] && incoming().email != 'mdmahmudulhashan0@gmail.com')
+              || (hasPermission('manager_manage') && incoming().role == 'manager' && incoming().email != 'mdmahmudulhashan0@gmail.com')
+            ))
         );
       allow update: if isValidId(adminUid)
         && isValidAdminRecord(incoming())

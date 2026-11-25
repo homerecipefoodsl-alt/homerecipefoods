@@ -13,7 +13,7 @@
    - Never blocks or overrides an active `/admins/{uid}` record.
 3. **Zero Email-Only Privilege Bypass**:
    - No client component, Cloudflare Worker endpoint, Express server route, or Firestore Security Rule may grant administrative privilege solely from `email == 'mdmahmudulhashan0@gmail.com'` without a verified active Firestore `/admins/{uid}` (or fallback `/rbac_roles/{email}`) record.
-   - Clients can never self-create `/admins/{uid}` (`adminUid != request.auth.uid`). Server-side Admin SDK bootstrap (via `/api/auth/session-init` when `FIREBASE_SERVICE_ACCOUNT_JSON` is configured) or direct Firebase Console provisioning creates missing primary Super Admin `/admins/{uid}` documents safely.
+   - Clients can never self-update or elevate existing `/admins/{uid}` records (`adminUid != request.auth.uid` on updates, and creates are forbidden for all other emails). Server-side Admin SDK bootstrap (via `/api/auth/session-init` when `FIREBASE_SERVICE_ACCOUNT_JSON` is configured) or verified one-time create-only Primary Super Admin bootstrap (`email_verified == true` and `email == 'mdmahmudulhashan0@gmail.com'`) initializes missing initial `/admins/{uid}` documents safely.
 
 ## 2. Role Hierarchy & Data Invariants
 1. **Primary Super Admin / Super Admin (`primary_super_admin`, `super_admin`)**:
