@@ -1029,7 +1029,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             docItem.description_bn || docItem.description || seed?.description_bn || '',
           description_en:
             docItem.description_en || docItem.descriptionEn || seed?.description_en || '',
-          visible: docItem.visible !== false,
+          visible: docItem.visible !== false && docItem.active !== false,
+          active: docItem.active !== false && docItem.visible !== false,
           deleted: Boolean(docItem.deleted),
         } as Category;
       })
@@ -1037,7 +1038,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   }, [dbCategories]);
 
   const categories = useMemo(
-    () => allCategories.filter((c) => c.visible !== false && !c.deleted),
+    () =>
+      allCategories.filter(
+        (c) => c.visible !== false && c.active !== false && !c.deleted
+      ),
     [allCategories]
   );
 

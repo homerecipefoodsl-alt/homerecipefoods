@@ -63,28 +63,48 @@ service cloud.firestore {
       return rbacDoc().role;
     }
 
+    function isAdminRecordActive(d) {
+      return (!('uid' in d) || (d.uid is string && d.uid == request.auth.uid))
+        && (!('email' in d) || (d.email is string && d.email.trim().lower() == authEmail()))
+        && (('active' in d && d.active == true)
+          || ('isActive' in d && d.isActive == true)
+          || ('status' in d && d.status == 'active'))
+        && !('active' in d && d.active == false)
+        && !('isActive' in d && d.isActive == false)
+        && !('status' in d && d.status in ['disabled', 'suspended', 'inactive', 'revoked'])
+        && ('role' in d)
+        && d.role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent'];
+    }
+
+    function isRbacRecordActive(d) {
+      return (!('email' in d) || (d.email is string && d.email.trim().lower() == authEmail()))
+        && ('status' in d)
+        && d.status == 'active'
+        && ('role' in d)
+        && d.role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent'];
+    }
+
+    function hasRolePermission(d, perm) {
+      return d.role in ['primary_super_admin', 'super_admin']
+        || ('permissions' in d && d.permissions is list && perm in d.permissions)
+        || (!('permissions' in d) && d.role == 'admin' && perm in [
+          'dashboard_view', 'products_view', 'products_add', 'products_edit', 'products_delete',
+          'categories_manage', 'showrooms_manage', 'banners_manage', 'recruitment_manage', 'reports_view'
+        ])
+        || (!('permissions' in d) && d.role == 'manager' && perm in [
+          'dashboard_view', 'products_view', 'products_add', 'products_edit',
+          'categories_manage', 'showrooms_manage', 'complaints_manage', 'recruitment_manage', 'reports_view'
+        ])
+        || (!('permissions' in d) && d.role == 'support_agent' && perm in [
+          'dashboard_view', 'complaints_manage', 'chat_manage'
+        ]);
+    }
+
     // Primary Authoritative RBAC lookup in Firestore (/admins/{uid})
     function hasActiveAdminDoc() {
       return hasVerifiedEmail()
         && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
-        && (!('uid' in adminDoc()) || (adminDoc().uid is string && adminDoc().uid == request.auth.uid))
-        && (!('email' in adminDoc()) || (adminDoc().email is string && adminDoc().email.trim().lower() == authEmail()))
-        && (('active' in adminDoc() && adminDoc().active == true)
-          || ('isActive' in adminDoc() && adminDoc().isActive == true)
-          || ('status' in adminDoc() && adminDoc().status == 'active'))
-        && !('active' in adminDoc() && adminDoc().active == false)
-        && !('isActive' in adminDoc() && adminDoc().isActive == false)
-        && (
-          !('status' in adminDoc())
-          || adminDoc().status == 'active'
-          || (
-            (('active' in adminDoc() && adminDoc().active == true)
-              || ('isActive' in adminDoc() && adminDoc().isActive == true))
-            && !(adminDoc().status in ['disabled', 'suspended', 'inactive', 'revoked'])
-          )
-        )
-        && ('role' in adminDoc())
-        && adminDoc().role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent'];
+        && isAdminRecordActive(adminDoc());
     }
 
     // Legacy/Fallback RBAC role lookup in Firestore (/rbac_roles/{email})
@@ -93,11 +113,7 @@ service cloud.firestore {
       return hasVerifiedEmail()
         && !exists(/databases/$(database)/documents/admins/$(request.auth.uid))
         && exists(/databases/$(database)/documents/rbac_roles/$(authEmail()))
-        && (!('email' in rbacDoc()) || (rbacDoc().email is string && rbacDoc().email.trim().lower() == authEmail()))
-        && ('status' in rbacDoc())
-        && rbacDoc().status == 'active'
-        && ('role' in rbacDoc())
-        && rbacDoc().role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent'];
+        && isRbacRecordActive(rbacDoc());
     }
 
     function hasAnyActiveStaffDoc() {
@@ -124,41 +140,40 @@ service cloud.firestore {
     }
 
     function hasPermission(perm) {
-      return isSuperAdmin()
-        || (hasActiveAdminDoc() && (
-          ('permissions' in adminDoc() && adminDoc().permissions is list && perm in adminDoc().permissions)
-          || (!('permissions' in adminDoc()) && adminDoc().role == 'admin' && perm in [
-            'dashboard_view', 'products_view', 'products_add', 'products_edit', 'products_delete',
-            'categories_manage', 'showrooms_manage', 'banners_manage', 'recruitment_manage', 'reports_view'
-          ])
-          || (!('permissions' in adminDoc()) && adminDoc().role == 'manager' && perm in [
-            'dashboard_view', 'products_view', 'products_add', 'products_edit',
-            'categories_manage', 'showrooms_manage', 'complaints_manage', 'recruitment_manage', 'reports_view'
-          ])
-          || (!('permissions' in adminDoc()) && adminDoc().role == 'support_agent' && perm in [
-            'dashboard_view', 'complaints_manage', 'chat_manage'
-          ])
-        ))
-        || (hasActiveRbacDoc() && (
-          ('permissions' in rbacDoc() && rbacDoc().permissions is list && perm in rbacDoc().permissions)
-          || (!('permissions' in rbacDoc()) && rbacDoc().role == 'admin' && perm in [
-            'dashboard_view', 'products_view', 'products_add', 'products_edit', 'products_delete',
-            'categories_manage', 'showrooms_manage', 'banners_manage', 'recruitment_manage', 'reports_view'
-          ])
-          || (!('permissions' in rbacDoc()) && rbacDoc().role == 'manager' && perm in [
-            'dashboard_view', 'products_view', 'products_add', 'products_edit',
-            'categories_manage', 'showrooms_manage', 'complaints_manage', 'recruitment_manage', 'reports_view'
-          ])
-          || (!('permissions' in rbacDoc()) && rbacDoc().role == 'support_agent' && perm in [
-            'dashboard_view', 'complaints_manage', 'chat_manage'
-          ])
-        ));
+      return hasVerifiedEmail() && (
+        (exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+          && isAdminRecordActive(adminDoc())
+          && hasRolePermission(adminDoc(), perm))
+        || (!exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+          && exists(/databases/$(database)/documents/rbac_roles/$(authEmail()))
+          && isRbacRecordActive(rbacDoc())
+          && hasRolePermission(rbacDoc(), perm))
+      );
+    }
+
+    function hasCatalogWritePerm(perm) {
+      return hasVerifiedEmail() && (
+        (exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+          && adminDoc().get('active', false) == true
+          && adminDoc().get('isActive', true) != false
+          && !(adminDoc().get('status', '') in ['disabled', 'suspended', 'inactive', 'revoked'])
+          && adminDoc().get('email', authEmail()).trim().lower() == authEmail()
+          && (adminDoc().role in ['primary_super_admin', 'super_admin']
+            || (adminDoc().role in ['admin', 'manager']
+              && perm in adminDoc().get('permissions', ['products_add', 'products_edit', 'categories_manage']))))
+        || (!exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+          && exists(/databases/$(database)/documents/rbac_roles/$(authEmail()))
+          && rbacDoc().get('status', '') == 'active'
+          && rbacDoc().get('email', authEmail()).trim().lower() == authEmail()
+          && (rbacDoc().role in ['primary_super_admin', 'super_admin']
+            || (rbacDoc().role in ['admin', 'manager']
+              && perm in rbacDoc().get('permissions', ['products_add', 'products_edit', 'categories_manage']))))
+      );
     }
 
     function isCatalogAdmin() {
-      return isSuperAdmin()
-        || (hasActiveAdminDoc() && adminDoc().role in ['admin', 'manager'])
-        || (hasActiveRbacDoc() && rbacRole() in ['admin', 'manager']);
+      return (hasActiveAdminDoc() && adminDoc().role in ['primary_super_admin', 'super_admin', 'admin', 'manager'])
+        || (hasActiveRbacDoc() && rbacRole() in ['primary_super_admin', 'super_admin', 'admin', 'manager']);
     }
 
     function isSupportAgent() {
@@ -167,12 +182,11 @@ service cloud.firestore {
     }
 
     function isSupportStaff() {
-      return isSuperAdmin() || hasPermission('complaints_manage') || hasPermission('chat_manage');
+      return hasPermission('complaints_manage') || hasPermission('chat_manage');
     }
 
     function isRecruitmentStaff() {
-      return isSuperAdmin()
-        || hasPermission('recruitment_manage')
+      return hasPermission('recruitment_manage')
         || (hasActiveAdminDoc() && adminDoc().role == 'admin')
         || (hasActiveRbacDoc() && rbacRole() == 'admin');
     }
@@ -281,26 +295,27 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
           'description', 'descriptionEn', 'description_bn', 'description_en',
-          'image', 'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
+          'image', 'order', 'visible', 'active', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
           'createdAt', 'updatedAt'
         ])
         && isValidId(data.id)
         && data.name is string && data.name.size() >= 1 && data.name.size() <= 120
         && data.nameEn is string && data.nameEn.size() >= 1 && data.nameEn.size() <= 120
-        && (!('name_bn' in data) || (data.name_bn is string && data.name_bn.size() <= 120))
-        && (!('name_en' in data) || (data.name_en is string && data.name_en.size() <= 120))
+        && data.get('name_bn', '') is string && data.get('name_bn', '').size() <= 120
+        && data.get('name_en', '') is string && data.get('name_en', '').size() <= 120
         && isValidSlug(data.slug)
-        && (!('icon' in data) || (data.icon is string && data.icon.size() <= 40))
+        && data.get('icon', '') is string && data.get('icon', '').size() <= 40
         && data.description is string && data.description.size() >= 1 && data.description.size() <= 600
-        && (!('descriptionEn' in data) || (data.descriptionEn is string && data.descriptionEn.size() <= 600))
-        && (!('description_bn' in data) || (data.description_bn is string && data.description_bn.size() <= 600))
-        && (!('description_en' in data) || (data.description_en is string && data.description_en.size() <= 600))
+        && data.get('descriptionEn', '') is string && data.get('descriptionEn', '').size() <= 600
+        && data.get('description_bn', '') is string && data.get('description_bn', '').size() <= 600
+        && data.get('description_en', '') is string && data.get('description_en', '').size() <= 600
         && data.image is string && data.image.size() >= 1 && data.image.size() <= 500000
         && data.order is int && data.order >= 0 && data.order <= 1000
-        && (!('visible' in data) || data.visible is bool)
-        && (!('deleted' in data) || data.deleted is bool)
-        && (!('seoTitle' in data) || (data.seoTitle is string && data.seoTitle.size() <= 200))
-        && (!('seoDescription' in data) || (data.seoDescription is string && data.seoDescription.size() <= 400))
+        && data.get('visible', true) is bool
+        && data.get('active', true) is bool
+        && data.get('deleted', false) is bool
+        && data.get('seoTitle', '') is string && data.get('seoTitle', '').size() <= 200
+        && data.get('seoDescription', '') is string && data.get('seoDescription', '').size() <= 400
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -333,13 +348,79 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
-    function isValidProduct(data) {
+    function hasOnlyProductKeys(keys) {
+      return keys.removeAll([
+          'id', 'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
+          'category', 'categorySlug', 'categoryName', 'categoryNameEn', 'productType',
+          'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
+          'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
+          'description', 'descriptionEn', 'description_bn', 'description_en',
+          'image', 'imageUrl'
+        ]).removeAll([
+          'imageKey', 'images', 'masterKey', 'rating', 'stock', 'sku',
+          'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
+          'availability', 'importantNotes', 'featured', 'popular',
+          'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt',
+          'seoTitle', 'seoDescription', 'seoImage',
+          'createdBy', 'updatedBy', 'createdAt', 'updatedAt'
+        ]).size() == 0;
+    }
+
+    function isValidProductCore(data) {
       return data.keys().hasAll([
           'id', 'name', 'nameEn', 'slug', 'category', 'categoryName', 'productType',
           'price', 'priceUnit', 'shortDescription', 'description', 'images', 'ingredients',
           'sizes', 'weight', 'occasions', 'showrooms', 'availability', 'importantNotes',
           'featured', 'popular', 'createdAt', 'updatedAt'
         ])
+        && isValidId(data.id)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 160
+        && data.nameEn is string && data.nameEn.size() >= 1 && data.nameEn.size() <= 160
+        && isValidSlug(data.slug)
+        && isValidSlug(data.category)
+        && data.categoryName is string && data.categoryName.size() >= 1 && data.categoryName.size() <= 120
+        && data.productType is string && data.productType.size() >= 1 && data.productType.size() <= 120
+        && data.price is number && data.price >= 0 && data.price <= 1000000
+        && (!('old_price' in data) || (data.old_price is number && data.old_price >= 0 && data.old_price <= 1000000))
+        && data.priceUnit is string && data.priceUnit.size() >= 1 && data.priceUnit.size() <= 60;
+    }
+
+    function isValidProductDetails(data) {
+      return data.shortDescription is string && data.shortDescription.size() >= 1 && data.shortDescription.size() <= 300
+        && data.description is string && data.description.size() >= 1 && data.description.size() <= 4000
+        && (!('image' in data) || (data.image is string && data.image.size() <= 400000))
+        && (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 400000))
+        && (!('imageKey' in data) || (data.imageKey is string && data.imageKey.size() <= 320))
+        && isBoundedStringList(data.images, 6, 400000)
+        && (!('rating' in data) || (data.rating is number && data.rating >= 0 && data.rating <= 5))
+        && (!('stock' in data) || (data.stock is int && data.stock >= 0 && data.stock <= 1000000))
+        && data.ingredients is list && data.ingredients.size() <= 25
+        && data.sizes is list && data.sizes.size() <= 10
+        && data.weight is string && data.weight.size() <= 80
+        && data.occasions is list && data.occasions.size() <= 15
+        && data.showrooms is list && data.showrooms.size() <= 20;
+    }
+
+    function isValidProductMeta(data) {
+      return data.availability in ['In Showroom', 'Pre-Order at Showroom', 'Seasonal', 'Out of Stock']
+        && data.importantNotes is string && data.importantNotes.size() <= 800
+        && data.featured is bool
+        && data.popular is bool
+        && data.get('visible', true) is bool
+        && data.get('active', true) is bool
+        && data.get('isActive', true) is bool
+        && data.get('deleted', false) is bool
+        && data.get('status', 'published') in ['draft', 'published', 'archived']
+        && (!('display_order' in data) || (data.display_order is int && data.display_order >= 0 && data.display_order <= 10000))
+        && (!('seoImage' in data) || (data.seoImage is string && data.seoImage.size() <= 400000))
+        && (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 254))
+        && (!('updatedBy' in data) || (data.updatedBy is string && data.updatedBy.size() <= 254))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidProduct(data) {
+      return isValidProductCore(data)
         && data.keys().hasOnly([
           'id', 'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
           'category', 'categorySlug', 'categoryName', 'categoryNameEn', 'productType',
@@ -349,67 +430,12 @@ service cloud.firestore {
           'image', 'imageUrl', 'imageKey', 'images', 'masterKey', 'rating', 'stock', 'sku',
           'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
           'availability', 'importantNotes', 'featured', 'popular',
-          'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription', 'seoImage',
+          'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt',
+          'seoTitle', 'seoDescription', 'seoImage',
           'createdBy', 'updatedBy', 'createdAt', 'updatedAt'
         ])
-        && isValidId(data.id)
-        && data.name is string && data.name.size() >= 1 && data.name.size() <= 160
-        && (!('nameBn' in data) || (data.nameBn is string && data.nameBn.size() <= 160))
-        && data.nameEn is string && data.nameEn.size() >= 1 && data.nameEn.size() <= 160
-        && (!('name_bn' in data) || (data.name_bn is string && data.name_bn.size() <= 160))
-        && (!('name_en' in data) || (data.name_en is string && data.name_en.size() <= 160))
-        && isValidSlug(data.slug)
-        && isValidSlug(data.category)
-        && (!('categorySlug' in data) || (data.categorySlug is string && data.categorySlug.size() <= 160))
-        && data.categoryName is string && data.categoryName.size() >= 1 && data.categoryName.size() <= 120
-        && (!('categoryNameEn' in data) || (data.categoryNameEn is string && data.categoryNameEn.size() <= 120))
-        && data.productType is string && data.productType.size() >= 1 && data.productType.size() <= 120
-        && data.price is number && data.price >= 0 && data.price <= 1000000
-        && (!('old_price' in data) || (data.old_price is number && data.old_price >= 0 && data.old_price <= 1000000))
-        && (!('discount' in data) || (data.discount is string && data.discount.size() <= 60))
-        && (!('price_label' in data) || (data.price_label is string && data.price_label.size() <= 80))
-        && data.priceUnit is string && data.priceUnit.size() >= 1 && data.priceUnit.size() <= 60
-        && (!('unit' in data) || (data.unit is string && data.unit.size() <= 60))
-        && data.shortDescription is string && data.shortDescription.size() >= 1 && data.shortDescription.size() <= 300
-        && (!('shortDescriptionEn' in data) || (data.shortDescriptionEn is string && data.shortDescriptionEn.size() <= 300))
-        && (!('short_description_bn' in data) || (data.short_description_bn is string && data.short_description_bn.size() <= 300))
-        && (!('short_description_en' in data) || (data.short_description_en is string && data.short_description_en.size() <= 300))
-        && data.description is string && data.description.size() >= 1 && data.description.size() <= 4000
-        && (!('descriptionEn' in data) || (data.descriptionEn is string && data.descriptionEn.size() <= 4000))
-        && (!('description_bn' in data) || (data.description_bn is string && data.description_bn.size() <= 4000))
-        && (!('description_en' in data) || (data.description_en is string && data.description_en.size() <= 4000))
-        && (!('image' in data) || (data.image is string && data.image.size() <= 400000))
-        && (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 400000))
-        && (!('imageKey' in data) || (data.imageKey is string && data.imageKey.size() <= 320))
-        && isBoundedStringList(data.images, 6, 400000)
-        && (!('masterKey' in data) || (data.masterKey is string && data.masterKey.size() <= 240))
-        && (!('rating' in data) || (data.rating is number && data.rating >= 0 && data.rating <= 5))
-        && (!('stock' in data) || (data.stock is int && data.stock >= 0 && data.stock <= 1000000))
-        && (!('sku' in data) || (data.sku is string && data.sku.size() <= 80))
-        && isBoundedStringList(data.ingredients, 25, 120)
-        && (!('ingredients_bn' in data) || (data.ingredients_bn is string && data.ingredients_bn.size() <= 600))
-        && (!('ingredients_en' in data) || (data.ingredients_en is string && data.ingredients_en.size() <= 600))
-        && isBoundedStringList(data.sizes, 10, 80)
-        && data.weight is string && data.weight.size() <= 80
-        && isBoundedStringList(data.occasions, 15, 80)
-        && isBoundedStringList(data.showrooms, 20, 128)
-        && data.availability in ['In Showroom', 'Pre-Order at Showroom', 'Seasonal', 'Out of Stock']
-        && data.importantNotes is string && data.importantNotes.size() <= 800
-        && data.featured is bool
-        && data.popular is bool
-        && (!('visible' in data) || data.visible is bool)
-        && (!('active' in data) || data.active is bool)
-        && (!('isActive' in data) || data.isActive is bool)
-        && (!('deleted' in data) || data.deleted is bool)
-        && (!('status' in data) || data.status in ['draft', 'published', 'archived'])
-        && (!('display_order' in data) || (data.display_order is int && data.display_order >= 0 && data.display_order <= 10000))
-        && (!('seoTitle' in data) || (data.seoTitle is string && data.seoTitle.size() <= 200))
-        && (!('seoDescription' in data) || (data.seoDescription is string && data.seoDescription.size() <= 400))
-        && (!('seoImage' in data) || (data.seoImage is string && data.seoImage.size() <= 400000))
-        && (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 254))
-        && (!('updatedBy' in data) || (data.updatedBy is string && data.updatedBy.size() <= 254))
-        && data.createdAt is timestamp
-        && data.updatedAt is timestamp;
+        && isValidProductDetails(data)
+        && isValidProductMeta(data);
     }
 
     function isValidShowroom(data) {
@@ -1200,13 +1226,13 @@ service cloud.firestore {
     match /categories/{categoryId} {
       allow get: if isValidId(categoryId);
       allow list: if true;
-      allow create: if hasPermission('categories_manage')
+      allow create: if hasCatalogWritePerm('categories_manage')
         && isValidId(categoryId)
         && isValidCategory(incoming())
         && incoming().id == categoryId
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if hasPermission('categories_manage')
+      allow update: if hasCatalogWritePerm('categories_manage')
         && isValidId(categoryId)
         && isValidCategory(incoming())
         && (
@@ -1218,35 +1244,23 @@ service cloud.firestore {
           ('createdAt' in existing()
             && existing().createdAt is timestamp
             && incoming().createdAt == existing().createdAt
-            && incoming().diff(existing()).addedKeys().hasOnly([
+            && incoming().diff(existing()).affectedKeys().hasOnly([
               'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
               'description', 'descriptionEn', 'description_bn', 'description_en',
-              'image', 'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
-              'updatedAt'
-            ])
-            && incoming().diff(existing()).changedKeys().hasOnly([
-              'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
-              'description', 'descriptionEn', 'description_bn', 'description_en',
-              'image', 'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
+              'image', 'order', 'visible', 'active', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
               'updatedAt'
             ]))
           ||
           ((!('createdAt' in existing()) || !(existing().createdAt is timestamp))
             && incoming().createdAt == request.time
-            && incoming().diff(existing()).addedKeys().hasOnly([
+            && incoming().diff(existing()).affectedKeys().hasOnly([
               'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
               'description', 'descriptionEn', 'description_bn', 'description_en',
-              'image', 'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
-              'createdAt', 'updatedAt'
-            ])
-            && incoming().diff(existing()).changedKeys().hasOnly([
-              'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
-              'description', 'descriptionEn', 'description_bn', 'description_en',
-              'image', 'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
+              'image', 'order', 'visible', 'active', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
               'createdAt', 'updatedAt'
             ]))
         );
-      allow delete: if hasPermission('categories_manage') && isValidId(categoryId);
+      allow delete: if hasCatalogWritePerm('categories_manage') && isValidId(categoryId);
     }
 
     match /occasions/{occasionId} {
@@ -1304,13 +1318,13 @@ service cloud.firestore {
     match /products/{productId} {
       allow get: if isValidId(productId);
       allow list: if true;
-      allow create: if hasPermission('products_add')
+      allow create: if hasCatalogWritePerm('products_add')
         && isValidId(productId)
         && isValidProduct(incoming())
         && incoming().id == productId
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if hasPermission('products_edit')
+      allow update: if hasCatalogWritePerm('products_edit')
         && isValidId(productId)
         && isValidProduct(incoming())
         && (
@@ -1327,58 +1341,10 @@ service cloud.firestore {
         && (
           ('createdAt' in existing()
             && existing().createdAt is timestamp
-            && incoming().createdAt == existing().createdAt
-            && incoming().diff(existing()).addedKeys().hasOnly([
-              'id', 'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
-              'category', 'categorySlug', 'categoryName', 'categoryNameEn', 'productType',
-              'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
-              'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
-              'description', 'descriptionEn', 'description_bn', 'description_en',
-              'image', 'imageUrl', 'imageKey', 'images', 'masterKey', 'rating', 'stock', 'sku',
-              'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
-              'availability', 'importantNotes', 'featured', 'popular',
-              'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription', 'seoImage',
-              'createdBy', 'updatedBy', 'updatedAt'
-            ])
-            && incoming().diff(existing()).changedKeys().hasOnly([
-              'id', 'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
-              'category', 'categorySlug', 'categoryName', 'categoryNameEn', 'productType',
-              'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
-              'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
-              'description', 'descriptionEn', 'description_bn', 'description_en',
-              'image', 'imageUrl', 'imageKey', 'images', 'masterKey', 'rating', 'stock', 'sku',
-              'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
-              'availability', 'importantNotes', 'featured', 'popular',
-              'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription', 'seoImage',
-              'createdBy', 'updatedBy', 'updatedAt'
-            ]))
+            && incoming().createdAt == existing().createdAt)
           ||
           ((!('createdAt' in existing()) || !(existing().createdAt is timestamp))
-            && incoming().createdAt == request.time
-            && incoming().diff(existing()).addedKeys().hasOnly([
-              'id', 'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
-              'category', 'categorySlug', 'categoryName', 'categoryNameEn', 'productType',
-              'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
-              'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
-              'description', 'descriptionEn', 'description_bn', 'description_en',
-              'image', 'imageUrl', 'imageKey', 'images', 'masterKey', 'rating', 'stock', 'sku',
-              'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
-              'availability', 'importantNotes', 'featured', 'popular',
-              'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription', 'seoImage',
-              'createdBy', 'updatedBy', 'createdAt', 'updatedAt'
-            ])
-            && incoming().diff(existing()).changedKeys().hasOnly([
-              'id', 'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
-              'category', 'categorySlug', 'categoryName', 'categoryNameEn', 'productType',
-              'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
-              'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
-              'description', 'descriptionEn', 'description_bn', 'description_en',
-              'image', 'imageUrl', 'imageKey', 'images', 'masterKey', 'rating', 'stock', 'sku',
-              'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
-              'availability', 'importantNotes', 'featured', 'popular',
-              'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription', 'seoImage',
-              'createdBy', 'updatedBy', 'createdAt', 'updatedAt'
-            ]))
+            && incoming().createdAt == request.time)
         );
       allow delete: if hasPermission('products_delete') && isValidId(productId);
     }

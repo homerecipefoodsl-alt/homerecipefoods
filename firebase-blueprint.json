@@ -94,11 +94,13 @@
         "name_bn": { "type": "string", "minLength": 0, "maxLength": 120 },
         "name_en": { "type": "string", "minLength": 0, "maxLength": 120 },
         "slug": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9\\-]+$" },
+        "icon": { "type": "string", "minLength": 0, "maxLength": 40 },
         "description": { "type": "string", "minLength": 1, "maxLength": 600 },
         "descriptionEn": { "type": "string", "minLength": 0, "maxLength": 600 },
         "image": { "type": "string", "minLength": 1, "maxLength": 500000 },
         "order": { "type": "integer" },
         "visible": { "type": "boolean" },
+        "active": { "type": "boolean" },
         "deleted": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }

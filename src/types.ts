@@ -245,6 +245,7 @@ export interface Category {
   image: string;
   order: number;
   visible?: boolean;
+  active?: boolean;
   deleted?: boolean;
   archivedAt?: unknown;
   seoTitle?: string;

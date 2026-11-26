@@ -48,7 +48,13 @@ import {
   getShowroomText,
   resolveBilingualPair,
 } from '../../lib/bilingual';
-import { OperationType, auth, handleFirestoreError, requireDb } from '../../lib/firebase';
+import {
+  OperationType,
+  auth,
+  firebasePublicInfo,
+  handleFirestoreError,
+  requireDb,
+} from '../../lib/firebase';
 import {
   deleteCatalogImageFromStorage,
   extractR2ImageKey,
@@ -142,7 +148,7 @@ const PRODUCT_OPTIONAL_BOOL_KEYS = ['visible', 'active', 'isActive', 'deleted'] 
 const ALLOWED_CATEGORY_KEYS = new Set<string>([
   'id', 'name', 'nameEn', 'name_bn', 'name_en', 'slug', 'icon',
   'description', 'descriptionEn', 'description_bn', 'description_en',
-  'image', 'order', 'visible', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
+  'image', 'order', 'visible', 'active', 'deleted', 'archivedAt', 'seoTitle', 'seoDescription',
   'createdAt', 'updatedAt',
 ]);
 
@@ -681,7 +687,9 @@ function isExistingCategoryDocRuleReady(data: Record<string, unknown> | undefine
   ) {
     return false;
   }
+  if ('icon' in data && (typeof data.icon !== 'string' || data.icon.length > 40)) return false;
   if ('visible' in data && typeof data.visible !== 'boolean') return false;
+  if ('active' in data && typeof data.active !== 'boolean') return false;
   if ('deleted' in data && typeof data.deleted !== 'boolean') return false;
   return true;
 }
@@ -776,6 +784,8 @@ function mapCatalogSaveError(
   err: unknown,
   context: string,
   diag?: {
+    collection?: string;
+    documentId?: string;
     path?: string;
     operation?: string;
     staffRole?: string | null;
@@ -791,27 +801,37 @@ function mapCatalogSaveError(
   const rawMessage = err instanceof Error ? err.message : String(err);
   const lowerMessage = rawMessage.toLowerCase();
   const activeUser = auth?.currentUser;
+  const resolvedCollection =
+    diag?.collection ?? (diag?.path ? diag.path.split('/')[0] : null);
+  const resolvedDocumentId =
+    diag?.documentId ??
+    (diag?.path && diag.path.includes('/') ? diag.path.split('/').slice(1).join('/') : null);
+  const resolvedAdminRole =
+    diag?.authSession?.rbacRole ?? diag?.staffRole ?? null;
 
   const safeDiag = {
-    code: rawCode || 'unknown',
+    errorCode: rawCode || 'unknown',
     message: rawMessage,
+    projectId: firebasePublicInfo.projectId,
+    collection: resolvedCollection,
+    documentId: resolvedDocumentId,
+    path: diag?.path ?? null,
+    operation: diag?.operation ?? null,
     uid: diag?.authSession?.uid ?? activeUser?.uid ?? null,
     email: diag?.authSession?.email ?? activeUser?.email ?? null,
     emailVerified: diag?.authSession?.emailVerified ?? activeUser?.emailVerified ?? null,
     tokenEmailVerified: diag?.authSession?.tokenEmailVerified ?? null,
-    claimsRole: diag?.authSession?.claimsRole ?? null,
-    hrfStaffClaim: diag?.authSession?.hrfStaffClaim ?? null,
+    adminRole: resolvedAdminRole,
     rbacSource: diag?.authSession?.rbacSource ?? null,
-    rbacRole: diag?.authSession?.rbacRole ?? null,
     rbacStatus: diag?.authSession?.rbacStatus ?? null,
-    staffRole: diag?.staffRole ?? null,
-    path: diag?.path ?? null,
-    operation: diag?.operation ?? null,
     existingIssues: diag?.existingIssues ?? [],
     preflightIssues: diag?.preflightIssues ?? [],
   };
 
   console.error(`[CatalogSave:${context}]`, safeDiag);
+  const categoryPrefix = context.startsWith('category_')
+    ? 'Category could not be saved. '
+    : '';
 
   if (
     rawCode === 'auth/unauthenticated' ||
@@ -867,8 +887,8 @@ function mapCatalogSaveError(
       safeDiag.operation && safeDiag.path ? `${safeDiag.operation} ${safeDiag.path}` : null,
       safeDiag.email ? `user:${safeDiag.email}` : null,
       `verified:${String(safeDiag.emailVerified)}/${String(safeDiag.tokenEmailVerified)}`,
-      safeDiag.rbacRole
-        ? `rbac:${safeDiag.rbacRole}(${safeDiag.rbacSource})`
+      safeDiag.adminRole
+        ? `rbac:${safeDiag.adminRole}(${safeDiag.rbacSource || 'admins'})`
         : safeDiag.rbacSource
         ? `rbac:${safeDiag.rbacSource}`
         : null,
@@ -880,7 +900,7 @@ function mapCatalogSaveError(
         : null,
     ].filter(Boolean);
     const diagSuffix = diagParts.length > 0 ? ` [${diagParts.join(' · ')}]` : '';
-    return `Firestore সংরক্ষণের অনুমতি দেয়নি (permission-denied)। অ্যাডমিন অ্যাকাউন্ট যাচাই, Firestore Security Rules অথবা পণ্যের আবশ্যকীয় ফিল্ড যাচাই করে আবার চেষ্টা করুন।${diagSuffix}`;
+    return `${categoryPrefix}Firestore সংরক্ষণের অনুমতি দেয়নি (permission-denied)। অ্যাডমিন অ্যাকাউন্ট যাচাই, Firestore Security Rules অথবা আবশ্যকীয় ফিল্ড যাচাই করে আবার চেষ্টা করুন।${diagSuffix}`;
   }
   if (rawCode === 'failed-precondition' || rawCode.endsWith('/failed-precondition')) {
     return 'Firestore-এর পূর্বশর্ত পূরণ হয়নি (failed-precondition)। অনুগ্রহ করে ডাটাবেসের অবস্থা বা ইনডেক্স যাচাই করুন।';
@@ -909,9 +929,9 @@ function mapCatalogSaveError(
     return 'ইন্টারনেট বা সার্ভার সংযোগের কারণে সংরক্ষণ করা যায়নি (unavailable)। অনুগ্রহ করে আবার চেষ্টা করুন।';
   }
   if (err instanceof Error && rawCode === '' && rawMessage) {
-    return rawMessage;
+    return `${categoryPrefix}${rawMessage}`;
   }
-  return `সংরক্ষণে ত্রুটি হয়েছে (${rawCode || 'unknown'})। অনুগ্রহ করে তথ্যগুলো যাচাই করে আবার চেষ্টা করুন।`;
+  return `${categoryPrefix}সংরক্ষণে ত্রুটি হয়েছে (${rawCode || 'unknown'})। অনুগ্রহ করে তথ্যগুলো যাচাই করে আবার চেষ্টা করুন।`;
 }
 
 interface EditorImageSlot {
@@ -4003,10 +4023,30 @@ export function AdminProductsPanel() {
 // ========================
 // 2. CATEGORY MANAGEMENT
 // ========================
+const CATEGORY_ICON_PRESETS = [
+  '🎂',
+  '🍰',
+  '🥖',
+  '🥐',
+  '🍪',
+  '🍮',
+  '🍯',
+  '🍔',
+  '🥟',
+  '🧁',
+  '🍩',
+  '✨',
+] as const;
+
+function normalizeCategoryCompare(value: string | undefined | null): string {
+  return (value ?? '').normalize('NFC').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
 export function AdminCategoriesPanel() {
   const { allCategories, staffRole, hasPermission, logAdminActivity } = useStore();
   const [editing, setEditing] = useState<Category | null>(null);
   const [isNew, setIsNew] = useState(false);
+  const [catSaving, setCatSaving] = useState(false);
   const [catUploading, setCatUploading] = useState(false);
   const [catUploadPct, setCatUploadPct] = useState<number | null>(null);
   const [catPreviewUrl, setCatPreviewUrl] = useState<string | null>(null);
@@ -4023,6 +4063,7 @@ export function AdminCategoriesPanel() {
       name_bn: '',
       name_en: '',
       slug: '',
+      icon: '',
       description: '',
       descriptionEn: '',
       description_bn: '',
@@ -4030,6 +4071,8 @@ export function AdminCategoriesPanel() {
       image: '/src/assets/images/hero_bakery_clean_1794746110066.jpg',
       order: allCategories.length + 1,
       visible: true,
+      active: true,
+      deleted: false,
     });
   };
 
@@ -4047,8 +4090,9 @@ export function AdminCategoriesPanel() {
     setCatUploading(true);
     setCatUploadPct(0);
     setMsg(null);
+    let authSession: VerifiedWriteSession | null = null;
     try {
-      await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'categories_manage',
       });
@@ -4064,14 +4108,19 @@ export function AdminCategoriesPanel() {
       setEditing((prev) => (prev ? { ...prev, image: result.downloadUrl } : null));
       setMsg({
         type: 'success',
-        text: 'ছবি সফলভাবে যুক্ত হয়েছে। স্থায়ী করতে "সংরক্ষণ" বাটনে ক্লিক করুন।',
+        text: 'ছবি সফলভাবে যুক্ত হয়েছে। স্থায়ী করতে "Save Category" বাটনে ক্লিক করুন।',
       });
     } catch (err) {
       setMsg({
         type: 'error',
         text:
           err instanceof CatalogAuthError
-            ? mapCatalogSaveError(err, 'category_upload_auth', { staffRole })
+            ? mapCatalogSaveError(err, 'category_upload_auth', {
+                collection: 'categories',
+                documentId: editing.id,
+                staffRole,
+                authSession,
+              })
             : err instanceof Error && err.message
             ? err.message
             : 'ছবি সংরক্ষণ করা যাচ্ছে না। অনুগ্রহ করে আবার চেষ্টা করুন।',
@@ -4086,42 +4135,121 @@ export function AdminCategoriesPanel() {
 
   const saveCategory = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editing) return;
-    const nameBn = editing.name.trim().slice(0, 120);
-    const nameEn = editing.nameEn.trim().slice(0, 120);
-    if (!nameBn) {
-      setMsg({ type: 'error', text: 'অনুগ্রহ করে বাংলা নাম লিখুন।' });
+    if (!editing || catSaving) return;
+
+    const rawNameEn = editing.nameEn.trim().slice(0, 120);
+    const rawNameBn = editing.name.trim().slice(0, 120);
+    if (!rawNameEn && !rawNameBn) {
+      setMsg({
+        type: 'error',
+        text: 'Category could not be saved. Please enter a Category Name (English or বাংলা).',
+      });
       return;
     }
-    if (!nameEn) {
-      setMsg({ type: 'error', text: 'অনুগ্রহ করে English Name লিখুন।' });
-      return;
-    }
+    const nameEn = rawNameEn || rawNameBn;
+    const nameBn = rawNameBn || rawNameEn;
+
     if (catUploading) {
       setMsg({ type: 'error', text: 'ছবি আপলোড সম্পন্ন হওয়া পর্যন্ত অনুগ্রহ করে অপেক্ষা করুন।' });
       return;
     }
     if (isForbiddenInlineImageUrl(editing.image)) {
-      setMsg({ type: 'error', text: 'অবৈধ ছবির ফরম্যাট পাওয়া গেছে। অনুগ্রহ করে ছবিটি পুনরায় আপলোড করুন।' });
+      setMsg({
+        type: 'error',
+        text: 'অবৈধ ছবির ফরম্যাট পাওয়া গেছে। অনুগ্রহ করে ছবিটি পুনরায় আপলোড করুন।',
+      });
       return;
     }
 
     const slug = toSlug(editing.slug.trim() || nameEn || nameBn);
+    if (!/^[a-z0-9-]{1,160}$/.test(slug)) {
+      setMsg({
+        type: 'error',
+        text: 'Category could not be saved. Invalid category slug generated.',
+      });
+      return;
+    }
+
+    // Duplicate check across non-deleted categories (excluding self on edit)
+    const duplicate = allCategories.find((cat) => {
+      if (cat.deleted) return false;
+      if (!isNew && cat.id === editing.id) return false;
+      const existingEn = normalizeCategoryCompare(cat.nameEn || cat.name_en);
+      const existingBn = normalizeCategoryCompare(cat.name || cat.name_bn);
+      const candidateEn = normalizeCategoryCompare(nameEn);
+      const candidateBn = normalizeCategoryCompare(nameBn);
+      return (
+        cat.slug === slug ||
+        (candidateEn.length > 0 && existingEn === candidateEn) ||
+        (candidateBn.length > 0 && existingBn === candidateBn)
+      );
+    });
+    if (duplicate) {
+      setMsg({
+        type: 'error',
+        text: `Category could not be saved. A category matching "${duplicate.nameEn || duplicate.name}" (${duplicate.slug}) already exists.`,
+      });
+      return;
+    }
+
     const descEn = (editing.descriptionEn ?? '').trim().slice(0, 600);
-    const descBn = (editing.description.trim() || descEn || nameBn).slice(0, 600);
+    const descBn = (editing.description.trim() || descEn || nameBn || nameEn).slice(0, 600);
+    const iconVal = (editing.icon ?? '').trim().slice(0, 40);
     const rawOrder = Number(editing.order);
     const safeOrder = Number.isFinite(rawOrder)
       ? Math.min(1000, Math.max(0, Math.round(rawOrder)))
       : 1;
+    const isVisible = editing.visible !== false && editing.active !== false;
+
+    setCatSaving(true);
+    setMsg(null);
+    let authSession: VerifiedWriteSession | null = null;
+    let targetDocId = editing.id;
 
     try {
-      await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'categories_manage',
       });
       const firestore = requireDb();
-      const catRef = doc(firestore, 'categories', editing.id);
-      const existingSnap = await getDoc(catRef);
+
+      if (isNew) {
+        const rawCandidate = slug.startsWith('cat-') ? slug : `cat-${slug}`;
+        const cleanCandidate = rawCandidate.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 128);
+        const existingIds = new Set(allCategories.map((c) => c.id));
+        if (
+          cleanCandidate &&
+          /^[a-zA-Z0-9_-]{1,128}$/.test(cleanCandidate) &&
+          !existingIds.has(cleanCandidate)
+        ) {
+          targetDocId = cleanCandidate;
+        } else {
+          targetDocId = /^[a-zA-Z0-9_-]{1,128}$/.test(editing.id)
+            ? editing.id
+            : `cat-${Date.now()}`;
+        }
+      }
+
+      if (!/^[a-zA-Z0-9_-]{1,128}$/.test(targetDocId)) {
+        throw new CatalogAuthError(
+          'validation/invalid-category-id',
+          'Generated category document ID is invalid.'
+        );
+      }
+
+      let catRef = doc(firestore, 'categories', targetDocId);
+      let existingSnap = await getDoc(catRef);
+
+      // Never overwrite an existing category when creating a new category
+      if (isNew && existingSnap.exists()) {
+        targetDocId = `${targetDocId.slice(0, 110)}-${Date.now().toString(36)}`;
+        catRef = doc(firestore, 'categories', targetDocId);
+        existingSnap = await getDoc(catRef);
+        if (existingSnap.exists()) {
+          throw new Error('A category with this ID already exists. Please retry.');
+        }
+      }
+
       const existingData = existingSnap.exists()
         ? (existingSnap.data() as Record<string, unknown>)
         : undefined;
@@ -4130,7 +4258,7 @@ export function AdminCategoriesPanel() {
         typeof existingData.id === 'string' &&
         /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
           ? existingData.id
-          : editing.id;
+          : targetDocId;
 
       const payload: Record<string, unknown> = {
         id: preservedValidId,
@@ -4139,13 +4267,15 @@ export function AdminCategoriesPanel() {
         name_bn: nameBn,
         name_en: nameEn,
         slug,
+        icon: iconVal,
         description: descBn,
         descriptionEn: descEn,
         description_bn: descBn,
         description_en: descEn,
         image: (editing.image || '/src/assets/images/hero_bakery_clean_1794746110066.jpg').trim(),
         order: safeOrder,
-        visible: editing.visible !== false,
+        visible: isVisible,
+        active: isVisible,
         deleted: Boolean(editing.deleted),
         updatedAt: serverTimestamp(),
       };
@@ -4155,7 +4285,7 @@ export function AdminCategoriesPanel() {
           ...payload,
           createdAt: serverTimestamp(),
         });
-        await logAdminActivity('create', 'categories', editing.id, nameEn);
+        await logAdminActivity('create', 'categories', targetDocId, nameEn);
       } else if (getUnknownKeys(existingData!, ALLOWED_CATEGORY_KEYS).length > 0) {
         await setDoc(catRef, {
           ...payload,
@@ -4163,7 +4293,7 @@ export function AdminCategoriesPanel() {
             ? existingData!.createdAt
             : serverTimestamp(),
         });
-        await logAdminActivity('update', 'categories', editing.id, nameEn);
+        await logAdminActivity('update', 'categories', targetDocId, nameEn);
       } else {
         await updateDoc(
           catRef,
@@ -4171,7 +4301,7 @@ export function AdminCategoriesPanel() {
             ? payload
             : { ...payload, createdAt: serverTimestamp() }
         );
-        await logAdminActivity('update', 'categories', editing.id, nameEn);
+        await logAdminActivity('update', 'categories', targetDocId, nameEn);
       }
       setEditing(null);
       setMsg({ type: 'success', text: 'ক্যাটাগরি সফলভাবে সংরক্ষণ হয়েছে।' });
@@ -4179,22 +4309,30 @@ export function AdminCategoriesPanel() {
       setMsg({
         type: 'error',
         text: mapCatalogSaveError(err, 'category_save', {
-          path: `categories/${editing.id}`,
+          collection: 'categories',
+          documentId: targetDocId,
+          path: `categories/${targetDocId}`,
           operation: isNew ? 'CREATE' : 'UPDATE',
           staffRole,
+          authSession,
         }),
       });
-      try {
-        handleFirestoreError(err, OperationType.WRITE, `categories/${editing.id}`);
-      } catch {
-        // Logged for console diagnostics
+      if (import.meta.env.DEV) {
+        try {
+          handleFirestoreError(err, OperationType.WRITE, `categories/${targetDocId}`);
+        } catch {
+          // Logged for console diagnostics
+        }
       }
+    } finally {
+      setCatSaving(false);
     }
   };
 
   const toggleCategoryVisibility = async (cat: Category) => {
+    let authSession: VerifiedWriteSession | null = null;
     try {
-      await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'categories_manage',
       });
@@ -4204,12 +4342,15 @@ export function AdminCategoriesPanel() {
       const existingData = existingSnap.exists()
         ? (existingSnap.data() as Record<string, unknown>)
         : undefined;
+      const currentlyVisible = cat.visible !== false && cat.active !== false;
+      const nextVisible = !currentlyVisible;
       if (
         existingSnap.exists() &&
         isExistingCategoryDocRuleReady(existingData)
       ) {
         await updateDoc(catRef, {
-          visible: cat.visible === false,
+          visible: nextVisible,
+          active: nextVisible,
           updatedAt: serverTimestamp(),
         });
       } else {
@@ -4227,13 +4368,15 @@ export function AdminCategoriesPanel() {
           name_bn: ct.nameBn.slice(0, 120),
           name_en: (ct.nameEn || ct.nameBn).slice(0, 120),
           slug: toSlug(cat.slug || ct.nameEn || ct.nameBn),
-          description: (ct.descriptionBn || ct.nameBn).slice(0, 600),
+          icon: (cat.icon ?? '').trim().slice(0, 40),
+          description: (ct.descriptionBn || ct.nameBn || ct.nameEn).slice(0, 600),
           descriptionEn: ct.descriptionEn.slice(0, 600),
-          description_bn: (ct.descriptionBn || ct.nameBn).slice(0, 600),
+          description_bn: (ct.descriptionBn || ct.nameBn || ct.nameEn).slice(0, 600),
           description_en: ct.descriptionEn.slice(0, 600),
           image: cat.image || '/src/assets/images/hero_bakery_clean_1794746110066.jpg',
           order: Math.min(1000, Math.max(0, Math.round(Number(cat.order) || 1))),
-          visible: cat.visible === false,
+          visible: nextVisible,
+          active: nextVisible,
           deleted: Boolean(cat.deleted),
           updatedAt: serverTimestamp(),
         };
@@ -4255,21 +4398,31 @@ export function AdminCategoriesPanel() {
           );
         }
       }
+      await logAdminActivity(
+        nextVisible ? 'show' : 'hide',
+        'categories',
+        cat.id,
+        cat.nameEn || cat.name
+      );
     } catch (err) {
       setMsg({
         type: 'error',
         text: mapCatalogSaveError(err, 'category_visibility', {
+          collection: 'categories',
+          documentId: cat.id,
           path: `categories/${cat.id}`,
           operation: 'UPDATE',
           staffRole,
+          authSession,
         }),
       });
     }
   };
 
   const removeCategory = async (id: string) => {
+    let authSession: VerifiedWriteSession | null = null;
     try {
-      await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'categories_manage',
       });
@@ -4281,9 +4434,12 @@ export function AdminCategoriesPanel() {
       setMsg({
         type: 'error',
         text: mapCatalogSaveError(err, 'category_delete', {
+          collection: 'categories',
+          documentId: id,
           path: `categories/${id}`,
           operation: 'DELETE',
           staffRole,
+          authSession,
         }),
       });
     }
@@ -4297,7 +4453,7 @@ export function AdminCategoriesPanel() {
             Category Management
           </h2>
           <p className="text-xs text-[#57534E]">
-            Add or edit English &amp; Bengali category titles, descriptions, storefront visibility, and sort order.
+            Add or edit English &amp; Bengali category titles, optional icons, descriptions, active visibility, and sort order.
           </p>
         </div>
         <button
@@ -4329,21 +4485,10 @@ export function AdminCategoriesPanel() {
           className="grid grid-cols-1 gap-4 rounded-xl border border-[#D6D3D1] bg-white p-5 sm:grid-cols-2"
         >
           <div>
-            <label className="mb-1 block text-xs font-semibold">Name (বাংলা) *</label>
-            <input
-              type="text"
-              value={editing.name}
-              onChange={(e) =>
-                setEditing({ ...editing, name: e.target.value, name_bn: e.target.value })
-              }
-              placeholder="যেমন: কাস্টমাইজ কেক"
-              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
-            />
-          </div>
-          <div>
             <label className="mb-1 block text-xs font-semibold">Name (English) *</label>
             <input
               type="text"
+              maxLength={120}
               value={editing.nameEn}
               onChange={(e) =>
                 setEditing({ ...editing, nameEn: e.target.value, name_en: e.target.value })
@@ -4353,15 +4498,106 @@ export function AdminCategoriesPanel() {
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs font-semibold">Order</label>
+            <label className="mb-1 block text-xs font-semibold">Name (বাংলা)</label>
+            <input
+              type="text"
+              maxLength={120}
+              value={editing.name}
+              onChange={(e) =>
+                setEditing({ ...editing, name: e.target.value, name_bn: e.target.value })
+              }
+              placeholder="যেমন: কাস্টমাইজ কেক"
+              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold">Display Order</label>
             <input
               type="number"
+              min={0}
+              max={1000}
               value={editing.order}
               onChange={(e) => setEditing({ ...editing, order: Number(e.target.value) })}
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
             />
           </div>
           <div>
+            <label className="mb-1 block text-xs font-semibold">
+              Category Icon (Optional)
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                maxLength={40}
+                value={editing.icon ?? ''}
+                onChange={(e) => setEditing({ ...editing, icon: e.target.value })}
+                placeholder="e.g. 🍰 or leave blank"
+                className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+              />
+              {editing.icon && (
+                <button
+                  type="button"
+                  onClick={() => setEditing({ ...editing, icon: '' })}
+                  className="shrink-0 cursor-pointer rounded-lg border border-[#D6D3D1] px-2.5 py-2 text-xs font-semibold text-[#57534E] hover:border-[#1C1917] hover:text-[#1C1917]"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              {CATEGORY_ICON_PRESETS.map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => setEditing({ ...editing, icon: preset })}
+                  className={`cursor-pointer rounded border px-1.5 py-0.5 text-xs transition-colors ${
+                    editing.icon === preset
+                      ? 'border-[#DC1F26] bg-red-50'
+                      : 'border-[#E7E5E4] bg-[#FAFAF8] hover:border-[#1C1917]'
+                  }`}
+                >
+                  {preset}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold">
+              Description (English)
+            </label>
+            <textarea
+              rows={2}
+              maxLength={600}
+              value={editing.descriptionEn ?? ''}
+              onChange={(e) =>
+                setEditing({
+                  ...editing,
+                  descriptionEn: e.target.value,
+                  description_en: e.target.value,
+                })
+              }
+              placeholder="English description"
+              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold">Description (বাংলা)</label>
+            <textarea
+              rows={2}
+              maxLength={600}
+              value={editing.description}
+              onChange={(e) =>
+                setEditing({
+                  ...editing,
+                  description: e.target.value,
+                  description_bn: e.target.value,
+                })
+              }
+              placeholder="বাংলা বিবরণ"
+              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+            />
+          </div>
+          <div className="sm:col-span-2">
             <label className="mb-1 block text-xs font-semibold">
               Category Image (JPG, PNG, WEBP, or GIF · Max 5 MB)
             </label>
@@ -4394,59 +4630,36 @@ export function AdminCategoriesPanel() {
               )}
             </div>
           </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold">Description (বাংলা)</label>
-            <textarea
-              rows={2}
-              value={editing.description}
-              onChange={(e) =>
-                setEditing({
-                  ...editing,
-                  description: e.target.value,
-                  description_bn: e.target.value,
-                })
-              }
-              placeholder="বাংলা বিবরণ"
-              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold">Description (English)</label>
-            <textarea
-              rows={2}
-              value={editing.descriptionEn ?? ''}
-              onChange={(e) =>
-                setEditing({
-                  ...editing,
-                  descriptionEn: e.target.value,
-                  description_en: e.target.value,
-                })
-              }
-              placeholder="English description"
-              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
-            />
-          </div>
           <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-semibold sm:col-span-2">
             <input
               type="checkbox"
-              checked={editing.visible !== false}
-              onChange={(e) => setEditing({ ...editing, visible: e.target.checked })}
+              checked={editing.visible !== false && editing.active !== false}
+              onChange={(e) =>
+                setEditing({
+                  ...editing,
+                  visible: e.target.checked,
+                  active: e.target.checked,
+                })
+              }
             />
-            <span>Visible on Storefront</span>
+            <span>Active &amp; Visible on Storefront</span>
           </label>
           <div className="flex justify-end gap-2 sm:col-span-2">
             <button
               type="button"
+              disabled={catSaving || catUploading}
               onClick={() => setEditing(null)}
-              className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold"
+              className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold disabled:opacity-50"
             >
               Cancel
             </button>
             <button
               type="submit"
-              className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C]"
+              disabled={catSaving || catUploading}
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-[#DC1F26] px-5 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C] disabled:opacity-50"
             >
-              Save Category
+              {catSaving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              <span>{catSaving ? 'Saving...' : 'Save Category'}</span>
             </button>
           </div>
         </form>
@@ -4457,11 +4670,12 @@ export function AdminCategoriesPanel() {
           const ct = getCategoryText(cat);
           const namePair = resolveBilingualPair(ct.nameEn, ct.nameBn);
           const descPair = resolveBilingualPair(ct.descriptionEn, ct.descriptionBn);
+          const isCatVisible = cat.visible !== false && cat.active !== false;
           return (
             <div
               key={cat.id}
               className={`flex flex-col overflow-hidden rounded-xl border bg-white ${
-                cat.visible === false ? 'border-amber-300 opacity-75' : 'border-[#E7E5E4]'
+                !isCatVisible ? 'border-amber-300 opacity-75' : 'border-[#E7E5E4]'
               }`}
             >
               <img
@@ -4473,10 +4687,11 @@ export function AdminCategoriesPanel() {
                 <div>
                   <div className="flex items-center justify-between text-xs text-[#78716C]">
                     <span className="tabular-nums">Order #{cat.order}</span>
-                    <span>{cat.visible === false ? 'Hidden' : cat.slug}</span>
+                    <span>{!isCatVisible ? 'Hidden / Inactive' : cat.slug}</span>
                   </div>
-                  <h3 className="font-display mt-1 text-xl font-bold text-[#1C1917]">
-                    {namePair.primary}
+                  <h3 className="font-display mt-1 flex items-center gap-1.5 text-xl font-bold text-[#1C1917]">
+                    {cat.icon && <span aria-hidden="true">{cat.icon}</span>}
+                    <span>{namePair.primary}</span>
                   </h3>
                   {namePair.secondaryBn && (
                     <p className="font-bn text-xs font-medium text-[#78716C]">
@@ -4498,7 +4713,7 @@ export function AdminCategoriesPanel() {
                     onClick={() => toggleCategoryVisibility(cat)}
                     className="cursor-pointer rounded-md border border-[#E7E5E4] px-2.5 py-1 text-xs font-medium text-[#57534E]"
                   >
-                    {cat.visible === false ? 'Show' : 'Hide'}
+                    {!isCatVisible ? 'Show' : 'Hide'}
                   </button>
                   <button
                     type="button"
@@ -4511,10 +4726,13 @@ export function AdminCategoriesPanel() {
                         nameEn: ct.nameEn,
                         name_bn: ct.nameBn,
                         name_en: ct.nameEn,
+                        icon: cat.icon ?? '',
                         description: ct.descriptionBn,
                         descriptionEn: ct.descriptionEn,
                         description_bn: ct.descriptionBn,
                         description_en: ct.descriptionEn,
+                        visible: isCatVisible,
+                        active: isCatVisible,
                       });
                     }}
                     className="cursor-pointer rounded-md border border-[#E7E5E4] px-3 py-1 text-xs font-medium hover:border-[#DC1F26]"
