@@ -188,9 +188,17 @@ function getApplicantDateIso(app: JobApplication): string {
   return '';
 }
 
-export function AdminRecruitmentPanel() {
+export function AdminRecruitmentPanel({
+  initialSubTab = 'overview',
+}: {
+  initialSubTab?: RecruitmentSubTab;
+} = {}) {
   const { user, isSuperAdmin, logAdminActivity } = useStore();
-  const [subTab, setSubTab] = useState<RecruitmentSubTab>('overview');
+  const [subTab, setSubTab] = useState<RecruitmentSubTab>(initialSubTab);
+
+  useEffect(() => {
+    setSubTab(initialSubTab);
+  }, [initialSubTab]);
   const [jobs, setJobs] = useState<JobPosting[]>([]);
   const [applications, setApplications] = useState<JobApplication[]>([]);
   const [exams, setExams] = useState<JobExamTemplate[]>([]);

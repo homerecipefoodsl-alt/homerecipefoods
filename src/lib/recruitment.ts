@@ -5,7 +5,7 @@ import {
   serverTimestamp,
 } from 'firebase/firestore';
 import type { JobApplicationStatus, JobPosting } from '../types';
-import { toBengaliDigits } from './utils';
+import { compressImageToDataUrl, toBengaliDigits } from './utils';
 
 export const JOB_CATEGORY_PRESETS = [
   'গোডাউন কর্মচারী',
@@ -397,10 +397,56 @@ export function sanitizeUploadFileName(fileName: string): string {
 }
 
 export async function uploadRecruitmentFile(
-  _storagePath: string,
-  _file: File
+  storagePath: string,
+  file: File
 ): Promise<string> {
-  throw new Error(
-    'Document upload storage is currently being connected. Please try again shortly.'
-  );
+  const codeMatch = storagePath.match(/^job-applications\/([a-zA-Z0-9_-]{4,64})\//);
+  const applicationCode = codeMatch?.[1] || `APP_${Date.now()}`;
+  const kind: 'photo' | 'doc' = storagePath.includes('/photo/') ? 'photo' : 'doc';
+
+  try {
+    const resp = await fetch('/api/recruitment/upload', {
+      method: 'POST',
+      headers: {
+        'Content-Type': file.type || 'application/octet-stream',
+        'X-File-Name': sanitizeUploadFileName(file.name),
+        'X-Upload-Kind': kind,
+        'X-Application-Code': applicationCode,
+      },
+      body: file,
+    });
+
+    if (resp.ok) {
+      const payload = (await resp.json()) as { url?: string };
+      if (payload.url) {
+        return payload.url;
+      }
+    }
+
+    const errJson = (await resp.json().catch(() => ({}))) as {
+      code?: string;
+      message?: string;
+    };
+
+    if (
+      (resp.status === 503 || errJson.code === 'R2_NOT_CONFIGURED') &&
+      (kind === 'photo' || file.type.startsWith('image/'))
+    ) {
+      return await compressImageToDataUrl(file, 720, 0.78, 280000);
+    }
+
+    throw new Error(
+      errJson.message || 'Document upload failed. Please check your file format and size.'
+    );
+  } catch (err) {
+    if (
+      (kind === 'photo' || file.type.startsWith('image/')) &&
+      err instanceof TypeError
+    ) {
+      return await compressImageToDataUrl(file, 720, 0.78, 280000);
+    }
+    throw err instanceof Error
+      ? err
+      : new Error('Document upload failed. Please try again shortly.');
+  }
 }

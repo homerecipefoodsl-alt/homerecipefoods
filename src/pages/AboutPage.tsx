@@ -6,11 +6,40 @@ import { useStore } from '../context/StoreContext';
 import { ASSET_KEYS, resolveAssetUrl } from '../lib/assets';
 
 export function AboutPage() {
-  const { siteSettings } = useStore();
+  const { showrooms, siteSettings, languageMode } = useStore();
+  const activeOutletCount = showrooms.filter(
+    (sr) => sr.visible !== false && !sr.deleted
+  ).length;
 
   useEffect(() => {
     document.title = `Our Story · About Us – ${siteSettings.brandName || 'Home Recipe Foods'}`;
   }, [siteSettings.brandName]);
+
+  const showEnglishFirst = languageMode !== 'bn';
+  const showBothLanguages = languageMode === 'both';
+
+  const subtitleEn = siteSettings.aboutSubtitleEn || 'Our Story & Promise';
+  const subtitleBn = siteSettings.aboutSubtitleBn || 'আমাদের গল্প ও প্রতিশ্রুতি';
+  const headingEn =
+    siteSettings.aboutHeadingEn ||
+    'Crafted with pure ingredients for everyday tables and milestone celebrations.';
+  const headingBn =
+    siteSettings.aboutHeadingBn || 'খাঁটি উপাদান ও ঘরোয়া যত্নের গল্প';
+  const storyEn =
+    siteSettings.aboutStoryEn ||
+    'Home Recipe Foods began with a simple commitment: bringing the warmth of a trusted family kitchen together with disciplined artisanal baking and traditional Bangladeshi sweetmaking.';
+  const storyBn =
+    siteSettings.aboutStoryBn ||
+    'প্রতিদিন সকালে আমাদের নিজস্ব কিচেনে খাঁটি উপাদান, ঘরোয়া যত্ন ও আধুনিক বেকিং শিল্পের সমন্বয়ে তাজা কেক, পেস্ট্রি, ব্রেড, মিষ্টি ও আকদ বক্স তৈরি করা হয়।';
+  const missionEn =
+    siteSettings.aboutMissionEn ||
+    `Inside our dedicated pastry and sweets kitchens across Chattogram, we bake daily breads, Belgian chocolate cakes, saffron roshomalai, curated shahi Akd boxes, and savoury snacks. We welcome guests in person at our ${activeOutletCount} outlets so you can explore every item fresh at the counter.`;
+  const missionBn =
+    siteSettings.aboutMissionBn ||
+    'চট্টগ্রামের আমাদের প্রতিটি শোরুমে মানসম্মত পণ্য ও আন্তরিক ক্রেতা সেবা নিশ্চিত করাই আমাদের মূল লক্ষ্য।';
+  const featureImage = resolveAssetUrl(
+    siteSettings.aboutImageUrl || ASSET_KEYS.heroSweets
+  );
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6 sm:py-14 lg:px-8">
@@ -20,35 +49,46 @@ export function AboutPage() {
             <BrandLogo variant="header" />
           </div>
           <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#B91C1C]">
-            Our Story &amp; Promise
+            {showEnglishFirst ? subtitleEn : subtitleBn}
           </p>
-          <p className="font-bn mt-0.5 text-xs text-[#78716C]">আমাদের গল্প ও প্রতিশ্রুতি</p>
+          {showBothLanguages && subtitleBn && subtitleBn !== subtitleEn && (
+            <p className="font-bn mt-0.5 text-xs text-[#78716C]">{subtitleBn}</p>
+          )}
+
           <h1
-            className="font-display mt-2 text-3xl font-bold leading-tight text-[#1C1917] sm:text-5xl"
+            className={`mt-2 text-3xl font-bold leading-tight text-[#1C1917] sm:text-5xl ${
+              showEnglishFirst ? 'font-display' : 'font-bn'
+            }`}
             style={{ textWrap: 'balance' }}
           >
-            Crafted with pure ingredients for everyday tables and milestone celebrations.
+            {showEnglishFirst ? headingEn : headingBn}
           </h1>
-          <p className="font-bn mt-2 text-sm text-[#57534E]">
+          {showBothLanguages && headingBn && headingBn !== headingEn && (
+            <p className="font-bn mt-1.5 text-sm font-medium text-[#57534E]">
+              {headingBn}
+            </p>
+          )}
+          <p className="font-bn mt-2 text-xs text-[#78716C]">
             {siteSettings.brandName || 'Home Recipe Foods'} —{' '}
             {siteSettings.tagline || 'খাঁটি স্বাদ, সুন্দর মুহূর্তের বিশ্বস্ত সঙ্গী'}
           </p>
-          <p className="mt-4 text-sm leading-relaxed text-[#44403C] sm:text-base">
-            Home Recipe Foods began with a simple commitment: bringing the warmth of a trusted
-            family kitchen together with disciplined artisanal baking and traditional Bangladeshi
-            sweetmaking. Whether it is an afternoon tea, a birthday gathering, or an Akd ceremony,
-            every item is prepared fresh to honour the occasion.
+
+          <p className="mt-4 whitespace-pre-line text-sm leading-relaxed text-[#44403C] sm:text-base">
+            {showEnglishFirst ? storyEn : storyBn}
           </p>
-          <p className="mt-3 text-sm leading-relaxed text-[#57534E] sm:text-base">
-            Inside our dedicated pastry and sweets kitchens across Chattogram, we bake daily breads,
-            Belgian chocolate cakes, saffron roshomalai, curated shahi Akd boxes, and savoury
-            snacks. We welcome guests in person at our 16 outlets so you can explore every item
-            fresh at the counter.
+          <p className="mt-3 whitespace-pre-line text-sm leading-relaxed text-[#57534E] sm:text-base">
+            {showEnglishFirst ? missionEn : missionBn}
           </p>
-          <p className="font-bn mt-3 text-xs leading-relaxed text-[#78716C] sm:text-sm">
-            আমাদের নিজস্ব পেস্ট্রি ও সুইটস কিচেনে প্রতিদিন সকালে তৈরি হয় তাজা ব্রেড, বেলজিয়ান চকলেট
-            কেক, স্পেশ্যাল জাফরান রসমালাই, শাহী আকদ বক্স ও গরম ফাস্টফুড।
-          </p>
+          {showBothLanguages && storyBn && (
+            <p className="font-bn mt-3 whitespace-pre-line text-xs leading-relaxed text-[#78716C] sm:text-sm">
+              {storyBn}
+            </p>
+          )}
+          {showBothLanguages && missionBn && missionBn !== storyBn && (
+            <p className="font-bn mt-1.5 whitespace-pre-line text-xs leading-relaxed text-[#78716C] sm:text-sm">
+              {missionBn}
+            </p>
+          )}
 
           <div className="mt-7 flex flex-wrap gap-3">
             <Link
@@ -62,7 +102,7 @@ export function AboutPage() {
               to="/outlets"
               className="inline-flex items-center gap-2 rounded-lg border border-[#D6D3D1] bg-white px-5 py-3 text-sm font-semibold text-[#1C1917] transition-colors hover:border-[#1C1917]"
             >
-              <span>Visit Our Outlets</span>
+              <span>Visit Our {activeOutletCount} Outlets</span>
             </Link>
           </div>
         </div>
@@ -70,8 +110,8 @@ export function AboutPage() {
         <div className="lg:col-span-6">
           <div className="overflow-hidden rounded-2xl border border-[#E7E5E4] bg-white">
             <img
-              src={resolveAssetUrl(ASSET_KEYS.heroSweets)}
-              alt="Home Recipe Foods traditional sweets and Akd gift box"
+              src={featureImage}
+              alt={`${siteSettings.brandName || 'Home Recipe Foods'} showcase`}
               referrerPolicy="no-referrer"
               className="aspect-[16/10] w-full object-cover"
             />

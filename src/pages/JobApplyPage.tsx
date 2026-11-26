@@ -342,14 +342,24 @@ export function JobApplyPage() {
       // Step 2: Upload Photo & Documents (fail-fast before Firestore commit)
       setSubmitStepLabel('Uploading photo & documents...');
       let photoUrl = '';
+      let photoDataUrl = '';
       let photoStoragePath = '';
       const documentUrls: JobApplicationDocumentUrls = {};
 
       try {
-        photoStoragePath = `job-applications/${applicationCode}/photo/${sanitizeUploadFileName(
+        const targetPhotoPath = `job-applications/${applicationCode}/photo/${sanitizeUploadFileName(
           photoFile.name
         )}`;
-        photoUrl = await uploadRecruitmentFile(photoStoragePath, photoFile);
+        const uploadedPhotoResult = await uploadRecruitmentFile(targetPhotoPath, photoFile);
+        if (uploadedPhotoResult.startsWith('data:')) {
+          photoDataUrl = uploadedPhotoResult;
+          photoUrl = '';
+          photoStoragePath = '';
+        } else {
+          photoUrl = uploadedPhotoResult;
+          photoStoragePath = targetPhotoPath;
+          photoDataUrl = '';
+        }
 
         const uploadDocIfPresent = async (
           file: File | null,
@@ -442,7 +452,7 @@ export function JobApplyPage() {
         referenceInfo: referenceInfo.trim().slice(0, 400),
         photoUrl,
         photoStoragePath,
-        photoDataUrl: '',
+        photoDataUrl,
         documentUrls,
         cvUrlOrNote: cvUrlOrNote.trim().slice(0, 1000),
         declarationAccepted: true,
@@ -686,7 +696,7 @@ export function JobApplyPage() {
         {/* Form Header & Completion Progress */}
         <div className="mt-4 rounded-2xl border border-[#E7E5E4] bg-white p-5 sm:p-7">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="rounded-md border border-[#E7E5E4] bg-[#FAFAF8] px-2.5 py-1 text-[11px] font-semibold text-[#57534E]">
+            <span className="text-xs font-semibold uppercase tracking-wide text-[#DC1F26]">
               {job.department ? `${job.department} · ${catInfo.en}` : catInfo.en}
             </span>
             <span className="font-mono text-xs font-semibold tabular-nums text-[#57534E]">

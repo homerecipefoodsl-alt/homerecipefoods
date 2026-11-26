@@ -5,8 +5,10 @@ import {
   BadgeCheck,
   BarChart3,
   Briefcase,
+  Building2,
   Calendar,
   CheckCircle2,
+  ClipboardList,
   Database,
   Eye,
   EyeOff,
@@ -122,6 +124,11 @@ const AdminSettingsPanel = lazy(() =>
     default: m.AdminSettingsPanel,
   }))
 );
+const AdminAboutContactPanel = lazy(() =>
+  import('../components/admin/AdminEngagementPanels').then((m) => ({
+    default: m.AdminAboutContactPanel,
+  }))
+);
 const AdminRoleManagementPanel = lazy(() =>
   import('../components/admin/AdminRoleUserPanels').then((m) => ({
     default: m.AdminRoleManagementPanel,
@@ -154,12 +161,14 @@ export type AdminTab =
   | 'categories'
   | 'occasions'
   | 'showrooms'
+  | 'about-contact'
   | 'homepage'
   | 'banners'
   | 'greetings'
   | 'complaints'
   | 'chat'
   | 'recruitment'
+  | 'applications'
   | 'media'
   | 'reports'
   | 'seo'
@@ -177,27 +186,37 @@ const ROLE_DISPLAY: Record<
   primary_super_admin: {
     label: 'Primary Super Admin',
     scope: 'Full Administrative Access · All Modules, CMS, Roles & Security',
-    badgeClass: 'bg-[#DC1F26] text-white',
+    badgeClass: 'text-[#FACC15]',
   },
   super_admin: {
     label: 'Super Admin',
     scope: 'Full Administrative Access · All Modules, CMS, Roles & Security',
-    badgeClass: 'bg-[#DC1F26] text-white',
+    badgeClass: 'text-[#FACC15]',
   },
   admin: {
     label: 'Admin',
     scope: 'Catalog & CMS Access · Products, Categories, Occasions, Showrooms, Banners & Reports',
-    badgeClass: 'bg-[#FACC15] text-[#1C1917]',
+    badgeClass: 'text-[#FACC15]',
   },
   manager: {
     label: 'Manager',
     scope: 'Delegated Operations Access · Assigned Modules & Unique Manager ID',
-    badgeClass: 'bg-[#FEFCE8] text-[#9A3412]',
+    badgeClass: 'text-[#FDE047]',
+  },
+  editor: {
+    label: 'Editor',
+    scope: 'Content & Catalog Access · Products, Categories, Outlets, About & Contact, Banners & SEO',
+    badgeClass: 'text-[#FDE047]',
+  },
+  moderator: {
+    label: 'Moderator',
+    scope: 'Operations Review · Customer Complaints, Live Chat, Recruitment & Reports',
+    badgeClass: 'text-emerald-300',
   },
   support_agent: {
     label: 'Support Agent',
     scope: 'Support Access · Customer Live Chat & Complaints',
-    badgeClass: 'bg-emerald-600 text-white',
+    badgeClass: 'text-emerald-300',
   },
 };
 
@@ -727,8 +746,16 @@ export function AdminPage() {
     if (hasPermission('showrooms_manage')) {
       items.push({
         id: 'showrooms',
-        label: 'Showrooms',
+        label: 'Outlets & Showrooms',
         icon: <MapPin className="h-4 w-4" />,
+      });
+    }
+
+    if (isSuperAdmin || hasPermission('settings_view') || hasPermission('showrooms_manage')) {
+      items.push({
+        id: 'about-contact',
+        label: 'About & Contact CMS',
+        icon: <Building2 className="h-4 w-4" />,
       });
     }
 
@@ -766,11 +793,18 @@ export function AdminPage() {
     }
 
     if (canRecruitment) {
-      items.push({
-        id: 'recruitment',
-        label: 'Recruitment',
-        icon: <Briefcase className="h-4 w-4" />,
-      });
+      items.push(
+        {
+          id: 'recruitment',
+          label: 'Recruitment',
+          icon: <Briefcase className="h-4 w-4" />,
+        },
+        {
+          id: 'applications',
+          label: 'Applications',
+          icon: <ClipboardList className="h-4 w-4" />,
+        }
+      );
     }
 
     if (hasPermission('reports_view')) {
@@ -937,20 +971,19 @@ export function AdminPage() {
           <div className="flex flex-wrap items-center gap-4">
             <BrandLogo variant="header" />
             <div className="border-l border-white/15 pl-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <span
-                  className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-bold ${roleMeta.badgeClass}`}
-                >
-                  <Shield className="h-3 w-3" />
+              <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
+                <span className={`inline-flex items-center gap-1 ${roleMeta.badgeClass}`}>
+                  <Shield className="h-3.5 w-3.5" />
                   <span>{roleMeta.label}</span>
                 </span>
                 {adminProfile?.manager_id && (
-                  <span className="inline-flex items-center gap-1 rounded bg-white/10 px-2 py-0.5 font-mono text-[11px] font-bold text-[#FACC15]">
-                    <BadgeCheck className="h-3 w-3" />
+                  <span className="inline-flex items-center gap-1 font-mono text-[11px] text-[#FACC15]">
+                    · <BadgeCheck className="h-3 w-3" />
                     <span>{adminProfile.manager_id}</span>
                   </span>
                 )}
-                <span className="text-xs font-semibold text-[#FACC15]">
+                <span className="text-[#D6D3D1]">·</span>
+                <span className="text-[#FACC15]">
                   Home Recipe Foods · /mahmud Console
                 </span>
               </div>
@@ -1041,10 +1074,10 @@ export function AdminPage() {
                     <div className="rounded-xl border border-[#1C1917] bg-[#1C1917] p-5 text-white">
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div>
-                          <span className="inline-flex items-center gap-1.5 rounded bg-[#DC1F26] px-2.5 py-0.5 text-[11px] font-bold text-white">
-                            <Shield className="h-3 w-3" />
-                            <span>Super Admin — Full Governance</span>
-                          </span>
+                          <p className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-[#FACC15]">
+                            <Shield className="h-3.5 w-3.5" />
+                            <span>Super Admin · Full Governance</span>
+                          </p>
                           <h2 className="font-display mt-2 text-xl font-bold text-white">
                             Full Storefront, Catalog, Operations &amp; Access Control Active
                           </h2>
@@ -1279,12 +1312,12 @@ export function AdminPage() {
                               className="flex items-start justify-between gap-3 py-2.5"
                             >
                               <div>
-                                <p className="font-semibold text-[#1C1917]">
-                                  <span className="rounded bg-[#F5F4F0] px-1.5 py-0.5 font-mono text-[10px] uppercase">
-                                    {act.action}
-                                  </span>{' '}
-                                  <span className="ml-1">{act.record_label || act.module}</span>
-                                </p>
+                                  <p className="font-semibold text-[#1C1917]">
+                                    <span className="font-mono text-[10px] uppercase tracking-wide text-[#B91C1C]">
+                                      {act.action}
+                                    </span>{' '}
+                                    <span className="ml-1">{act.record_label || act.module}</span>
+                                  </p>
                                 <p className="mt-0.5 text-[11px] text-[#57534E]">
                                   {act.summary || act.module} ·{' '}
                                   <span className="font-mono">{act.admin_email}</span>
@@ -1317,13 +1350,13 @@ export function AdminPage() {
                           </li>
                           <li className="flex items-center justify-between">
                             <span className="text-[#57534E]">Active Permissions</span>
-                            <span className="rounded bg-[#FAFAF8] px-2 py-0.5 font-mono font-bold text-[#1C1917]">
+                            <span className="font-mono font-bold tabular-nums text-[#1C1917]">
                               {permissions.length} modules
                             </span>
                           </li>
                           <li className="flex items-center justify-between">
                             <span className="text-[#57534E]">Storefront Mode</span>
-                            <span className="rounded bg-[#FEFCE8] px-2 py-0.5 font-semibold text-[#9A3412]">
+                            <span className="font-semibold text-[#9A3412]">
                               Showcase Only
                             </span>
                           </li>
@@ -1360,7 +1393,7 @@ export function AdminPage() {
                                       {c.referenceCode} · {c.showroomName}
                                     </p>
                                   </div>
-                                  <span className="rounded bg-red-50 px-2 py-0.5 text-[10px] font-bold text-[#DC1F26]">
+                                  <span className="text-[11px] font-bold text-[#DC1F26]">
                                     {c.status}
                                   </span>
                                 </div>
@@ -1386,6 +1419,10 @@ export function AdminPage() {
               {activeTab === 'showrooms' && hasPermission('showrooms_manage') && (
                 <AdminShowroomsPanel />
               )}
+              {activeTab === 'about-contact' &&
+                (isSuperAdmin || hasPermission('settings_view') || hasPermission('showrooms_manage')) && (
+                  <AdminAboutContactPanel />
+                )}
               {activeTab === 'homepage' && hasPermission('banners_manage') && (
                 <AdminHomepageSectionsPanel />
               )}
@@ -1405,8 +1442,10 @@ export function AdminPage() {
               {activeTab === 'chat' && hasPermission('chat_manage') && (
                 <AdminLiveChatPanel sessions={chatSessions} />
               )}
-              {activeTab === 'recruitment' && canRecruitment && (
-                <AdminRecruitmentPanel />
+              {(activeTab === 'recruitment' || activeTab === 'applications') && canRecruitment && (
+                <AdminRecruitmentPanel
+                  initialSubTab={activeTab === 'applications' ? 'applications' : 'overview'}
+                />
               )}
               {activeTab === 'reports' && hasPermission('reports_view') && (
                 <AdminReportsPanel

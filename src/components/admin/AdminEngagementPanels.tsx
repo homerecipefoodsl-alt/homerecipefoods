@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
+  AlertCircle,
   Bot,
   CheckCircle2,
+  Loader2,
   MessageCircle,
   Plus,
   Send,
@@ -13,6 +15,7 @@ import {
   collection,
   deleteDoc,
   doc,
+  getDoc,
   onSnapshot,
   orderBy,
   query,
@@ -21,9 +24,11 @@ import {
   updateDoc,
 } from 'firebase/firestore';
 import { useStore } from '../../context/StoreContext';
+import { SEED_SITE_SETTINGS } from '../../data/seedData';
 import { resolveAssetUrl } from '../../lib/assets';
 import { getDynamicEnglishDate } from '../../lib/bilingual';
 import { OperationType, db, handleFirestoreError, requireDb } from '../../lib/firebase';
+import { uploadCatalogImageToStorage, validateCatalogImageFile } from '../../lib/productStorage';
 import { compressImageToDataUrl, getDynamicBengaliDate } from '../../lib/utils';
 import type {
   AiKnowledgeEntry,
@@ -61,29 +66,42 @@ export function AdminComplaintsPanel({
   const { isSuperAdmin, logAdminActivity } = useStore();
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [showroomFilter, setShowroomFilter] = useState<string>('all');
   const [selected, setSelected] = useState<Complaint | null>(null);
   const [adminNote, setAdminNote] = useState('');
   const [statusVal, setStatusVal] = useState<ComplaintStatus>('New');
   const [priorityVal, setPriorityVal] = useState<ComplaintPriority>('Normal');
   const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  const showroomOptions = useMemo(() => {
+    const names = new Set<string>();
+    complaints.forEach((c) => {
+      if (c.showroomName) names.add(c.showroomName);
+    });
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [complaints]);
 
   const openComplaint = (c: Complaint) => {
     setSelected(c);
     setAdminNote(c.adminNote || '');
     setStatusVal(c.status);
     setPriorityVal(c.priority || 'Normal');
+    setFeedback(null);
   };
 
   const updateComplaint = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selected) return;
     setSaving(true);
+    setFeedback(null);
     try {
       const firestore = requireDb();
+      const trimmedNote = adminNote.trim();
       await updateDoc(doc(firestore, 'complaints', selected.id), {
         status: statusVal,
         priority: priorityVal,
-        adminNote: adminNote.trim(),
+        adminNote: trimmedNote,
         updatedAt: serverTimestamp(),
       });
       await logAdminActivity(
@@ -97,10 +115,20 @@ export function AdminComplaintsPanel({
         ...selected,
         status: statusVal,
         priority: priorityVal,
-        adminNote: adminNote.trim(),
+        adminNote: trimmedNote,
+      });
+      setFeedback({
+        type: 'ok',
+        text: `Updated ${selected.referenceCode} to ${statusVal} (${priorityVal}).`,
       });
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `complaints/${selected.id}`);
+      setFeedback({
+        type: 'err',
+        text:
+          err instanceof Error && err.message
+            ? err.message
+            : 'Unable to update complaint status. Verify admin permissions.',
+      });
     } finally {
       setSaving(false);
     }
@@ -108,12 +136,14 @@ export function AdminComplaintsPanel({
 
   const filtered = complaints.filter((c) => {
     if (statusFilter !== 'all' && c.status !== statusFilter) return false;
+    if (showroomFilter !== 'all' && c.showroomName !== showroomFilter) return false;
     if (search.trim()) {
       const q = search.toLowerCase();
       return (
         c.referenceCode.toLowerCase().includes(q) ||
         c.customerName.toLowerCase().includes(q) ||
         c.phone.toLowerCase().includes(q) ||
+        c.showroomName.toLowerCase().includes(q) ||
         c.message.toLowerCase().includes(q)
       );
     }
@@ -127,27 +157,56 @@ export function AdminComplaintsPanel({
           Private Complaint Management
         </h2>
         <p className="text-xs text-[#57534E]">
-          শুধুমাত্র অনুমোদিত অ্যাডমিনরা এই গোপনীয় অভিযোগগুলো দেখতে এবং স্ট্যাটাস/প্রায়োরিটি পরিবর্তন করতে পারবেন।
+          Authorized staff and management can review confidential customer complaints, update status &amp; priority, and record internal notes.
         </p>
       </div>
+
+      {feedback && (
+        <div
+          className={`flex items-center gap-2 rounded-lg border px-3.5 py-2.5 text-xs font-semibold ${
+            feedback.type === 'ok'
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+              : 'border-red-200 bg-red-50 text-[#B91C1C]'
+          }`}
+        >
+          {feedback.type === 'ok' ? (
+            <CheckCircle2 className="h-4 w-4 shrink-0" />
+          ) : (
+            <AlertCircle className="h-4 w-4 shrink-0" />
+          )}
+          <span>{feedback.text}</span>
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-3">
         <input
           type="text"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="রেফারেন্স নম্বর, নাম বা ফোন দিয়ে খুঁজুন..."
+          placeholder="Search by reference code, name, phone, or outlet..."
           className="w-full max-w-xs rounded-lg border border-[#D6D3D1] bg-white px-3 py-2 text-xs"
         />
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
-          className="rounded-lg border border-[#D6D3D1] bg-white px-3 py-2 text-xs"
+          className="rounded-lg border border-[#D6D3D1] bg-white px-3 py-2 text-xs font-semibold"
         >
-          <option value="all">সব স্ট্যাটাস</option>
+          <option value="all">All Statuses</option>
           {COMPLAINT_STATUSES.map((st) => (
             <option key={st} value={st}>
               {st}
+            </option>
+          ))}
+        </select>
+        <select
+          value={showroomFilter}
+          onChange={(e) => setShowroomFilter(e.target.value)}
+          className="rounded-lg border border-[#D6D3D1] bg-white px-3 py-2 text-xs font-semibold"
+        >
+          <option value="all">All Outlets</option>
+          {showroomOptions.map((name) => (
+            <option key={name} value={name}>
+              {name}
             </option>
           ))}
         </select>
@@ -157,7 +216,7 @@ export function AdminComplaintsPanel({
         <div className="space-y-2.5 lg:col-span-7">
           {filtered.length === 0 ? (
             <div className="rounded-xl border border-[#E7E5E4] bg-white p-10 text-center text-xs text-[#78716C]">
-              কোনো অভিযোগ পাওয়া যায়নি।
+              No matching complaints found.
             </div>
           ) : (
             filtered.map((c) => (
@@ -175,27 +234,25 @@ export function AdminComplaintsPanel({
                   <span className="font-mono text-xs font-bold text-[#DC1F26]">
                     {c.referenceCode}
                   </span>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-2 text-[11px] font-semibold">
                     {c.priority && c.priority !== 'Normal' && (
-                      <span className="rounded bg-[#1C1917] px-1.5 py-0.5 text-[10px] font-semibold text-[#FACC15]">
-                        {c.priority}
-                      </span>
+                      <span className="text-[#9A3412]">{c.priority} Priority</span>
                     )}
                     <span
-                      className={`rounded px-2 py-0.5 text-[11px] font-semibold ${
+                      className={
                         c.status === 'New' || c.status === 'Rejected'
-                          ? 'bg-red-50 text-red-700'
+                          ? 'text-red-700'
                           : c.status === 'Resolved' || c.status === 'Closed'
-                          ? 'bg-emerald-50 text-emerald-700'
-                          : 'bg-[#FEF9C3] text-[#854D0E]'
-                      }`}
+                          ? 'text-emerald-700'
+                          : 'text-[#854D0E]'
+                      }
                     >
                       {c.status}
                     </span>
                   </div>
                 </div>
                 <p className="mt-1 text-sm font-semibold text-[#1C1917]">
-                  {c.customerName} · <span className="font-mono text-xs">{c.phone}</span>
+                  {c.customerName} · <span className="font-mono tabular-nums text-xs">{c.phone}</span>
                 </p>
                 <p className="mt-0.5 text-xs text-[#78716C]">
                   {c.category} · {c.showroomName}
@@ -219,18 +276,18 @@ export function AdminComplaintsPanel({
                 <h3 className="font-display mt-0.5 text-xl font-bold text-[#1C1917]">
                   {selected.customerName}
                 </h3>
-                <p className="text-xs text-[#57534E]">
+                <p className="text-xs tabular-nums text-[#57534E]">
                   {selected.phone} {selected.email ? `· ${selected.email}` : ''}
                 </p>
               </div>
 
               <div className="mt-4 space-y-3 text-xs">
                 <p>
-                  <span className="font-semibold text-[#1C1917]">ধরন:</span>{' '}
+                  <span className="font-semibold text-[#1C1917]">Category:</span>{' '}
                   {selected.category}
                 </p>
                 <p>
-                  <span className="font-semibold text-[#1C1917]">শোরুম:</span>{' '}
+                  <span className="font-semibold text-[#1C1917]">Outlet:</span>{' '}
                   {selected.showroomName}
                 </p>
                 <div className="rounded-lg bg-[#FAFAF8] p-3 leading-relaxed text-[#1C1917]">
@@ -239,7 +296,7 @@ export function AdminComplaintsPanel({
 
                 {selected.attachmentImage && (
                   <div>
-                    <p className="mb-1 font-semibold text-[#1C1917]">সংযুক্ত ছবি:</p>
+                    <p className="mb-1 font-semibold text-[#1C1917]">Attached Photo:</p>
                     <img
                       src={selected.attachmentImage}
                       alt="Complaint attachment"
@@ -291,7 +348,7 @@ export function AdminComplaintsPanel({
                     rows={3}
                     value={adminNote}
                     onChange={(e) => setAdminNote(e.target.value)}
-                    placeholder="টিম নোট বা সমাধানের বিবরণ লিখুন..."
+                    placeholder="Record follow-up notes or resolution details..."
                     className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-xs"
                   />
                 </div>
@@ -299,21 +356,21 @@ export function AdminComplaintsPanel({
 
               {selected.status === 'Closed' && !isSuperAdmin ? (
                 <p className="mt-4 rounded-lg bg-[#FAFAF8] px-3 py-2 text-center text-xs font-medium text-[#78716C]">
-                  এই অভিযোগটি Closed রয়েছে। শুধুমাত্র Super Admin এটি পুনরায় পরিবর্তন করতে পারবেন।
+                  This complaint is Closed. Only a Super Admin can reopen or modify it.
                 </p>
               ) : (
                 <button
                   type="submit"
                   disabled={saving}
-                  className="mt-4 w-full cursor-pointer rounded-lg bg-[#1C1917] py-2.5 text-xs font-semibold text-white hover:bg-[#DC1F26]"
+                  className="mt-4 w-full cursor-pointer rounded-lg bg-[#1C1917] py-2.5 text-xs font-semibold text-white hover:bg-[#DC1F26] disabled:opacity-50"
                 >
-                  {saving ? 'আপডেট হচ্ছে...' : 'স্ট্যাটাস আপডেট করুন'}
+                  {saving ? 'Saving Update...' : 'Update Status'}
                 </button>
               )}
             </form>
           ) : (
             <div className="flex h-64 items-center justify-center rounded-xl border border-[#E7E5E4] bg-white p-6 text-center text-xs text-[#78716C]">
-              বিস্তারিত দেখতে বাম পাশ থেকে একটি অভিযোগ নির্বাচন করুন।
+              Select a complaint on the left to review details and update status.
             </div>
           )}
         </div>
@@ -823,16 +880,22 @@ export function AdminSettingsPanel() {
       .map((s) => s.trim())
       .filter(Boolean);
 
-    await setDoc(doc(firestore, 'site_settings', 'main'), {
-      ...form,
-      complaintCategories:
-        parsedComplaintCats.length > 0
-          ? parsedComplaintCats
-          : form.complaintCategories || [],
-      defaultLanguage: form.defaultLanguage || 'both',
-      heroSlides: normalizeSlidesForSave(form.heroSlides),
-      updatedAt: serverTimestamp(),
-    });
+    await setDoc(
+      doc(firestore, 'site_settings', 'main'),
+      {
+        ...SEED_SITE_SETTINGS,
+        ...siteSettings,
+        ...form,
+        complaintCategories:
+          parsedComplaintCats.length > 0
+            ? parsedComplaintCats
+            : form.complaintCategories || [],
+        defaultLanguage: form.defaultLanguage || 'both',
+        heroSlides: normalizeSlidesForSave(form.heroSlides),
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
     await logAdminActivity('update', 'site_settings', 'main', 'Website Settings');
     setSaved(true);
   };
@@ -2173,5 +2236,504 @@ export function AdminLiveChatPanel({
         </div>
       )}
     </div>
+  );
+}
+
+// ========================
+// 9. ABOUT & CONTACT PAGES CMS
+// ========================
+export function AdminAboutContactPanel() {
+  const { siteSettings, isSuperAdmin, hasPermission, logAdminActivity } = useStore();
+  const [aboutHeadingEn, setAboutHeadingEn] = useState(siteSettings.aboutHeadingEn || '');
+  const [aboutHeadingBn, setAboutHeadingBn] = useState(siteSettings.aboutHeadingBn || '');
+  const [aboutSubtitleEn, setAboutSubtitleEn] = useState(siteSettings.aboutSubtitleEn || '');
+  const [aboutSubtitleBn, setAboutSubtitleBn] = useState(siteSettings.aboutSubtitleBn || '');
+  const [aboutStoryEn, setAboutStoryEn] = useState(siteSettings.aboutStoryEn || '');
+  const [aboutStoryBn, setAboutStoryBn] = useState(siteSettings.aboutStoryBn || '');
+  const [aboutMissionEn, setAboutMissionEn] = useState(siteSettings.aboutMissionEn || '');
+  const [aboutMissionBn, setAboutMissionBn] = useState(siteSettings.aboutMissionBn || '');
+  const [aboutImageUrl, setAboutImageUrl] = useState(siteSettings.aboutImageUrl || '');
+
+  const [contactHeadingEn, setContactHeadingEn] = useState(siteSettings.contactHeadingEn || '');
+  const [contactHeadingBn, setContactHeadingBn] = useState(siteSettings.contactHeadingBn || '');
+  const [contactSubtitleEn, setContactSubtitleEn] = useState(siteSettings.contactSubtitleEn || '');
+  const [contactSubtitleBn, setContactSubtitleBn] = useState(siteSettings.contactSubtitleBn || '');
+  const [supportHoursEn, setSupportHoursEn] = useState(siteSettings.supportHoursEn || '');
+  const [supportHoursBn, setSupportHoursBn] = useState(siteSettings.supportHoursBn || '');
+  const [supportPhone, setSupportPhone] = useState(siteSettings.supportPhone || '');
+  const [secondaryPhone, setSecondaryPhone] = useState(siteSettings.secondaryPhone || '');
+  const [brandEmail, setBrandEmail] = useState(siteSettings.brandEmail || '');
+  const [brandAddressEn, setBrandAddressEn] = useState(siteSettings.brandAddressEn || '');
+  const [brandAddressBn, setBrandAddressBn] = useState(siteSettings.brandAddressBn || '');
+  const [officeMapUrl, setOfficeMapUrl] = useState(siteSettings.officeMapUrl || '');
+  const [facebookUrl, setFacebookUrl] = useState(siteSettings.facebookUrl || '');
+  const [instagramUrl, setInstagramUrl] = useState(siteSettings.instagramUrl || '');
+  const [youtubeUrl, setYoutubeUrl] = useState(siteSettings.youtubeUrl || '');
+  const [messengerUrl, setMessengerUrl] = useState(siteSettings.messengerUrl || '');
+  const [whatsappUrl, setWhatsappUrl] = useState(siteSettings.whatsappUrl || '');
+
+  const [saving, setSaving] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  useEffect(() => {
+    setAboutHeadingEn(siteSettings.aboutHeadingEn || '');
+    setAboutHeadingBn(siteSettings.aboutHeadingBn || '');
+    setAboutSubtitleEn(siteSettings.aboutSubtitleEn || '');
+    setAboutSubtitleBn(siteSettings.aboutSubtitleBn || '');
+    setAboutStoryEn(siteSettings.aboutStoryEn || '');
+    setAboutStoryBn(siteSettings.aboutStoryBn || '');
+    setAboutMissionEn(siteSettings.aboutMissionEn || '');
+    setAboutMissionBn(siteSettings.aboutMissionBn || '');
+    setAboutImageUrl(siteSettings.aboutImageUrl || '');
+    setContactHeadingEn(siteSettings.contactHeadingEn || '');
+    setContactHeadingBn(siteSettings.contactHeadingBn || '');
+    setContactSubtitleEn(siteSettings.contactSubtitleEn || '');
+    setContactSubtitleBn(siteSettings.contactSubtitleBn || '');
+    setSupportHoursEn(siteSettings.supportHoursEn || '');
+    setSupportHoursBn(siteSettings.supportHoursBn || '');
+    setSupportPhone(siteSettings.supportPhone || '');
+    setSecondaryPhone(siteSettings.secondaryPhone || '');
+    setBrandEmail(siteSettings.brandEmail || '');
+    setBrandAddressEn(siteSettings.brandAddressEn || '');
+    setBrandAddressBn(siteSettings.brandAddressBn || '');
+    setOfficeMapUrl(siteSettings.officeMapUrl || '');
+    setFacebookUrl(siteSettings.facebookUrl || '');
+    setInstagramUrl(siteSettings.instagramUrl || '');
+    setYoutubeUrl(siteSettings.youtubeUrl || '');
+    setMessengerUrl(siteSettings.messengerUrl || '');
+    setWhatsappUrl(siteSettings.whatsappUrl || '');
+  }, [siteSettings]);
+
+  const handleAboutImageUpload = async (file: File) => {
+    const validationError = validateCatalogImageFile(file);
+    if (validationError) {
+      setFeedback({ type: 'err', text: validationError });
+      return;
+    }
+    setUploadingImage(true);
+    setFeedback(null);
+    try {
+      const res = await uploadCatalogImageToStorage({
+        folder: 'media',
+        entityId: 'about-brand-story',
+        file,
+      });
+      setAboutImageUrl(res.downloadUrl);
+      setFeedback({ type: 'ok', text: 'About page photograph uploaded to Cloudflare R2. Click Save Changes to publish.' });
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Unable to upload photograph.',
+      });
+    } finally {
+      setUploadingImage(false);
+    }
+  };
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isSuperAdmin && !hasPermission('settings_view') && !hasPermission('showrooms_manage')) {
+      setFeedback({ type: 'err', text: 'You do not have permission to update About & Contact settings.' });
+      return;
+    }
+    const cleanPhone = supportPhone.trim();
+    if (cleanPhone.length < 5) {
+      setFeedback({ type: 'err', text: 'Primary Support Phone must be at least 5 characters.' });
+      return;
+    }
+
+    setSaving(true);
+    setFeedback(null);
+    try {
+      const firestore = requireDb();
+      const settingsRef = doc(firestore, 'site_settings', 'main');
+      const aboutContactPayload: Record<string, unknown> = {
+        aboutHeadingEn: aboutHeadingEn.trim().slice(0, 200),
+        aboutHeadingBn: aboutHeadingBn.trim().slice(0, 200),
+        aboutSubtitleEn: aboutSubtitleEn.trim().slice(0, 200),
+        aboutSubtitleBn: aboutSubtitleBn.trim().slice(0, 200),
+        aboutStoryEn: aboutStoryEn.trim().slice(0, 3000),
+        aboutStoryBn: aboutStoryBn.trim().slice(0, 3000),
+        aboutMissionEn: aboutMissionEn.trim().slice(0, 1500),
+        aboutMissionBn: aboutMissionBn.trim().slice(0, 1500),
+        aboutImageUrl: aboutImageUrl.trim().slice(0, 400000),
+        contactHeadingEn: contactHeadingEn.trim().slice(0, 240),
+        contactHeadingBn: contactHeadingBn.trim().slice(0, 240),
+        contactSubtitleEn: contactSubtitleEn.trim().slice(0, 240),
+        contactSubtitleBn: contactSubtitleBn.trim().slice(0, 240),
+        supportHoursEn: supportHoursEn.trim().slice(0, 160),
+        supportHoursBn: supportHoursBn.trim().slice(0, 160),
+        supportPhone: cleanPhone.slice(0, 40),
+        secondaryPhone: secondaryPhone.trim().slice(0, 40),
+        brandEmail: brandEmail.trim().slice(0, 254),
+        brandAddressEn: brandAddressEn.trim().slice(0, 300),
+        brandAddressBn: brandAddressBn.trim().slice(0, 300),
+        officeMapUrl: officeMapUrl.trim().slice(0, 600),
+        facebookUrl: facebookUrl.trim().slice(0, 300),
+        instagramUrl: instagramUrl.trim().slice(0, 300),
+        youtubeUrl: youtubeUrl.trim().slice(0, 300),
+        messengerUrl: messengerUrl.trim().slice(0, 300),
+        whatsappUrl: whatsappUrl.trim().slice(0, 300),
+        updatedAt: serverTimestamp(),
+      };
+
+      const existingSnap = await getDoc(settingsRef);
+      if (!existingSnap.exists()) {
+        await setDoc(settingsRef, {
+          ...SEED_SITE_SETTINGS,
+          ...siteSettings,
+          ...aboutContactPayload,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        await updateDoc(settingsRef, aboutContactPayload);
+      }
+
+      await logAdminActivity('update', 'site_settings', 'about_contact', 'About & Contact CMS');
+      setFeedback({ type: 'ok', text: 'About & Contact page content updated successfully.' });
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: err instanceof Error && err.message ? err.message : 'Failed to update About & Contact settings.',
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form onSubmit={handleSave} className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="font-display text-2xl font-bold text-[#1C1917]">
+            About &amp; Contact Pages CMS
+          </h2>
+          <p className="text-xs text-[#57534E]">
+            Manage the English &amp; Bengali story, feature image, customer hotline, head office address, and social links shown on /about, /contact, and Footer.
+          </p>
+        </div>
+        <button
+          type="submit"
+          disabled={saving || uploadingImage}
+          className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#B91C1C] disabled:opacity-50"
+        >
+          {saving ? 'Saving...' : 'Save About & Contact'}
+        </button>
+      </div>
+
+      {feedback && (
+        <div
+          className={`flex items-center gap-2 rounded-lg border px-3.5 py-2.5 text-xs font-semibold ${
+            feedback.type === 'ok'
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+              : 'border-red-200 bg-red-50 text-[#B91C1C]'
+          }`}
+        >
+          {feedback.type === 'ok' ? (
+            <CheckCircle2 className="h-4 w-4 shrink-0" />
+          ) : (
+            <AlertCircle className="h-4 w-4 shrink-0" />
+          )}
+          <span>{feedback.text}</span>
+        </div>
+      )}
+
+      {/* About Page Section */}
+      <div className="grid grid-cols-1 gap-4 rounded-xl border border-[#E7E5E4] bg-white p-5 sm:grid-cols-2">
+        <div className="border-b border-[#F5F4F0] pb-2 sm:col-span-2">
+          <h3 className="font-display text-lg font-bold text-[#1C1917]">
+            About Us Page Content (/about)
+          </h3>
+        </div>
+
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Eyebrow Label (English)</label>
+          <input
+            type="text"
+            value={aboutSubtitleEn}
+            onChange={(e) => setAboutSubtitleEn(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Eyebrow Label (বাংলা)</label>
+          <input
+            type="text"
+            value={aboutSubtitleBn}
+            onChange={(e) => setAboutSubtitleBn(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Main Heading (English)</label>
+          <input
+            type="text"
+            value={aboutHeadingEn}
+            onChange={(e) => setAboutHeadingEn(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Main Heading (বাংলা)</label>
+          <input
+            type="text"
+            value={aboutHeadingBn}
+            onChange={(e) => setAboutHeadingBn(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Brand Story (English)</label>
+          <textarea
+            rows={4}
+            value={aboutStoryEn}
+            onChange={(e) => setAboutStoryEn(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Brand Story (বাংলা)</label>
+          <textarea
+            rows={4}
+            value={aboutStoryBn}
+            onChange={(e) => setAboutStoryBn(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Kitchen &amp; Showroom Promise (English)</label>
+          <textarea
+            rows={3}
+            value={aboutMissionEn}
+            onChange={(e) => setAboutMissionEn(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Kitchen &amp; Showroom Promise (বাংলা)</label>
+          <textarea
+            rows={3}
+            value={aboutMissionBn}
+            onChange={(e) => setAboutMissionBn(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+
+        <div className="rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-4 sm:col-span-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs font-semibold text-[#1C1917]">About Hero Feature Image</p>
+            <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#D6D3D1] bg-white px-3 py-1.5 text-xs font-semibold text-[#1C1917] hover:border-[#DC1F26]">
+              {uploadingImage ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-[#DC1F26]" />
+              ) : (
+                <Upload className="h-3.5 w-3.5 text-[#DC1F26]" />
+              )}
+              <span>{uploadingImage ? 'Uploading...' : 'Upload Image'}</span>
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                disabled={uploadingImage}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = '';
+                  if (f) void handleAboutImageUpload(f);
+                }}
+                className="hidden"
+              />
+            </label>
+          </div>
+          <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center">
+            {aboutImageUrl && (
+              <img
+                src={resolveAssetUrl(aboutImageUrl)}
+                alt="About feature"
+                className="h-20 w-32 shrink-0 rounded-lg border border-[#E7E5E4] object-cover bg-white"
+              />
+            )}
+            <input
+              type="text"
+              value={aboutImageUrl}
+              onChange={(e) => setAboutImageUrl(e.target.value)}
+              placeholder="Image URL or /assets/aistudio/..."
+              className="w-full rounded-lg border border-[#D6D3D1] bg-white px-3 py-2 text-xs"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Contact Page Section */}
+      <div className="grid grid-cols-1 gap-4 rounded-xl border border-[#E7E5E4] bg-white p-5 sm:grid-cols-2">
+        <div className="border-b border-[#F5F4F0] pb-2 sm:col-span-2">
+          <h3 className="font-display text-lg font-bold text-[#1C1917]">
+            Contact &amp; Head Office Details (/contact &amp; Footer)
+          </h3>
+        </div>
+
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Contact Heading (English)</label>
+          <input
+            type="text"
+            value={contactHeadingEn}
+            onChange={(e) => setContactHeadingEn(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Contact Heading (বাংলা)</label>
+          <input
+            type="text"
+            value={contactHeadingBn}
+            onChange={(e) => setContactHeadingBn(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Contact Intro (English)</label>
+          <textarea
+            rows={2}
+            value={contactSubtitleEn}
+            onChange={(e) => setContactSubtitleEn(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Contact Intro (বাংলা)</label>
+          <textarea
+            rows={2}
+            value={contactSubtitleBn}
+            onChange={(e) => setContactSubtitleBn(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Primary Hotline *</label>
+          <input
+            type="text"
+            value={supportPhone}
+            onChange={(e) => setSupportPhone(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 font-mono text-sm"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Secondary Phone</label>
+          <input
+            type="text"
+            value={secondaryPhone}
+            onChange={(e) => setSecondaryPhone(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 font-mono text-sm"
+          />
+        </div>
+
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Customer Support Hours (English)</label>
+          <input
+            type="text"
+            value={supportHoursEn}
+            onChange={(e) => setSupportHoursEn(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Customer Support Hours (বাংলা)</label>
+          <input
+            type="text"
+            value={supportHoursBn}
+            onChange={(e) => setSupportHoursBn(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Support Email</label>
+          <input
+            type="email"
+            value={brandEmail}
+            onChange={(e) => setBrandEmail(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Head Office Google Maps URL</label>
+          <input
+            type="url"
+            value={officeMapUrl}
+            onChange={(e) => setOfficeMapUrl(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Head Office Address (English)</label>
+          <input
+            type="text"
+            value={brandAddressEn}
+            onChange={(e) => setBrandAddressEn(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Head Office Address (বাংলা)</label>
+          <input
+            type="text"
+            value={brandAddressBn}
+            onChange={(e) => setBrandAddressBn(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+          />
+        </div>
+
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Facebook URL</label>
+          <input
+            type="url"
+            value={facebookUrl}
+            onChange={(e) => setFacebookUrl(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-xs"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Messenger URL</label>
+          <input
+            type="url"
+            value={messengerUrl}
+            onChange={(e) => setMessengerUrl(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-xs"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-semibold">Instagram URL</label>
+          <input
+            type="url"
+            value={instagramUrl}
+            onChange={(e) => setInstagramUrl(e.target.value)}
+            className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-xs"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-semibold">YouTube / WhatsApp URL</label>
+          <div className="grid grid-cols-2 gap-2">
+            <input
+              type="url"
+              value={youtubeUrl}
+              onChange={(e) => setYoutubeUrl(e.target.value)}
+              placeholder="YouTube URL"
+              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-xs"
+            />
+            <input
+              type="url"
+              value={whatsappUrl}
+              onChange={(e) => setWhatsappUrl(e.target.value)}
+              placeholder="WhatsApp URL"
+              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-xs"
+            />
+          </div>
+        </div>
+      </div>
+    </form>
   );
 }

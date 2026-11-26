@@ -210,12 +210,12 @@ export function ApplicationStatusTracker({
           {/* Header summary */}
           <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#E7E5E4] pb-4">
             <div>
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2.5">
                 <span className="font-mono text-xs font-bold text-[#DC1F26] sm:text-sm">
                   {result.id}
                 </span>
-                <span className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">
-                  <ShieldCheck className="h-3 w-3" />
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700">
+                  <ShieldCheck className="h-3.5 w-3.5" />
                   <span>Verified</span>
                 </span>
               </div>
@@ -227,13 +227,11 @@ export function ApplicationStatusTracker({
               </p>
             </div>
             <div className="text-right">
-              <span
-                className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-bold ${statusMeta.badgeClass}`}
-              >
-                <CheckCircle2 className="h-3.5 w-3.5" />
+              <div className="inline-flex items-center gap-1.5 text-xs font-bold text-[#1C1917]">
+                <CheckCircle2 className="h-4 w-4 text-[#DC1F26]" />
                 <span>{statusMeta.labelEn}</span>
-              </span>
-              <p className="font-bn mt-1 text-[11px] text-[#78716C]">{statusMeta.labelBn}</p>
+              </div>
+              <p className="font-bn mt-0.5 text-[11px] text-[#78716C]">{statusMeta.labelBn}</p>
             </div>
           </div>
 
@@ -282,7 +280,7 @@ export function ApplicationStatusTracker({
                   <span>{result.examTitle || 'Assessment Schedule'}</span>
                 </div>
                 {result.examType && (
-                  <span className="rounded-md bg-purple-50 px-2.5 py-0.5 text-[11px] font-semibold text-purple-800">
+                  <span className="text-xs font-semibold text-purple-800">
                     {result.examType}
                   </span>
                 )}
@@ -346,7 +344,7 @@ export function ApplicationStatusTracker({
                   <span>Oral Interview Schedule</span>
                 </div>
                 {result.interviewStatus && (
-                  <span className="rounded-md bg-amber-50 px-2.5 py-0.5 text-[11px] font-semibold text-[#854D0E]">
+                  <span className="text-xs font-semibold text-[#854D0E]">
                     {INTERVIEW_STATUS_LABEL[result.interviewStatus] || result.interviewStatus}
                   </span>
                 )}

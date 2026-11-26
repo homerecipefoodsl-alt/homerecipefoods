@@ -73,7 +73,7 @@ service cloud.firestore {
         && !('isActive' in d && d.isActive == false)
         && !('status' in d && d.status in ['disabled', 'suspended', 'inactive', 'revoked'])
         && ('role' in d)
-        && d.role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent'];
+        && d.role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'];
     }
 
     function isRbacRecordActive(d) {
@@ -81,7 +81,7 @@ service cloud.firestore {
         && ('status' in d)
         && d.status == 'active'
         && ('role' in d)
-        && d.role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent'];
+        && d.role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'];
     }
 
     function hasRolePermission(d, perm) {
@@ -94,6 +94,13 @@ service cloud.firestore {
         || (!('permissions' in d) && d.role == 'manager' && perm in [
           'dashboard_view', 'products_view', 'products_add', 'products_edit',
           'categories_manage', 'showrooms_manage', 'complaints_manage', 'recruitment_manage', 'reports_view'
+        ])
+        || (!('permissions' in d) && d.role == 'editor' && perm in [
+          'dashboard_view', 'products_view', 'products_add', 'products_edit',
+          'categories_manage', 'showrooms_manage', 'banners_manage', 'seo_manage'
+        ])
+        || (!('permissions' in d) && d.role == 'moderator' && perm in [
+          'dashboard_view', 'complaints_manage', 'chat_manage', 'recruitment_manage', 'reports_view'
         ])
         || (!('permissions' in d) && d.role == 'support_agent' && perm in [
           'dashboard_view', 'complaints_manage', 'chat_manage'
@@ -159,21 +166,21 @@ service cloud.firestore {
           && !(adminDoc().get('status', '') in ['disabled', 'suspended', 'inactive', 'revoked'])
           && adminDoc().get('email', authEmail()).trim().lower() == authEmail()
           && (adminDoc().role in ['primary_super_admin', 'super_admin']
-            || (adminDoc().role in ['admin', 'manager']
+            || (adminDoc().role in ['admin', 'manager', 'editor']
               && perm in adminDoc().get('permissions', ['products_add', 'products_edit', 'categories_manage']))))
         || (!exists(/databases/$(database)/documents/admins/$(request.auth.uid))
           && exists(/databases/$(database)/documents/rbac_roles/$(authEmail()))
           && rbacDoc().get('status', '') == 'active'
           && rbacDoc().get('email', authEmail()).trim().lower() == authEmail()
           && (rbacDoc().role in ['primary_super_admin', 'super_admin']
-            || (rbacDoc().role in ['admin', 'manager']
+            || (rbacDoc().role in ['admin', 'manager', 'editor']
               && perm in rbacDoc().get('permissions', ['products_add', 'products_edit', 'categories_manage']))))
       );
     }
 
     function isCatalogAdmin() {
-      return (hasActiveAdminDoc() && adminDoc().role in ['primary_super_admin', 'super_admin', 'admin', 'manager'])
-        || (hasActiveRbacDoc() && rbacRole() in ['primary_super_admin', 'super_admin', 'admin', 'manager']);
+      return (hasActiveAdminDoc() && adminDoc().role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor'])
+        || (hasActiveRbacDoc() && rbacRole() in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor']);
     }
 
     function isSupportAgent() {
@@ -213,7 +220,7 @@ service cloud.firestore {
         && (!('managerId' in data) || (data.managerId is string && data.managerId.size() <= 64))
         && (!('managerTitle' in data) || (data.managerTitle is string && data.managerTitle.size() <= 100))
         && (!('permissions' in data) || isBoundedStringList(data.permissions, 25, 64))
-        && data.role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent']
+        && data.role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent']
         && data.status in ['active', 'disabled', 'suspended']
         && data.addedByEmail is string && data.addedByEmail.size() <= 254
         && (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 254))
@@ -245,7 +252,7 @@ service cloud.firestore {
         && (!('phone' in data) || (data.phone is string && data.phone.size() <= 40))
         && (!('managerId' in data) || (data.managerId is string && data.managerId.size() <= 64))
         && (!('permissions' in data) || isBoundedStringList(data.permissions, 25, 64))
-        && data.role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent', 'customer']
+        && data.role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent', 'customer']
         && data.status in ['active', 'disabled', 'suspended']
         && (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 254))
         && data.createdAt is timestamp
@@ -269,7 +276,7 @@ service cloud.firestore {
         && (!('manager_id' in data) || (data.manager_id is string && data.manager_id.size() <= 64))
         && (!('manager_title' in data) || (data.manager_title is string && data.manager_title.size() <= 100))
         && (!('permissions' in data) || isBoundedStringList(data.permissions, 25, 64))
-        && data.role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent']
+        && data.role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent']
         && data.active is bool
         && (!('isActive' in data) || data.isActive is bool)
         && (!('status' in data) || data.status in ['active', 'disabled', 'suspended'])
@@ -283,7 +290,7 @@ service cloud.firestore {
         && isValidId(data.uid)
         && data.email is string && data.email.size() >= 3 && data.email.size() <= 254
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
-        && data.role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent']
+        && data.role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent']
         && data.isOnline is bool
         && data.createdAt is timestamp
         && data.updatedAt is timestamp
@@ -446,6 +453,7 @@ service cloud.firestore {
           'description', 'descriptionEn', 'description_bn', 'description_en',
           'phone', 'alternate_phone', 'email',
           'openingHours', 'openingHoursEn', 'opening_time', 'closing_time', 'weekly_holiday',
+          'region', 'orderLineEn', 'orderLineBn',
           'mapUrl', 'lat', 'lng', 'images', 'available_categories', 'available_products',
           'isMain', 'visible', 'deleted', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription',
           'createdAt', 'updatedAt'
@@ -473,6 +481,9 @@ service cloud.firestore {
         && (!('opening_time' in data) || (data.opening_time is string && data.opening_time.size() <= 40))
         && (!('closing_time' in data) || (data.closing_time is string && data.closing_time.size() <= 40))
         && (!('weekly_holiday' in data) || (data.weekly_holiday is string && data.weekly_holiday.size() <= 80))
+        && (!('region' in data) || (data.region is string && data.region.size() <= 100))
+        && (!('orderLineEn' in data) || (data.orderLineEn is string && data.orderLineEn.size() <= 160))
+        && (!('orderLineBn' in data) || (data.orderLineBn is string && data.orderLineBn.size() <= 160))
         && data.mapUrl is string && data.mapUrl.size() >= 1 && data.mapUrl.size() <= 600
         && data.lat is number && data.lat >= -90 && data.lat <= 90
         && data.lng is number && data.lng >= -180 && data.lng <= 180
@@ -589,6 +600,10 @@ service cloud.firestore {
           'aiSupportEnabled', 'aiAssistantName', 'aiFallbackMessage', 'aiCustomInstructions',
           'chatSupportHours', 'chatOfflineMessage', 'chatWelcomeMessage', 'chatCategories',
           'complaintCategories', 'complaintRefPrefix', 'complaintTemplates',
+          'aboutHeadingEn', 'aboutHeadingBn', 'aboutSubtitleEn', 'aboutSubtitleBn',
+          'aboutStoryEn', 'aboutStoryBn', 'aboutMissionEn', 'aboutMissionBn', 'aboutImageUrl',
+          'contactHeadingEn', 'contactHeadingBn', 'contactSubtitleEn', 'contactSubtitleBn',
+          'supportHoursEn', 'supportHoursBn', 'secondaryPhone', 'officeMapUrl',
           'updatedAt'
         ])
         && data.brandName is string && data.brandName.size() >= 1 && data.brandName.size() <= 100
@@ -635,6 +650,23 @@ service cloud.firestore {
         && (!('complaintCategories' in data) || isBoundedStringList(data.complaintCategories, 15, 80))
         && (!('complaintRefPrefix' in data) || (data.complaintRefPrefix is string && data.complaintRefPrefix.size() <= 12))
         && (!('complaintTemplates' in data) || isBoundedStringList(data.complaintTemplates, 15, 400))
+        && (!('aboutHeadingEn' in data) || (data.aboutHeadingEn is string && data.aboutHeadingEn.size() <= 200))
+        && (!('aboutHeadingBn' in data) || (data.aboutHeadingBn is string && data.aboutHeadingBn.size() <= 200))
+        && (!('aboutSubtitleEn' in data) || (data.aboutSubtitleEn is string && data.aboutSubtitleEn.size() <= 200))
+        && (!('aboutSubtitleBn' in data) || (data.aboutSubtitleBn is string && data.aboutSubtitleBn.size() <= 200))
+        && (!('aboutStoryEn' in data) || (data.aboutStoryEn is string && data.aboutStoryEn.size() <= 3000))
+        && (!('aboutStoryBn' in data) || (data.aboutStoryBn is string && data.aboutStoryBn.size() <= 3000))
+        && (!('aboutMissionEn' in data) || (data.aboutMissionEn is string && data.aboutMissionEn.size() <= 1500))
+        && (!('aboutMissionBn' in data) || (data.aboutMissionBn is string && data.aboutMissionBn.size() <= 1500))
+        && (!('aboutImageUrl' in data) || (data.aboutImageUrl is string && data.aboutImageUrl.size() <= 400000))
+        && (!('contactHeadingEn' in data) || (data.contactHeadingEn is string && data.contactHeadingEn.size() <= 240))
+        && (!('contactHeadingBn' in data) || (data.contactHeadingBn is string && data.contactHeadingBn.size() <= 240))
+        && (!('contactSubtitleEn' in data) || (data.contactSubtitleEn is string && data.contactSubtitleEn.size() <= 240))
+        && (!('contactSubtitleBn' in data) || (data.contactSubtitleBn is string && data.contactSubtitleBn.size() <= 240))
+        && (!('supportHoursEn' in data) || (data.supportHoursEn is string && data.supportHoursEn.size() <= 160))
+        && (!('supportHoursBn' in data) || (data.supportHoursBn is string && data.supportHoursBn.size() <= 160))
+        && (!('secondaryPhone' in data) || (data.secondaryPhone is string && data.secondaryPhone.size() <= 40))
+        && (!('officeMapUrl' in data) || (data.officeMapUrl is string && data.officeMapUrl.size() <= 600))
         && data.updatedAt is timestamp;
     }
 
@@ -1029,11 +1061,11 @@ service cloud.firestore {
           ||
           (isPrimarySuperAdmin()
             && emailKey != 'mdmahmudulhashan0@gmail.com'
-            && incoming().role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent'])
+            && incoming().role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'])
           ||
           (isSuperAdmin()
             && emailKey != 'mdmahmudulhashan0@gmail.com'
-            && incoming().role in ['admin', 'manager', 'support_agent'])
+            && incoming().role in ['admin', 'manager', 'editor', 'moderator', 'support_agent'])
           ||
           (hasPermission('manager_manage')
             && emailKey != 'mdmahmudulhashan0@gmail.com'
@@ -1057,10 +1089,10 @@ service cloud.firestore {
               ||
               (isPrimarySuperAdmin()
                 && emailKey != 'mdmahmudulhashan0@gmail.com'
-                && incoming().role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent'])
+                && incoming().role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'])
               ||
               (emailKey != 'mdmahmudulhashan0@gmail.com'
-                && incoming().role in ['admin', 'manager', 'support_agent'])
+                && incoming().role in ['admin', 'manager', 'editor', 'moderator', 'support_agent'])
             ))
           ||
           (hasPermission('manager_manage')
@@ -1119,9 +1151,9 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && incoming().lastLoginAt == request.time
         && (
-          (isPrimarySuperAdmin() && incoming().role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent', 'customer'])
+          (isPrimarySuperAdmin() && incoming().role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent', 'customer'])
           ||
-          (isSuperAdmin() && incoming().role in ['admin', 'manager', 'support_agent', 'customer'])
+          (isSuperAdmin() && incoming().role in ['admin', 'manager', 'editor', 'moderator', 'support_agent', 'customer'])
           ||
           (request.auth.uid == userId
             && incoming().email == authEmail()
@@ -1150,10 +1182,10 @@ service cloud.firestore {
               ||
               (isPrimarySuperAdmin()
                 && existing().email != 'mdmahmudulhashan0@gmail.com'
-                && incoming().role in ['customer', 'primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent'])
+                && incoming().role in ['customer', 'primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'])
               ||
               (existing().email != 'mdmahmudulhashan0@gmail.com'
-                && incoming().role in ['customer', 'admin', 'manager', 'support_agent'])
+                && incoming().role in ['customer', 'admin', 'manager', 'editor', 'moderator', 'support_agent'])
             ))
           ||
           (hasVerifiedEmail()
@@ -1194,8 +1226,8 @@ service cloud.firestore {
           ||
           (adminUid != request.auth.uid
             && (
-              (isPrimarySuperAdmin() && incoming().role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent'])
-              || (isSuperAdmin() && incoming().role in ['admin', 'manager', 'support_agent'] && incoming().email != 'mdmahmudulhashan0@gmail.com')
+              (isPrimarySuperAdmin() && incoming().role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'])
+              || (isSuperAdmin() && incoming().role in ['admin', 'manager', 'editor', 'moderator', 'support_agent'] && incoming().email != 'mdmahmudulhashan0@gmail.com')
               || (hasPermission('manager_manage') && incoming().role == 'manager' && incoming().email != 'mdmahmudulhashan0@gmail.com')
             ))
         );
@@ -1205,11 +1237,11 @@ service cloud.firestore {
         && incoming().email == existing().email
         && adminUid != request.auth.uid
         && (
-          (isPrimarySuperAdmin() && incoming().role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent'])
+          (isPrimarySuperAdmin() && incoming().role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'])
           || (isSuperAdmin()
             && existing().email != 'mdmahmudulhashan0@gmail.com'
             && existing().role != 'primary_super_admin'
-            && incoming().role in ['admin', 'manager', 'support_agent'])
+            && incoming().role in ['admin', 'manager', 'editor', 'moderator', 'support_agent'])
           || (hasPermission('manager_manage')
             && existing().role == 'manager'
             && incoming().role == 'manager'
@@ -1376,6 +1408,7 @@ service cloud.firestore {
               'description', 'descriptionEn', 'description_bn', 'description_en',
               'phone', 'alternate_phone', 'email',
               'openingHours', 'openingHoursEn', 'opening_time', 'closing_time', 'weekly_holiday',
+              'region', 'orderLineEn', 'orderLineBn',
               'mapUrl', 'lat', 'lng', 'images', 'available_categories', 'available_products',
               'isMain', 'visible', 'deleted', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription',
               'updatedAt'
@@ -1386,6 +1419,7 @@ service cloud.firestore {
               'description', 'descriptionEn', 'description_bn', 'description_en',
               'phone', 'alternate_phone', 'email',
               'openingHours', 'openingHoursEn', 'opening_time', 'closing_time', 'weekly_holiday',
+              'region', 'orderLineEn', 'orderLineBn',
               'mapUrl', 'lat', 'lng', 'images', 'available_categories', 'available_products',
               'isMain', 'visible', 'deleted', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription',
               'updatedAt'
@@ -1399,6 +1433,7 @@ service cloud.firestore {
               'description', 'descriptionEn', 'description_bn', 'description_en',
               'phone', 'alternate_phone', 'email',
               'openingHours', 'openingHoursEn', 'opening_time', 'closing_time', 'weekly_holiday',
+              'region', 'orderLineEn', 'orderLineBn',
               'mapUrl', 'lat', 'lng', 'images', 'available_categories', 'available_products',
               'isMain', 'visible', 'deleted', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription',
               'createdAt', 'updatedAt'
@@ -1409,6 +1444,7 @@ service cloud.firestore {
               'description', 'descriptionEn', 'description_bn', 'description_en',
               'phone', 'alternate_phone', 'email',
               'openingHours', 'openingHoursEn', 'opening_time', 'closing_time', 'weekly_holiday',
+              'region', 'orderLineEn', 'orderLineBn',
               'mapUrl', 'lat', 'lng', 'images', 'available_categories', 'available_products',
               'isMain', 'visible', 'deleted', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription',
               'createdAt', 'updatedAt'
@@ -1480,11 +1516,15 @@ service cloud.firestore {
       allow delete: if isSuperAdmin() && isValidId(sectionId);
     }
 
-    // Site Settings (Tiered: Super Admin / settings_view = all, banners_manage = heroSlides only, chat_manage = supportOnline only)
+    // Site Settings (Tiered: Super Admin / settings_view = all, banners_manage = heroSlides, showrooms_manage = About/Contact, chat_manage = supportOnline)
     match /site_settings/{settingId} {
       allow get: if isValidId(settingId);
       allow list: if true;
-      allow create: if isSuperAdmin()
+      allow create: if (
+          isSuperAdmin()
+          || hasPermission('settings_view')
+          || (settingId == 'main' && (hasPermission('banners_manage') || hasPermission('showrooms_manage')))
+        )
         && isValidId(settingId)
         && isValidSiteSettings(incoming())
         && incoming().updatedAt == request.time;
@@ -1504,6 +1544,20 @@ service cloud.firestore {
             'aiSupportEnabled', 'aiAssistantName', 'aiFallbackMessage', 'aiCustomInstructions',
             'chatSupportHours', 'chatOfflineMessage', 'chatWelcomeMessage', 'chatCategories',
             'complaintCategories', 'complaintRefPrefix', 'complaintTemplates',
+            'aboutHeadingEn', 'aboutHeadingBn', 'aboutSubtitleEn', 'aboutSubtitleBn',
+            'aboutStoryEn', 'aboutStoryBn', 'aboutMissionEn', 'aboutMissionBn', 'aboutImageUrl',
+            'contactHeadingEn', 'contactHeadingBn', 'contactSubtitleEn', 'contactSubtitleBn',
+            'supportHoursEn', 'supportHoursBn', 'secondaryPhone', 'officeMapUrl',
+            'updatedAt'
+          ]))
+          ||
+          (hasPermission('showrooms_manage') && settingId == 'main' && incoming().diff(existing()).affectedKeys().hasOnly([
+            'aboutHeadingEn', 'aboutHeadingBn', 'aboutSubtitleEn', 'aboutSubtitleBn',
+            'aboutStoryEn', 'aboutStoryBn', 'aboutMissionEn', 'aboutMissionBn', 'aboutImageUrl',
+            'contactHeadingEn', 'contactHeadingBn', 'contactSubtitleEn', 'contactSubtitleBn',
+            'supportHoursEn', 'supportHoursBn', 'supportPhone', 'secondaryPhone', 'brandEmail',
+            'brandAddressBn', 'brandAddressEn', 'officeMapUrl',
+            'messengerUrl', 'facebookUrl', 'instagramUrl', 'youtubeUrl', 'whatsappUrl',
             'updatedAt'
           ]))
           ||

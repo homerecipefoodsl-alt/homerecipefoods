@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { ExternalLink, MapPin, MessageCircle, Navigation, Phone, ShieldAlert } from 'lucide-react';
+import { ExternalLink, Mail, MapPin, MessageCircle, Navigation, Phone, ShieldAlert } from 'lucide-react';
 import { BrandLogo } from '../components/BrandLogo';
 import { useStore } from '../context/StoreContext';
 import { isDemoOrDummyShowroom } from '../data/outletsData';
@@ -23,12 +23,30 @@ function formatOutletTitleEn(raw: string): string {
 }
 
 export function ContactPage({ onOpenChat }: ContactPageProps) {
-  const { showrooms, siteSettings } = useStore();
-  const approvedShowrooms = showrooms.filter((sr) => !isDemoOrDummyShowroom(sr));
+  const { showrooms, siteSettings, languageMode } = useStore();
+  const approvedShowrooms = showrooms.filter(
+    (sr) => sr.visible !== false && !sr.deleted && !isDemoOrDummyShowroom(sr)
+  );
+  const showEnglishFirst = languageMode !== 'bn';
+  const showBothLanguages = languageMode === 'both';
 
   useEffect(() => {
-    document.title = 'Contact Us · Customer Care & Outlets – Home Recipe Foods';
-  }, []);
+    document.title = `Contact Us · Customer Care & Outlets – ${siteSettings.brandName || 'Home Recipe Foods'}`;
+  }, [siteSettings.brandName]);
+
+  const headingEn = siteSettings.contactHeadingEn || 'Get in Touch With Home Recipe Foods';
+  const headingBn = siteSettings.contactHeadingBn || 'আমাদের সাথে সরাসরি যোগাযোগ করুন';
+  const subtitleEn =
+    siteSettings.contactSubtitleEn ||
+    'For product enquiries, custom celebration cakes, or direct showroom assistance, reach our customer hotline, open live concierge chat, or visit any Chattogram outlet.';
+  const subtitleBn =
+    siteSettings.contactSubtitleBn ||
+    'শোরুম তথ্য, কাস্টম অর্ডার পরামর্শ কিংবা সেবার যেকোনো প্রয়োজনে কথা বলুন।';
+  const supportHoursEn = siteSettings.supportHoursEn || 'Daily · 8:00 AM – 10:00 PM';
+  const supportHoursBn = siteSettings.supportHoursBn || '';
+  const officeAddressEn =
+    siteSettings.brandAddressEn || '15/149 Shah Garibullah H/S Rd No: 01, Chattogram, Bangladesh';
+  const officeAddressBn = siteSettings.brandAddressBn || '';
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6 sm:py-14 lg:px-8">
@@ -37,14 +55,25 @@ export function ContactPage({ onOpenChat }: ContactPageProps) {
           <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#B91C1C]">
             Support &amp; Enquiries
           </p>
-          <h1 className="font-display mt-1 text-3xl font-bold text-[#1C1917] sm:text-5xl">
-            Get in Touch
+          <h1
+            className={`mt-1 text-3xl font-bold text-[#1C1917] sm:text-5xl ${
+              showEnglishFirst ? 'font-display' : 'font-bn'
+            }`}
+            style={{ textWrap: 'balance' }}
+          >
+            {showEnglishFirst ? headingEn : headingBn}
           </h1>
-          <p className="font-bn mt-0.5 text-sm text-[#78716C]">যোগাযোগ ও সহায়তা</p>
+          {showBothLanguages && headingBn && headingBn !== headingEn && (
+            <p className="font-bn mt-0.5 text-sm text-[#78716C]">{headingBn}</p>
+          )}
           <p className="mt-2 max-w-2xl text-sm text-[#57534E]">
-            For product enquiries, custom celebration cakes, or direct showroom assistance, reach
-            our customer hotline, open live concierge chat, or visit any Chattogram outlet.
+            {showEnglishFirst ? subtitleEn : subtitleBn}
           </p>
+          {showBothLanguages && subtitleBn && (
+            <p className="font-bn mt-0.5 max-w-2xl text-xs text-[#78716C]">
+              {subtitleBn}
+            </p>
+          )}
         </div>
         <div className="shrink-0">
           <BrandLogo variant="compact" />
@@ -59,14 +88,27 @@ export function ContactPage({ onOpenChat }: ContactPageProps) {
           </h3>
           <p className="font-bn mt-0.5 text-xs text-[#78716C]">কাস্টমার হটলাইন</p>
           <p className="mt-2 text-sm text-[#57534E]">
-            Speak directly with our care desk daily from 8:00 AM to 11:00 PM.
+            {showEnglishFirst ? supportHoursEn : supportHoursBn || supportHoursEn}
           </p>
-          <a
-            href={`tel:${siteSettings.supportPhone.replace(/\s+/g, '')}`}
-            className="mt-4 inline-block font-mono tabular-nums text-base font-bold text-[#B91C1C] hover:underline"
-          >
-            {siteSettings.supportPhone}
-          </a>
+          {showBothLanguages && supportHoursBn && (
+            <p className="font-bn mt-0.5 text-xs text-[#78716C]">{supportHoursBn}</p>
+          )}
+          <div className="mt-4 flex flex-col gap-1.5">
+            <a
+              href={`tel:${siteSettings.supportPhone.replace(/\s+/g, '')}`}
+              className="inline-block font-mono tabular-nums text-base font-bold text-[#B91C1C] hover:underline"
+            >
+              {siteSettings.supportPhone}
+            </a>
+            {siteSettings.secondaryPhone && (
+              <a
+                href={`tel:${siteSettings.secondaryPhone.replace(/\s+/g, '')}`}
+                className="inline-block font-mono tabular-nums text-sm font-semibold text-[#1C1917] hover:text-[#B91C1C]"
+              >
+                {siteSettings.secondaryPhone}
+              </a>
+            )}
+          </div>
         </div>
 
         <div className="rounded-xl border border-[#E7E5E4] bg-white p-6">
@@ -105,12 +147,50 @@ export function ContactPage({ onOpenChat }: ContactPageProps) {
         </div>
       </div>
 
+      {/* Head Office & Enquiries Strip */}
+      <div className="mt-6 flex flex-col justify-between gap-4 rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-5 sm:flex-row sm:items-center sm:p-6">
+        <div className="space-y-1">
+          <p className="text-xs font-semibold uppercase tracking-wider text-[#B91C1C]">
+            Head Office · Chattogram
+          </p>
+          <p className="text-sm font-semibold text-[#1C1917]">
+            {showEnglishFirst ? officeAddressEn : officeAddressBn || officeAddressEn}
+          </p>
+          {showBothLanguages && officeAddressBn && officeAddressBn !== officeAddressEn && (
+            <p className="font-bn text-xs text-[#78716C]">{officeAddressBn}</p>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-2.5">
+          {siteSettings.brandEmail && (
+            <a
+              href={`mailto:${siteSettings.brandEmail}`}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[#D6D3D1] bg-white px-3.5 py-2 text-xs font-semibold text-[#1C1917] transition-colors hover:border-[#1C1917]"
+            >
+              <Mail className="h-3.5 w-3.5 text-[#DC1F26]" />
+              <span>{siteSettings.brandEmail}</span>
+            </a>
+          )}
+          {siteSettings.officeMapUrl && (
+            <a
+              href={siteSettings.officeMapUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[#1C1917] px-3.5 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#DC1F26]"
+            >
+              <Navigation className="h-3.5 w-3.5" />
+              <span>Head Office Map</span>
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          )}
+        </div>
+      </div>
+
       {/* Showroom Directory */}
       <div className="mt-12">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <div>
             <h2 className="font-display text-2xl font-bold text-[#1C1917] sm:text-3xl">
-              Our Outlets
+              Our Outlets ({approvedShowrooms.length})
             </h2>
             <p className="font-bn text-xs text-[#78716C]">আমাদের শো-রুমসমূহ</p>
           </div>
@@ -118,7 +198,7 @@ export function ContactPage({ onOpenChat }: ContactPageProps) {
             to="/outlets"
             className="text-xs font-semibold text-[#B91C1C] hover:underline sm:text-sm"
           >
-            View all outlets &rarr;
+            View all {approvedShowrooms.length} outlets &rarr;
           </Link>
         </div>
 

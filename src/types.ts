@@ -1,4 +1,11 @@
-export type StaffRole = 'primary_super_admin' | 'super_admin' | 'admin' | 'manager' | 'support_agent';
+export type StaffRole =
+  | 'primary_super_admin'
+  | 'super_admin'
+  | 'admin'
+  | 'manager'
+  | 'editor'
+  | 'moderator'
+  | 'support_agent';
 export type UserRole = StaffRole | 'customer';
 export function isSuperAdminRole(role?: string | null): boolean {
   return role === 'primary_super_admin' || role === 'super_admin';
@@ -71,6 +78,23 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<StaffRole, PermissionKey[]> = {
     'categories_manage',
     'showrooms_manage',
     'complaints_manage',
+    'recruitment_manage',
+    'reports_view',
+  ],
+  editor: [
+    'dashboard_view',
+    'products_view',
+    'products_add',
+    'products_edit',
+    'categories_manage',
+    'showrooms_manage',
+    'banners_manage',
+    'seo_manage',
+  ],
+  moderator: [
+    'dashboard_view',
+    'complaints_manage',
+    'chat_manage',
     'recruitment_manage',
     'reports_view',
   ],
@@ -362,6 +386,9 @@ export interface Showroom {
   opening_time?: string;
   closing_time?: string;
   weekly_holiday?: string;
+  region?: string;
+  orderLineEn?: string;
+  orderLineBn?: string;
   mapUrl: string;
   lat: number;
   lng: number;
@@ -482,6 +509,23 @@ export interface SiteSettings {
   complaintCategories?: string[];
   complaintRefPrefix?: string;
   complaintTemplates?: string[];
+  aboutHeadingEn?: string;
+  aboutHeadingBn?: string;
+  aboutSubtitleEn?: string;
+  aboutSubtitleBn?: string;
+  aboutStoryEn?: string;
+  aboutStoryBn?: string;
+  aboutMissionEn?: string;
+  aboutMissionBn?: string;
+  aboutImageUrl?: string;
+  contactHeadingEn?: string;
+  contactHeadingBn?: string;
+  contactSubtitleEn?: string;
+  contactSubtitleBn?: string;
+  supportHoursEn?: string;
+  supportHoursBn?: string;
+  secondaryPhone?: string;
+  officeMapUrl?: string;
   updatedAt?: unknown;
 }
 

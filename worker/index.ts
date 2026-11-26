@@ -14,8 +14,10 @@ import {
 
 import {
   ALLOWED_MEDIA_MIME_TYPES,
+  ALLOWED_RECRUITMENT_MIME_TYPES,
   buildR2MediaPublicUrl,
   buildR2ObjectKey,
+  buildRecruitmentR2ObjectKey,
   CATALOG_UPLOAD_PERMISSIONS,
   CATALOG_UPLOAD_STAFF_ROLES,
   DEFAULT_R2_BUCKET_NAME,
@@ -26,11 +28,14 @@ import {
   headObjectFromR2S3,
   inspectImageBytes,
   inspectR2S3Credentials,
+  inspectRecruitmentFileBytes,
   isAllowedMediaFolder,
   MAX_MEDIA_IMAGE_BYTES,
+  MAX_RECRUITMENT_DOC_BYTES,
   putObjectToR2S3,
   resolveAllowedApiCorsOrigin,
   validateR2ReadKey,
+  validateRecruitmentReadKey,
   type MediaUploadFolder,
 } from '../shared/r2Media';
 
@@ -106,7 +111,14 @@ const VALID_PERMISSIONS = [
   'manager_manage',
 ] as const;
 
-type StaffRole = 'primary_super_admin' | 'super_admin' | 'admin' | 'manager' | 'support_agent';
+type StaffRole =
+  | 'primary_super_admin'
+  | 'super_admin'
+  | 'admin'
+  | 'manager'
+  | 'editor'
+  | 'moderator'
+  | 'support_agent';
 
 function isSuperAdminRole(role?: string | null): boolean {
   return role === 'primary_super_admin' || role === 'super_admin';
@@ -138,6 +150,23 @@ const DEFAULT_ROLE_PERMISSIONS: Record<StaffRole, string[]> = {
     'recruitment_manage',
     'reports_view',
   ],
+  editor: [
+    'dashboard_view',
+    'products_view',
+    'products_add',
+    'products_edit',
+    'categories_manage',
+    'showrooms_manage',
+    'banners_manage',
+    'seo_manage',
+  ],
+  moderator: [
+    'dashboard_view',
+    'complaints_manage',
+    'chat_manage',
+    'recruitment_manage',
+    'reports_view',
+  ],
   support_agent: ['dashboard_view', 'complaints_manage', 'chat_manage'],
 };
 
@@ -151,7 +180,7 @@ function buildScopedCorsHeaders(corsOrigin: string | null): Record<string, strin
   const headers: Record<string, string> = {
     'Access-Control-Allow-Methods': 'GET, HEAD, POST, DELETE, OPTIONS',
     'Access-Control-Allow-Headers':
-      'Content-Type, Authorization, X-Chat-Client-Id, X-Upload-Folder, X-Entity-Id, X-File-Name, X-Is-Primary',
+      'Content-Type, Authorization, X-Chat-Client-Id, X-Upload-Folder, X-Entity-Id, X-File-Name, X-Is-Primary, X-Upload-Kind, X-Application-Code',
     Vary: 'Origin',
   };
   if (corsOrigin) {
@@ -757,7 +786,7 @@ async function syncFirebaseStaffCustomClaimsWorker(params: {
   if (!params.uid) return false;
   const isCatalogStaff =
     params.status === 'active' &&
-    ['primary_super_admin', 'super_admin', 'admin', 'manager'].includes(params.role);
+    ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor'].includes(params.role);
   try {
     const resp = await fetch(
       `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(
@@ -1249,7 +1278,7 @@ async function handleSessionInit(request: Request, env: Env): Promise<Response> 
       adminToken &&
       saCheck.ok &&
       authority.status === 'active' &&
-      ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent'].includes(
+      ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'].includes(
         authority.role
       )
     ) {
@@ -1284,7 +1313,7 @@ async function handleSessionInit(request: Request, env: Env): Promise<Response> 
       serviceAccountMessage,
       role: isSuperAdminRole(authority.role) && authority.status === 'active'
         ? authority.role
-        : ['admin', 'manager', 'support_agent'].includes(authority.role) && authority.status === 'active'
+        : ['admin', 'manager', 'editor', 'moderator', 'support_agent'].includes(authority.role) && authority.status === 'active'
         ? authority.role
         : authority.canManageManagers
         ? 'manager'
@@ -1391,7 +1420,7 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
         409
       );
     }
-    if (!['super_admin', 'admin', 'manager', 'support_agent'].includes(cleanRole)) {
+    if (!['super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'].includes(cleanRole)) {
       return errorResponse('VALIDATION_ERROR', 'Invalid role selected.', 400);
     }
     const targetRole = cleanRole as StaffRole;
@@ -1589,6 +1618,10 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
         ? 'Admin successfully created'
         : targetRole === 'manager'
         ? 'Manager successfully created'
+        : targetRole === 'editor'
+        ? 'Editor successfully created'
+        : targetRole === 'moderator'
+        ? 'Moderator successfully created'
         : targetRole === 'super_admin'
         ? 'Super Admin successfully created'
         : 'Staff user successfully created';
@@ -1774,7 +1807,7 @@ async function handleAdminUpdateUserStatus(request: Request, env: Env): Promise<
                 customAttributes: JSON.stringify({
                   hrf_staff:
                     !Boolean(body.disabled) &&
-                    ['primary_super_admin', 'super_admin', 'admin', 'manager'].includes(body.role),
+                    ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor'].includes(body.role),
                   role: body.role,
                   staff_status: Boolean(body.disabled) ? 'disabled' : 'active',
                 }),
@@ -2443,6 +2476,228 @@ async function handleMediaFileGetWorker(
   return new Response('Media bucket not configured', { status: 503 });
 }
 
+async function handleRecruitmentUploadWorker(
+  request: Request,
+  env: Env,
+  url: URL,
+  corsOrigin: string | null
+): Promise<Response> {
+  try {
+    const rawKind = (
+      url.searchParams.get('kind') ||
+      request.headers.get('x-upload-kind') ||
+      'doc'
+    )
+      .trim()
+      .toLowerCase();
+    const kind: 'photo' | 'doc' = rawKind === 'photo' ? 'photo' : 'doc';
+
+    const rawAppCode = (
+      url.searchParams.get('applicationCode') ||
+      request.headers.get('x-application-code') ||
+      ''
+    ).trim();
+    if (!/^[a-zA-Z0-9_-]{4,64}$/.test(rawAppCode)) {
+      return scopedErrorResponse(
+        'INVALID_APPLICATION_CODE',
+        'Valid application code is required for recruitment upload.',
+        400,
+        corsOrigin
+      );
+    }
+
+    const contentLengthHeader = Number(request.headers.get('content-length') || '0');
+    if (Number.isFinite(contentLengthHeader) && contentLengthHeader > MAX_RECRUITMENT_DOC_BYTES + 65536) {
+      return scopedErrorResponse(
+        'FILE_TOO_LARGE',
+        'File exceeds maximum allowed upload limit (5 MB).',
+        413,
+        corsOrigin
+      );
+    }
+
+    let rawFileName =
+      url.searchParams.get('filename') ||
+      request.headers.get('x-file-name') ||
+      (kind === 'photo' ? 'photo.jpg' : 'document.pdf');
+    let bytes: Uint8Array;
+    let declaredMime = request.headers.get('content-type') || undefined;
+    const lowerCt = (declaredMime || '').toLowerCase();
+
+    if (lowerCt.includes('multipart/form-data')) {
+      const form = await request.formData();
+      const candidateFile = form.get('file') || form.get('document') || form.get('photo');
+      if (!candidateFile || typeof candidateFile === 'string') {
+        return scopedErrorResponse(
+          'MISSING_FILE',
+          'Please select a valid recruitment file.',
+          400,
+          corsOrigin
+        );
+      }
+      rawFileName = candidateFile.name || rawFileName;
+      declaredMime = candidateFile.type || undefined;
+      bytes = new Uint8Array(await candidateFile.arrayBuffer());
+    } else {
+      const arrayBuffer = await request.arrayBuffer();
+      bytes = new Uint8Array(arrayBuffer);
+    }
+
+    const inspection = inspectRecruitmentFileBytes(bytes, kind, declaredMime);
+    if (inspection.ok === false) {
+      return scopedErrorResponse(
+        inspection.code,
+        inspection.message,
+        inspection.status,
+        corsOrigin
+      );
+    }
+
+    const objectKey = buildRecruitmentR2ObjectKey({
+      applicationCode: rawAppCode,
+      fileName: rawFileName,
+      ext: inspection.ext,
+    });
+
+    const s3Creds = inspectR2S3Credentials(env);
+    if (env.PRODUCT_IMAGES) {
+      await env.PRODUCT_IMAGES.put(objectKey, bytes, {
+        httpMetadata: {
+          contentType: inspection.contentType,
+          cacheControl: 'private, max-age=31536000',
+        },
+        customMetadata: {
+          applicationCode: rawAppCode,
+          kind,
+        },
+      });
+    } else if (s3Creds.configured) {
+      const s3Result = await putObjectToR2S3({
+        creds: s3Creds.creds,
+        objectKey,
+        body: bytes,
+        contentType: inspection.contentType,
+        cacheControl: 'private, max-age=31536000',
+      });
+      if (s3Result.ok === false) {
+        return scopedErrorResponse(
+          'R2_UPLOAD_FAILED',
+          'Failed to store recruitment file in Cloudflare R2.',
+          502,
+          corsOrigin
+        );
+      }
+    } else {
+      return scopedErrorResponse(
+        'R2_NOT_CONFIGURED',
+        `Cloudflare R2 bucket (${DEFAULT_R2_BUCKET_NAME}) is not configured in this environment.`,
+        503,
+        corsOrigin
+      );
+    }
+
+    return scopedJsonResponse(
+      {
+        success: true,
+        ok: true,
+        key: objectKey,
+        url: `/api/recruitment/file/${objectKey}`,
+        contentType: inspection.contentType,
+        sizeBytes: bytes.byteLength,
+        storageProvider: 'cloudflare-r2',
+      },
+      201,
+      corsOrigin
+    );
+  } catch {
+    return scopedErrorResponse(
+      'RECRUITMENT_UPLOAD_ERROR',
+      'Unexpected server error while uploading recruitment file.',
+      500,
+      corsOrigin
+    );
+  }
+}
+
+async function handleRecruitmentFileGetWorker(
+  request: Request,
+  env: Env,
+  rawKeyPath: string
+): Promise<Response> {
+  const objectKey = validateRecruitmentReadKey(rawKeyPath);
+  if (!objectKey) {
+    return new Response('Not found', { status: 404 });
+  }
+
+  const isHead = request.method === 'HEAD';
+
+  const inferRecruitmentMime = (rawMime: string, key: string): string => {
+    const clean = rawMime.split(';')[0].trim().toLowerCase();
+    if ((ALLOWED_RECRUITMENT_MIME_TYPES as readonly string[]).includes(clean)) {
+      return clean;
+    }
+    if (key.endsWith('.png')) return 'image/png';
+    if (key.endsWith('.webp')) return 'image/webp';
+    if (key.endsWith('.pdf')) return 'application/pdf';
+    if (key.endsWith('.doc')) return 'application/msword';
+    if (key.endsWith('.docx')) {
+      return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    }
+    return 'image/jpeg';
+  };
+
+  if (env.PRODUCT_IMAGES) {
+    const obj =
+      isHead && typeof env.PRODUCT_IMAGES.head === 'function'
+        ? await env.PRODUCT_IMAGES.head(objectKey)
+        : await env.PRODUCT_IMAGES.get(objectKey);
+    const hasBody = obj && 'body' in obj ? Boolean(obj.body) : Boolean(obj);
+    if (!obj || (!isHead && !hasBody)) {
+      return new Response('File not found', { status: 404 });
+    }
+
+    const safeMime = inferRecruitmentMime(obj.httpMetadata?.contentType || '', objectKey);
+    const headers: Record<string, string> = {
+      'Content-Type': safeMime,
+      'Cache-Control': 'private, max-age=31536000',
+      'X-Content-Type-Options': 'nosniff',
+    };
+    if (typeof obj.size === 'number' && Number.isFinite(obj.size)) {
+      headers['Content-Length'] = String(obj.size);
+    }
+    if (isHead) {
+      return new Response(null, { status: 200, headers });
+    }
+    return new Response((obj as R2ObjectBodyBinding).body, { status: 200, headers });
+  }
+
+  const s3Creds = inspectR2S3Credentials(env);
+  if (s3Creds.configured) {
+    const s3Resp = isHead
+      ? await headObjectFromR2S3({ creds: s3Creds.creds, objectKey })
+      : await getObjectFromR2S3({ creds: s3Creds.creds, objectKey });
+    if (!s3Resp.ok || (!isHead && !s3Resp.body)) {
+      return new Response('File not found', { status: s3Resp.status === 404 ? 404 : 502 });
+    }
+    const safeMime = inferRecruitmentMime(s3Resp.headers.get('content-type') || '', objectKey);
+    const headers: Record<string, string> = {
+      'Content-Type': safeMime,
+      'Cache-Control': 'private, max-age=31536000',
+      'X-Content-Type-Options': 'nosniff',
+    };
+    const contentLength = s3Resp.headers.get('content-length');
+    if (contentLength) {
+      headers['Content-Length'] = contentLength;
+    }
+    if (isHead) {
+      return new Response(null, { status: 200, headers });
+    }
+    return new Response(s3Resp.body, { status: 200, headers });
+  }
+
+  return new Response('Media bucket not configured', { status: 503 });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -2513,6 +2768,31 @@ export default {
         }
         if (request.method === 'DELETE') {
           return handleMediaDeleteWorker(request, env, corsOrigin);
+        }
+      }
+
+      if (url.pathname.startsWith('/api/recruitment/file/')) {
+        const rawKey = url.pathname.slice('/api/recruitment/file/'.length);
+        if (request.method === 'GET' || request.method === 'HEAD') {
+          return handleRecruitmentFileGetWorker(request, env, rawKey);
+        }
+        if (request.method === 'OPTIONS') {
+          return new Response(null, {
+            status: 204,
+            headers: buildScopedCorsHeaders(corsOrigin),
+          });
+        }
+      }
+
+      if (url.pathname === '/api/recruitment/upload') {
+        if (request.method === 'OPTIONS') {
+          return new Response(null, {
+            status: 204,
+            headers: buildScopedCorsHeaders(corsOrigin),
+          });
+        }
+        if (request.method === 'POST') {
+          return handleRecruitmentUploadWorker(request, env, url, corsOrigin);
         }
       }
 

@@ -26,6 +26,7 @@ export const CATALOG_UPLOAD_STAFF_ROLES = new Set([
   'super_admin',
   'admin',
   'manager',
+  'editor',
 ]);
 
 export const CATALOG_UPLOAD_PERMISSIONS = [
@@ -114,6 +115,200 @@ export function validateR2ReadKey(rawPath: string): string | null {
   }
 
   return trimmed;
+}
+
+export const MAX_RECRUITMENT_PHOTO_BYTES = 2 * 1024 * 1024; // 2 MB
+export const MAX_RECRUITMENT_DOC_BYTES = 5 * 1024 * 1024; // 5 MB
+
+export const ALLOWED_RECRUITMENT_MIME_TYPES = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+] as const;
+
+export type AllowedRecruitmentMimeType = (typeof ALLOWED_RECRUITMENT_MIME_TYPES)[number];
+
+export function sanitizeRecruitmentAppCode(rawCode: string): string {
+  const cleaned = rawCode
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, '')
+    .slice(0, 64);
+  return cleaned.length >= 4 ? cleaned : `app_${Date.now()}`;
+}
+
+export function buildRecruitmentR2ObjectKey(params: {
+  applicationCode: string;
+  fileName: string;
+  ext: 'jpg' | 'png' | 'webp' | 'pdf' | 'doc' | 'docx';
+}): string {
+  const safeAppCode = sanitizeRecruitmentAppCode(params.applicationCode);
+  const randBytes = new Uint8Array(3);
+  globalThis.crypto.getRandomValues(randBytes);
+  const randHex = Array.from(randBytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  const safeBase = sanitizeMediaFileBase(params.fileName);
+  return `recruitment/${safeAppCode}/${Date.now()}_${randHex}_${safeBase}.${params.ext}`;
+}
+
+export function validateRecruitmentReadKey(rawPath: string): string | null {
+  let decoded = rawPath;
+  try {
+    decoded = decodeURIComponent(rawPath);
+  } catch {
+    return null;
+  }
+
+  const trimmed = decoded.replace(/^\/+/, '').trim();
+  if (
+    !trimmed ||
+    trimmed.length > 320 ||
+    trimmed.includes('..') ||
+    trimmed.includes('\\') ||
+    trimmed.includes('\0')
+  ) {
+    return null;
+  }
+
+  if (!/^recruitment\/[a-zA-Z0-9_-]{4,64}\/[a-zA-Z0-9._-]{1,120}$/.test(trimmed)) {
+    return null;
+  }
+
+  if (!/\.(jpg|jpeg|png|webp|pdf|doc|docx)$/i.test(trimmed)) {
+    return null;
+  }
+
+  return trimmed;
+}
+
+export function inspectRecruitmentFileBytes(
+  bytes: Uint8Array,
+  kind: 'photo' | 'doc',
+  declaredMime?: string
+):
+  | {
+      ok: true;
+      contentType: AllowedRecruitmentMimeType;
+      ext: 'jpg' | 'png' | 'webp' | 'pdf' | 'doc' | 'docx';
+    }
+  | { ok: false; status: number; code: string; message: string } {
+  if (!bytes || bytes.byteLength <= 12) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'EMPTY_FILE',
+      message: 'Selected file is empty or corrupted.',
+    };
+  }
+
+  const maxBytes = kind === 'photo' ? MAX_RECRUITMENT_PHOTO_BYTES : MAX_RECRUITMENT_DOC_BYTES;
+  if (bytes.byteLength > maxBytes) {
+    return {
+      ok: false,
+      status: 413,
+      code: 'FILE_TOO_LARGE',
+      message:
+        kind === 'photo'
+          ? 'Candidate photo size must not exceed 2 MB.'
+          : 'Document file size must not exceed 5 MB.',
+    };
+  }
+
+  const normalizedMime = (declaredMime || '').split(';')[0].trim().toLowerCase();
+
+  // JPEG: FF D8 FF
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return { ok: true, contentType: 'image/jpeg', ext: 'jpg' };
+  }
+
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
+    return { ok: true, contentType: 'image/png', ext: 'png' };
+  }
+
+  // WEBP: "RIFF" .... "WEBP"
+  if (
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return { ok: true, contentType: 'image/webp', ext: 'webp' };
+  }
+
+  if (kind === 'doc') {
+    // PDF: "%PDF-"
+    if (
+      bytes[0] === 0x25 &&
+      bytes[1] === 0x50 &&
+      bytes[2] === 0x44 &&
+      bytes[3] === 0x46 &&
+      bytes[4] === 0x2d
+    ) {
+      return { ok: true, contentType: 'application/pdf', ext: 'pdf' };
+    }
+
+    // DOC (OLE2): D0 CF 11 E0 A1 B1 1A E1
+    if (
+      bytes[0] === 0xd0 &&
+      bytes[1] === 0xcf &&
+      bytes[2] === 0x11 &&
+      bytes[3] === 0xe0 &&
+      bytes[4] === 0xa1 &&
+      bytes[5] === 0xb1 &&
+      bytes[6] === 0x1a &&
+      bytes[7] === 0xe1
+    ) {
+      return { ok: true, contentType: 'application/msword', ext: 'doc' };
+    }
+
+    // DOCX (ZIP PK\x03\x04)
+    if (bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04) {
+      if (
+        normalizedMime &&
+        normalizedMime !== 'application/octet-stream' &&
+        normalizedMime !==
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document' &&
+        normalizedMime !== 'application/zip'
+      ) {
+        return {
+          ok: false,
+          status: 415,
+          code: 'UNSUPPORTED_FILE_TYPE',
+          message: 'Please upload documents in PDF, DOC, DOCX, JPG, or PNG format only.',
+        };
+      }
+      return {
+        ok: true,
+        contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        ext: 'docx',
+      };
+    }
+  }
+
+  return {
+    ok: false,
+    status: 415,
+    code: 'UNSUPPORTED_FILE_TYPE',
+    message:
+      kind === 'photo'
+        ? 'Please upload candidate photos in JPG, JPEG, PNG, or WEBP format only.'
+        : 'Please upload documents in PDF, DOC, DOCX, JPG, or PNG format only.',
+  };
 }
 
 export function isR2PublicHost(hostname: string, extraPublicUrl?: string): boolean {
@@ -538,10 +733,11 @@ export async function putObjectToR2S3(params: {
   creds: R2S3Credentials;
   objectKey: string;
   body: Uint8Array;
-  contentType: AllowedMediaMimeType;
+  contentType: string;
+  cacheControl?: string;
 }): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
   const payloadHash = await sha256Hex(params.body);
-  const cacheControl = 'public, max-age=31536000, immutable';
+  const cacheControl = params.cacheControl || 'public, max-age=31536000, immutable';
   const signed = await signR2S3Request({
     method: 'PUT',
     creds: params.creds,

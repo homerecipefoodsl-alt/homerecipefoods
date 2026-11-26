@@ -16,8 +16,10 @@ import {
 } from './shared/firebaseServiceAccount';
 import {
   ALLOWED_MEDIA_MIME_TYPES,
+  ALLOWED_RECRUITMENT_MIME_TYPES,
   buildR2MediaPublicUrl,
   buildR2ObjectKey,
+  buildRecruitmentR2ObjectKey,
   CATALOG_UPLOAD_PERMISSIONS,
   CATALOG_UPLOAD_STAFF_ROLES,
   DEFAULT_R2_BUCKET_NAME,
@@ -28,11 +30,14 @@ import {
   headObjectFromR2S3,
   inspectImageBytes,
   inspectR2S3Credentials,
+  inspectRecruitmentFileBytes,
   isAllowedMediaFolder,
   MAX_MEDIA_IMAGE_BYTES,
+  MAX_RECRUITMENT_DOC_BYTES,
   putObjectToR2S3,
   resolveAllowedApiCorsOrigin,
   validateR2ReadKey,
+  validateRecruitmentReadKey,
   type MediaUploadFolder,
 } from './shared/r2Media';
 
@@ -111,7 +116,7 @@ app.use('/api', (req, res, next) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, X-Chat-Client-Id, X-Upload-Folder, X-Entity-Id, X-File-Name, X-Is-Primary'
+    'Content-Type, Authorization, X-Chat-Client-Id, X-Upload-Folder, X-Entity-Id, X-File-Name, X-Is-Primary, X-Upload-Kind, X-Application-Code'
   );
   res.setHeader('Cache-Control', 'no-store');
   if (req.method === 'OPTIONS') {
@@ -145,7 +150,14 @@ const VALID_PERMISSIONS = [
   'manager_manage',
 ] as const;
 
-type StaffRole = 'primary_super_admin' | 'super_admin' | 'admin' | 'manager' | 'support_agent';
+type StaffRole =
+  | 'primary_super_admin'
+  | 'super_admin'
+  | 'admin'
+  | 'manager'
+  | 'editor'
+  | 'moderator'
+  | 'support_agent';
 
 function isSuperAdminRole(role?: string | null): boolean {
   return role === 'primary_super_admin' || role === 'super_admin';
@@ -174,6 +186,23 @@ const DEFAULT_ROLE_PERMISSIONS: Record<StaffRole, string[]> = {
     'categories_manage',
     'showrooms_manage',
     'complaints_manage',
+    'recruitment_manage',
+    'reports_view',
+  ],
+  editor: [
+    'dashboard_view',
+    'products_view',
+    'products_add',
+    'products_edit',
+    'categories_manage',
+    'showrooms_manage',
+    'banners_manage',
+    'seo_manage',
+  ],
+  moderator: [
+    'dashboard_view',
+    'complaints_manage',
+    'chat_manage',
     'recruitment_manage',
     'reports_view',
   ],
@@ -671,7 +700,7 @@ async function syncFirebaseStaffCustomClaims(params: {
   if (!params.uid) return false;
   const isCatalogStaff =
     params.status === 'active' &&
-    ['primary_super_admin', 'super_admin', 'admin', 'manager'].includes(params.role);
+    ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor'].includes(params.role);
   try {
     const resp = await fetch(
       `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(
@@ -1094,7 +1123,7 @@ app.post('/api/auth/session-init', async (req, res) => {
       adminToken &&
       saCheck.ok &&
       authority.status === 'active' &&
-      ['primary_super_admin', 'super_admin', 'admin', 'manager', 'support_agent'].includes(
+      ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'].includes(
         authority.role
       )
     ) {
@@ -1129,7 +1158,7 @@ app.post('/api/auth/session-init', async (req, res) => {
       serviceAccountMessage,
       role: isSuperAdminRole(authority.role) && authority.status === 'active'
         ? authority.role
-        : ['admin', 'manager', 'support_agent'].includes(authority.role) && authority.status === 'active'
+        : ['admin', 'manager', 'editor', 'moderator', 'support_agent'].includes(authority.role) && authority.status === 'active'
         ? authority.role
         : authority.canManageManagers
         ? 'manager'
@@ -1225,7 +1254,7 @@ async function handleCreateAdminUser(req: Request, res: Response) {
       );
       return;
     }
-    if (!['super_admin', 'admin', 'manager', 'support_agent'].includes(cleanRole)) {
+    if (!['super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'].includes(cleanRole)) {
       sendError(res, 'VALIDATION_ERROR', 'Invalid role selected.', 400);
       return;
     }
@@ -1432,6 +1461,10 @@ async function handleCreateAdminUser(req: Request, res: Response) {
         ? 'Admin successfully created'
         : targetRole === 'manager'
         ? 'Manager successfully created'
+        : targetRole === 'editor'
+        ? 'Editor successfully created'
+        : targetRole === 'moderator'
+        ? 'Moderator successfully created'
         : targetRole === 'super_admin'
         ? 'Super Admin successfully created'
         : 'Staff user successfully created';
@@ -1614,7 +1647,7 @@ app.post('/api/admin/update-user-status', async (req, res) => {
                 customAttributes: JSON.stringify({
                   hrf_staff:
                     !Boolean(disabled) &&
-                    ['primary_super_admin', 'super_admin', 'admin', 'manager'].includes(role),
+                    ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor'].includes(role),
                   role,
                   staff_status: Boolean(disabled) ? 'disabled' : 'active',
                 }),
@@ -2365,6 +2398,212 @@ app.delete('/api/admin/products/:productId/image', (req, res) =>
 app.delete('/api/media/file/*', (req, res) => {
   const rawKey = req.path.replace(/^\/api\/media\/file\//, '');
   return handleExpressMediaDelete(req, res, rawKey);
+});
+
+const rawRecruitmentUploadMiddleware = express.raw({
+  type: [
+    'image/jpeg',
+    'image/jpg',
+    'image/png',
+    'image/webp',
+    'application/pdf',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/octet-stream',
+    'multipart/form-data',
+  ],
+  limit: MAX_RECRUITMENT_DOC_BYTES + 65536,
+});
+
+app.post('/api/recruitment/upload', rawRecruitmentUploadMiddleware, async (req, res) => {
+  try {
+    const rawKind = String(req.query.kind || req.headers['x-upload-kind'] || 'doc')
+      .trim()
+      .toLowerCase();
+    const kind: 'photo' | 'doc' = rawKind === 'photo' ? 'photo' : 'doc';
+    const rawAppCode = String(
+      req.query.applicationCode || req.headers['x-application-code'] || ''
+    ).trim();
+
+    if (!/^[a-zA-Z0-9_-]{4,64}$/.test(rawAppCode)) {
+      sendError(
+        res,
+        'INVALID_APPLICATION_CODE',
+        'Valid application code is required for recruitment upload.',
+        400
+      );
+      return;
+    }
+
+    if (!Buffer.isBuffer(req.body)) {
+      sendError(res, 'UNSUPPORTED_FILE_TYPE', 'Invalid upload payload.', 415);
+      return;
+    }
+
+    let rawFileName = String(
+      req.query.filename || req.headers['x-file-name'] || (kind === 'photo' ? 'photo.jpg' : 'doc.pdf')
+    );
+    let bytes: Uint8Array;
+    let declaredMime =
+      typeof req.headers['content-type'] === 'string' ? req.headers['content-type'] : undefined;
+
+    if ((declaredMime || '').toLowerCase().includes('multipart/form-data')) {
+      const formBuffer = new ArrayBuffer(req.body.byteLength);
+      new Uint8Array(formBuffer).set(req.body);
+      const parsedForm = await new Response(formBuffer, {
+        headers: { 'content-type': declaredMime! },
+      }).formData();
+      const candidateFile =
+        parsedForm.get('file') || parsedForm.get('document') || parsedForm.get('photo');
+      if (!candidateFile || typeof candidateFile === 'string') {
+        sendError(res, 'MISSING_FILE', 'Please select a valid recruitment file.', 400);
+        return;
+      }
+      rawFileName = candidateFile.name || rawFileName;
+      declaredMime = candidateFile.type || undefined;
+      bytes = new Uint8Array(await candidateFile.arrayBuffer());
+    } else {
+      bytes = new Uint8Array(req.body.buffer, req.body.byteOffset, req.body.byteLength);
+    }
+
+    const inspection = inspectRecruitmentFileBytes(bytes, kind, declaredMime);
+    if (inspection.ok === false) {
+      sendError(res, inspection.code, inspection.message, inspection.status);
+      return;
+    }
+
+    const s3Creds = inspectR2S3Credentials(process.env);
+    if (!s3Creds.configured) {
+      sendError(
+        res,
+        'R2_NOT_CONFIGURED',
+        `Cloudflare R2 bucket (${DEFAULT_R2_BUCKET_NAME}) S3 credentials are not configured on preview server.`,
+        503
+      );
+      return;
+    }
+
+    const objectKey = buildRecruitmentR2ObjectKey({
+      applicationCode: rawAppCode,
+      fileName: rawFileName,
+      ext: inspection.ext,
+    });
+
+    const s3Result = await putObjectToR2S3({
+      creds: s3Creds.creds,
+      objectKey,
+      body: bytes,
+      contentType: inspection.contentType,
+      cacheControl: 'private, max-age=31536000',
+    });
+    if (s3Result.ok === false) {
+      sendError(res, 'R2_UPLOAD_FAILED', 'Failed to store recruitment file in Cloudflare R2.', 502);
+      return;
+    }
+
+    res.status(201).json({
+      success: true,
+      ok: true,
+      key: objectKey,
+      url: `/api/recruitment/file/${objectKey}`,
+      contentType: inspection.contentType,
+      sizeBytes: bytes.byteLength,
+      storageProvider: 'cloudflare-r2',
+    });
+  } catch {
+    sendError(res, 'RECRUITMENT_UPLOAD_ERROR', 'Unexpected server error during upload.', 500);
+  }
+});
+
+app.use('/api/recruitment/upload', (err: unknown, _req: Request, res: Response, next: NextFunction) => {
+  if (
+    err &&
+    typeof err === 'object' &&
+    'type' in err &&
+    (err as { type?: unknown }).type === 'entity.too.large'
+  ) {
+    sendError(res, 'FILE_TOO_LARGE', 'File exceeds maximum allowed upload limit (5 MB).', 413);
+    return;
+  }
+  next(err);
+});
+
+const inferRecruitmentExpressMime = (rawMime: string, key: string): string => {
+  const clean = rawMime.split(';')[0].trim().toLowerCase();
+  if ((ALLOWED_RECRUITMENT_MIME_TYPES as readonly string[]).includes(clean)) {
+    return clean;
+  }
+  if (key.endsWith('.png')) return 'image/png';
+  if (key.endsWith('.webp')) return 'image/webp';
+  if (key.endsWith('.pdf')) return 'application/pdf';
+  if (key.endsWith('.doc')) return 'application/msword';
+  if (key.endsWith('.docx')) {
+    return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  }
+  return 'image/jpeg';
+};
+
+app.head('/api/recruitment/file/*', async (req, res) => {
+  try {
+    const rawKey = req.path.replace(/^\/api\/recruitment\/file\//, '');
+    const objectKey = validateRecruitmentReadKey(rawKey);
+    if (!objectKey) {
+      res.status(404).end();
+      return;
+    }
+    const s3Creds = inspectR2S3Credentials(process.env);
+    if (!s3Creds.configured) {
+      res.status(503).end();
+      return;
+    }
+    const s3Resp = await headObjectFromR2S3({ creds: s3Creds.creds, objectKey });
+    if (!s3Resp.ok) {
+      res.status(s3Resp.status === 404 ? 404 : 502).end();
+      return;
+    }
+    res.setHeader(
+      'Content-Type',
+      inferRecruitmentExpressMime(s3Resp.headers.get('content-type') || '', objectKey)
+    );
+    res.setHeader('Cache-Control', 'private, max-age=31536000');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    const contentLength = s3Resp.headers.get('content-length');
+    if (contentLength) res.setHeader('Content-Length', contentLength);
+    res.status(200).end();
+  } catch {
+    res.status(500).end();
+  }
+});
+
+app.get('/api/recruitment/file/*', async (req, res) => {
+  try {
+    const rawKey = req.path.replace(/^\/api\/recruitment\/file\//, '');
+    const objectKey = validateRecruitmentReadKey(rawKey);
+    if (!objectKey) {
+      res.status(404).send('Not found');
+      return;
+    }
+    const s3Creds = inspectR2S3Credentials(process.env);
+    if (!s3Creds.configured) {
+      res.status(503).send('Cloudflare R2 credentials not configured.');
+      return;
+    }
+    const s3Resp = await getObjectFromR2S3({ creds: s3Creds.creds, objectKey });
+    if (!s3Resp.ok) {
+      res.status(s3Resp.status === 404 ? 404 : 502).send('File not found');
+      return;
+    }
+    const buf = Buffer.from(await s3Resp.arrayBuffer());
+    res.setHeader(
+      'Content-Type',
+      inferRecruitmentExpressMime(s3Resp.headers.get('content-type') || '', objectKey)
+    );
+    res.setHeader('Cache-Control', 'private, max-age=31536000');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.status(200).send(buf);
+  } catch {
+    res.status(500).send('Failed to fetch recruitment file');
+  }
 });
 
 app.post('/api/chat/ai', handleAiChatEndpoint);

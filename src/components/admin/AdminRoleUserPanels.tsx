@@ -56,6 +56,8 @@ const ROLE_LABEL: Record<UserRole, string> = {
   super_admin: 'Super Admin',
   admin: 'Admin',
   manager: 'Manager',
+  editor: 'Editor',
+  moderator: 'Moderator',
   support_agent: 'Staff / Support Agent',
   customer: 'Customer',
 };
@@ -72,6 +74,29 @@ const PERMISSION_PRESETS: ReadonlyArray<{
       'products_add',
       'products_edit',
       'categories_manage',
+      'reports_view',
+    ],
+  },
+  {
+    label: 'Content Editor',
+    permissions: [
+      'dashboard_view',
+      'products_view',
+      'products_add',
+      'products_edit',
+      'categories_manage',
+      'showrooms_manage',
+      'banners_manage',
+      'seo_manage',
+    ],
+  },
+  {
+    label: 'Support Moderator',
+    permissions: [
+      'dashboard_view',
+      'complaints_manage',
+      'chat_manage',
+      'recruitment_manage',
       'reports_view',
     ],
   },
@@ -1013,6 +1038,8 @@ export function AdminRoleManagementPanel() {
 
   const adminCount = roles.filter((r) => r.role === 'admin' && r.status === 'active').length;
   const managerCount = roles.filter((r) => r.role === 'manager' && r.status === 'active').length;
+  const editorCount = roles.filter((r) => r.role === 'editor' && r.status === 'active').length;
+  const moderatorCount = roles.filter((r) => r.role === 'moderator' && r.status === 'active').length;
   const supportCount = roles.filter(
     (r) => r.role === 'support_agent' && r.status === 'active'
   ).length;
@@ -1061,19 +1088,13 @@ export function AdminRoleManagementPanel() {
               )}
             </div>
           </div>
-          <div className="flex flex-wrap gap-2 text-[11px] font-semibold">
-            <span className="rounded bg-[#1C1917] px-2.5 py-1 text-[#FACC15] shadow-xs">
-              Super Admins: {Math.max(1, superAdminCount)}
-            </span>
-            <span className="rounded bg-white px-2.5 py-1 text-[#1C1917] shadow-xs">
-              Admins: {adminCount}
-            </span>
-            <span className="rounded bg-white px-2.5 py-1 text-[#DC1F26] shadow-xs">
-              Managers: {managerCount}
-            </span>
-            <span className="rounded bg-white px-2.5 py-1 text-emerald-700 shadow-xs">
-              Staff: {supportCount}
-            </span>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-semibold tabular-nums text-[#44403C]">
+            <span className="text-[#1C1917]">Super Admins: {Math.max(1, superAdminCount)}</span>
+            <span>· Admins: {adminCount}</span>
+            <span className="text-[#DC1F26]">· Managers: {managerCount}</span>
+            <span>· Editors: {editorCount}</span>
+            <span>· Moderators: {moderatorCount}</span>
+            <span className="text-emerald-700">· Support: {supportCount}</span>
           </div>
         </div>
       </div>
@@ -1257,8 +1278,10 @@ export function AdminRoleManagementPanel() {
               onChange={(e) => handleRoleSelectChange(e.target.value as StaffRole)}
               className="w-full rounded-lg border border-[#D6D3D1] bg-white px-3 py-2 text-xs font-semibold focus:border-[#DC1F26] focus:outline-none disabled:bg-[#F5F4F0]"
             >
-              {isSuperAdmin && <option value="admin">Admin (Full / Selected Permissions)</option>}
+              {isSuperAdmin && <option value="admin">Admin (Catalog &amp; Operations)</option>}
               <option value="manager">Manager (Selected Management + Manager ID)</option>
+              {isSuperAdmin && <option value="editor">Editor (Products, Outlets &amp; CMS)</option>}
+              {isSuperAdmin && <option value="moderator">Moderator (Complaints, Chat &amp; Hiring)</option>}
               {isSuperAdmin && (
                 <option value="support_agent">Staff / Support Agent (Assigned Permissions)</option>
               )}
@@ -1634,6 +1657,8 @@ export function AdminRoleManagementPanel() {
                   >
                     <option value="manager">Manager</option>
                     {isSuperAdmin && <option value="admin">Admin</option>}
+                    {isSuperAdmin && <option value="editor">Editor</option>}
+                    {isSuperAdmin && <option value="moderator">Moderator</option>}
                     {isSuperAdmin && <option value="support_agent">Staff / Support Agent</option>}
                     {isPrimarySuperAdmin && (
                       <option value="super_admin">Super Admin</option>
@@ -1822,6 +1847,8 @@ export function AdminRoleManagementPanel() {
               <option value="super_admin">Super Admin</option>
               <option value="admin">Admin</option>
               <option value="manager">Manager</option>
+              <option value="editor">Editor</option>
+              <option value="moderator">Moderator</option>
               <option value="support_agent">Staff / Support Agent</option>
             </select>
             <select
@@ -1908,24 +1935,28 @@ export function AdminRoleManagementPanel() {
 
                       <td className="px-4 py-3">
                         {isSuperAdminRole(r.role) ? (
-                          <span className="inline-flex items-center gap-1 rounded bg-[#1C1917] px-2.5 py-1 text-[11px] font-bold text-[#FACC15]">
-                            <Shield className="h-3 w-3" />
+                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-[#1C1917]">
+                            <Shield className="h-3 w-3 text-[#DC1F26]" />
                             <span>{ROLE_LABEL[r.role] || 'Super Admin'}</span>
                           </span>
                         ) : (
-                          <div className="space-y-1">
+                          <div className="space-y-0.5">
                             <span
-                              className={`inline-block rounded px-2 py-0.5 text-[11px] font-bold ${
+                              className={`text-[11px] font-bold ${
                                 r.role === 'admin'
-                                  ? 'bg-[#FACC15] text-[#1C1917]'
+                                  ? 'text-[#1C1917]'
                                   : r.role === 'manager'
-                                  ? 'bg-red-50 text-[#DC1F26]'
-                                  : 'bg-emerald-50 text-emerald-700'
+                                  ? 'text-[#DC1F26]'
+                                  : r.role === 'editor'
+                                  ? 'text-[#9A3412]'
+                                  : r.role === 'moderator'
+                                  ? 'text-[#44403C]'
+                                  : 'text-emerald-700'
                               }`}
                             >
                               {ROLE_LABEL[r.role] || r.role}
                             </span>
-                            <p className="text-[11px] text-[#78716C]">
+                            <p className="text-[11px] tabular-nums text-[#78716C]">
                               {permCount} permissions
                             </p>
                           </div>
@@ -2106,7 +2137,14 @@ export function AdminUserManagementPanel() {
 
   const updateUserRole = async (
     target: UserAccount,
-    nextRole: 'customer' | 'admin' | 'manager' | 'support_agent' | 'super_admin'
+    nextRole:
+      | 'customer'
+      | 'admin'
+      | 'manager'
+      | 'editor'
+      | 'moderator'
+      | 'support_agent'
+      | 'super_admin'
   ) => {
     if (target.email === PRIMARY_SUPER_ADMIN_EMAIL || target.uid === user?.uid) return;
     if (nextRole === 'super_admin' && !isPrimarySuperAdmin) return;
@@ -2181,6 +2219,8 @@ export function AdminUserManagementPanel() {
         isSuperAdminRole(target.role) ||
         target.role === 'admin' ||
         target.role === 'manager' ||
+        target.role === 'editor' ||
+        target.role === 'moderator' ||
         target.role === 'support_agent'
       ) {
         batch.update(doc(firestore, 'rbac_roles', target.email), {
@@ -2392,6 +2432,8 @@ export function AdminUserManagementPanel() {
           <option value="super_admin">Super Admin</option>
           <option value="admin">Admin</option>
           <option value="manager">Manager</option>
+          <option value="editor">Editor</option>
+          <option value="moderator">Moderator</option>
           <option value="support_agent">Staff / Support Agent</option>
           <option value="customer">Customer</option>
         </select>
@@ -2612,6 +2654,8 @@ export function AdminUserManagementPanel() {
                                   | 'customer'
                                   | 'admin'
                                   | 'manager'
+                                  | 'editor'
+                                  | 'moderator'
                                   | 'support_agent'
                                   | 'super_admin'
                               )
@@ -2620,6 +2664,8 @@ export function AdminUserManagementPanel() {
                           >
                             <option value="customer">Customer</option>
                             <option value="support_agent">Staff / Support Agent</option>
+                            <option value="moderator">Moderator</option>
+                            <option value="editor">Editor</option>
                             <option value="manager">Manager</option>
                             <option value="admin">Admin</option>
                             {isPrimarySuperAdmin && u.role === 'super_admin' && (
@@ -2804,9 +2850,9 @@ export function AdminSecurityConfigPanel() {
       {/* Role Hierarchy Matrix */}
       <div className="rounded-xl border border-[#E7E5E4] bg-white p-5">
         <h3 className="font-display text-lg font-bold text-[#1C1917]">
-          Enforced 4-Tier Role Hierarchy &amp; Permission Guarantees
+          Enforced Role Hierarchy &amp; Permission Guarantees
         </h3>
-        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
           <div className="rounded-lg border border-[#1C1917] bg-[#1C1917] p-4 text-white">
             <p className="text-xs font-bold text-[#FACC15]">1. Super Admin</p>
             <p className="mt-1 font-mono text-[11px] text-[#D6D3D1]">
@@ -2823,7 +2869,7 @@ export function AdminSecurityConfigPanel() {
               </li>
               <li className="flex items-center gap-1.5">
                 <CheckCircle2 className="h-3.5 w-3.5 text-[#FACC15]" />
-                <span>Admin, Manager &amp; User Creation</span>
+                <span>Admin, Manager, Editor, Moderator &amp; User Creation</span>
               </li>
             </ul>
           </div>
@@ -2849,7 +2895,27 @@ export function AdminSecurityConfigPanel() {
           </div>
 
           <div className="rounded-lg border border-[#E7E5E4] bg-[#FAFAF8] p-4">
-            <p className="text-xs font-bold text-emerald-700">4. Staff / Support Agent</p>
+            <p className="text-xs font-bold text-[#1C1917]">4. Editor</p>
+            <p className="mt-1 text-[11px] text-[#57534E]">Catalog, Outlets &amp; Editorial Content</p>
+            <ul className="mt-3 space-y-1.5 text-[11px] text-[#44403C]">
+              <li>• Edit Products, Categories, Showrooms &amp; About/Contact</li>
+              <li>• Manage Hero Banners, Greetings &amp; SEO</li>
+              <li>• Blocked from Admin Governance &amp; System Security</li>
+            </ul>
+          </div>
+
+          <div className="rounded-lg border border-[#E7E5E4] bg-[#FAFAF8] p-4">
+            <p className="text-xs font-bold text-[#44403C]">5. Moderator</p>
+            <p className="mt-1 text-[11px] text-[#57534E]">Care, Hiring &amp; Community Review</p>
+            <ul className="mt-3 space-y-1.5 text-[11px] text-[#44403C]">
+              <li>• Manage Customer Complaints &amp; Live Chat</li>
+              <li>• Review Recruitment Job Applications</li>
+              <li>• View Activity Reports within scope</li>
+            </ul>
+          </div>
+
+          <div className="rounded-lg border border-[#E7E5E4] bg-[#FAFAF8] p-4">
+            <p className="text-xs font-bold text-emerald-700">6. Staff / Support Agent</p>
             <p className="mt-1 text-[11px] text-[#57534E]">Customer Care Access</p>
             <ul className="mt-3 space-y-1.5 text-[11px] text-[#44403C]">
               <li>• Manage Customer Live Chat &amp; Online status</li>

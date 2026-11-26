@@ -59,6 +59,7 @@ export function HomePage({ onOpenChat }: HomePageProps) {
     categories,
     occasions,
     products,
+    showrooms,
     heroBanners,
     homepageSections,
     siteSettings,
@@ -686,7 +687,7 @@ export function HomePage({ onOpenChat }: HomePageProps) {
                 to="/outlets"
                 className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-xs font-semibold text-[#B91C1C] hover:underline sm:text-sm"
               >
-                <span>View All 16 Outlets</span>
+                <span>View All {showrooms.length} Outlets</span>
                 <ArrowRight className="h-3.5 w-3.5" />
               </Link>
             </div>

@@ -1,18 +1,35 @@
 import { Link } from 'react-router-dom';
 import { Facebook, Instagram, Mail, MapPin, MessageCircle, Phone, Youtube } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
-import { CHATTOGRAM_OUTLETS, formatPhoneHref } from '../data/outletsData';
+import { formatPhoneHref, isDemoOrDummyShowroom } from '../data/outletsData';
+import { getShowroomText } from '../lib/bilingual';
 import { BrandLogo } from './BrandLogo';
 
 interface FooterProps {
   onOpenChat: (mode?: 'ai' | 'human') => void;
 }
 
+const FEATURED_OUTLET_IDS = [
+  'shah-garibullah-hs',
+  'kusumbagh-khulshi',
+  'gec-more',
+  'kotwali',
+  'agrabad',
+];
+
 export function Footer({ onOpenChat }: FooterProps) {
-  const { siteSettings, languageMode } = useStore();
-  const featuredFooterOutlets = CHATTOGRAM_OUTLETS.filter((o) =>
-    ['shah-garibullah-hs', 'kusumbagh-khulshi', 'gec-more', 'kotwali', 'agrabad'].includes(o.id)
+  const { showrooms, siteSettings, languageMode } = useStore();
+  const activeShowrooms = showrooms.filter(
+    (sr) => sr.visible !== false && !sr.deleted && !isDemoOrDummyShowroom(sr)
   );
+  const preferred = FEATURED_OUTLET_IDS.map((id) =>
+    activeShowrooms.find((sr) => sr.id === id)
+  ).filter((sr): sr is NonNullable<typeof sr> => Boolean(sr));
+  const preferredIds = new Set(preferred.map((sr) => sr.id));
+  const featuredFooterOutlets = [
+    ...preferred,
+    ...activeShowrooms.filter((sr) => !preferredIds.has(sr.id)),
+  ].slice(0, 5);
 
   const footerDescEn =
     siteSettings.footerTextEn ||
@@ -149,6 +166,11 @@ export function Footer({ onOpenChat }: FooterProps) {
                   <Phone className="h-4 w-4 text-[#FACC15]" />
                   <span className="font-mono tabular-nums">{siteSettings.supportPhone}</span>
                 </a>
+                {siteSettings.supportHoursEn && (
+                  <p className="mt-0.5 pl-6 text-[11px] text-[#A8A29E]">
+                    {siteSettings.supportHoursEn}
+                  </p>
+                )}
               </li>
               {siteSettings.brandEmail && (
                 <li>
@@ -209,37 +231,50 @@ export function Footer({ onOpenChat }: FooterProps) {
               </span>
             </h4>
             <ul className="mt-4 space-y-3 text-xs text-[#A8A29E]">
-              {featuredFooterOutlets.map((outlet) => (
-                <li key={outlet.id} className="leading-relaxed">
-                  <Link
-                    to="/outlets"
-                    className="inline-flex items-start gap-1.5 font-medium text-[#E7E5E4] transition-colors hover:text-[#FACC15]"
-                  >
-                    <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#DC1F26]" />
-                    <span>
-                      {outlet.nameEn}
-                      {outlet.type ? ` · ${outlet.type}` : ''}
-                      <span className="font-bn block text-[11px] font-normal text-[#A8A29E]">
-                        {outlet.nameBn}
-                      </span>
-                    </span>
-                  </Link>
-                  <p className="pl-5 text-[#A8A29E]">
-                    <a
-                      href={formatPhoneHref(outlet.phone)}
-                      className="font-mono tabular-nums hover:text-white"
+              {featuredFooterOutlets.map((outlet) => {
+                const st = getShowroomText(outlet);
+                const nameEn = st.nameEn || st.nameBn || outlet.name;
+                const nameBn = st.nameBn && st.nameBn !== nameEn ? st.nameBn : '';
+                const isMainOffice =
+                  outlet.isMain ||
+                  outlet.id === 'shah-garibullah-hs' ||
+                  /office\s*&\s*outlet/i.test(st.descriptionEn || '');
+                return (
+                  <li key={outlet.id} className="leading-relaxed">
+                    <Link
+                      to="/outlets"
+                      className="inline-flex items-start gap-1.5 font-medium text-[#E7E5E4] transition-colors hover:text-[#FACC15]"
                     >
-                      {outlet.phone}
-                    </a>
-                  </p>
-                </li>
-              ))}
+                      <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#DC1F26]" />
+                      <span>
+                        {nameEn}
+                        {isMainOffice ? ' · Office & Outlet' : ''}
+                        {nameBn && (
+                          <span className="font-bn block text-[11px] font-normal text-[#A8A29E]">
+                            {nameBn}
+                          </span>
+                        )}
+                      </span>
+                    </Link>
+                    {outlet.phone && (
+                      <p className="pl-5 text-[#A8A29E]">
+                        <a
+                          href={formatPhoneHref(outlet.phone)}
+                          className="font-mono tabular-nums hover:text-white"
+                        >
+                          {outlet.phone}
+                        </a>
+                      </p>
+                    )}
+                  </li>
+                );
+              })}
               <li className="pt-1">
                 <Link
                   to="/outlets"
                   className="inline-flex items-center gap-1 text-xs font-semibold text-[#FACC15] hover:underline"
                 >
-                  <span>View all 16 outlets →</span>
+                  <span>View all {activeShowrooms.length} outlets →</span>
                 </Link>
               </li>
             </ul>

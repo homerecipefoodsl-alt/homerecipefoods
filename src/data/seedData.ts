@@ -1251,6 +1251,28 @@ export const SEED_SITE_SETTINGS: SiteSettings = {
     'আপনার মতামতের জন্য ধন্যবাদ। আমাদের শোরুম ম্যানেজার বিষয়টি যাচাই করে আপনার সাথে যোগাযোগ করবেন।',
     'অভিযোগটি সমাধান করা হয়েছে। ভবিষ্যতে আরও উন্নত সেবা দিতে আমরা প্রতিশ্রুতিবদ্ধ।',
   ],
+  aboutHeadingEn: 'Craftsmanship in Every Layer, Care in Every Bite',
+  aboutHeadingBn: 'খাঁটি উপাদান ও ঘরোয়া যত্নের গল্প',
+  aboutSubtitleEn: 'About Home Recipe Foods',
+  aboutSubtitleBn: 'আমাদের সম্পর্কে',
+  aboutStoryEn:
+    'Home Recipe Foods began with a simple kitchen promise: bake every loaf, pastry, sweet, and savory item fresh each morning using pure dairy, select spices, and time-honored recipes without artificial shortcuts.',
+  aboutStoryBn:
+    'প্রতিদিন সকালে আমাদের নিজস্ব কিচেনে খাঁটি উপাদান, ঘরোয়া যত্ন ও আধুনিক বেকিং শিল্পের সমন্বয়ে তাজা কেক, পেস্ট্রি, ব্রেড, মিষ্টি ও আকদ বক্স তৈরি করা হয়।',
+  aboutMissionEn:
+    'Across our Chattogram showrooms, every batch is inspected before it reaches the counter—serving families, daily households, and milestone celebrations with warm hospitality.',
+  aboutMissionBn:
+    'চট্টগ্রামের আমাদের প্রতিটি শোরুমে মানসম্মত পণ্য ও আন্তরিক ক্রেতা সেবা নিশ্চিত করাই আমাদের মূল লক্ষ্য।',
+  aboutImageUrl: ASSET_KEYS.heroSweets,
+  contactHeadingEn: 'Get in Touch With Home Recipe Foods',
+  contactHeadingBn: 'আমাদের সাথে সরাসরি যোগাযোগ করুন',
+  contactSubtitleEn:
+    'Reach our Chattogram head office, visit your nearest outlet, or message our customer care team.',
+  contactSubtitleBn: 'শোরুম তথ্য, কাস্টম অর্ডার পরামর্শ কিংবা সেবার যেকোনো প্রয়োজনে কথা বলুন।',
+  supportHoursEn: 'Daily · 8:00 AM – 10:00 PM',
+  supportHoursBn: 'প্রতিদিন · সকাল ৮:০০টা – রাত ১০:০০টা',
+  secondaryPhone: '+8801329729252',
+  officeMapUrl: 'https://maps.app.goo.gl/xxfq9EqgS86e9fLV9',
   heroSlides: [
     {
       id: 'slide-1',

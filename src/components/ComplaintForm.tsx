@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { AlertCircle, CheckCircle2, Loader2, Lock, Upload, X } from 'lucide-react';
 import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { useStore } from '../context/StoreContext';
-import { CHATTOGRAM_OUTLETS, isDemoOrDummyShowroom } from '../data/outletsData';
+import { CANONICAL_OUTLET_SHOWROOMS, isDemoOrDummyShowroom } from '../data/outletsData';
 import { getShowroomText } from '../lib/bilingual';
 import { OperationType, db, handleFirestoreError } from '../lib/firebase';
 import { compressImageToDataUrl, generateComplaintReference } from '../lib/utils';
@@ -61,61 +61,41 @@ export function ComplaintForm() {
       : DEFAULT_COMPLAINT_CATEGORIES;
 
   const showroomOptions = useMemo<ShowroomOption[]>(() => {
+    const source = showrooms.length > 0 ? showrooms : CANONICAL_OUTLET_SHOWROOMS;
     const list: ShowroomOption[] = [];
     const seenIds = new Set<string>();
     const seenNames = new Set<string>();
 
-    // Official Home Recipe Foods outlets
-    CHATTOGRAM_OUTLETS.forEach((outlet) => {
-      if (outlet.status !== 'active') return;
-      const safeId = outlet.id.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 128);
-      if (!safeId || seenIds.has(safeId)) return;
-      seenIds.add(safeId);
-      seenNames.add(normalizeLookupName(outlet.nameEn));
-      seenNames.add(normalizeLookupName(outlet.nameBn));
+    [...source]
+      .sort((a, b) => (a.display_order ?? 99) - (b.display_order ?? 99))
+      .forEach((sr) => {
+        if (!sr.id || sr.deleted || sr.visible === false || isDemoOrDummyShowroom(sr)) return;
+        const safeId = sr.id.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 128);
+        const st = getShowroomText(sr);
+        const normBn = normalizeLookupName(st.nameBn || sr.name || '');
+        const normEn = normalizeLookupName(st.nameEn || sr.nameEn || '');
+        if (
+          !safeId ||
+          seenIds.has(safeId) ||
+          (normBn && normEn && seenNames.has(normEn) && seenNames.has(normBn))
+        ) {
+          return;
+        }
+        seenIds.add(safeId);
+        if (normBn) seenNames.add(normBn);
+        if (normEn) seenNames.add(normEn);
 
-      const enTitle = formatOutletTitleEn(outlet.nameEn);
-      const baseLabel = outlet.nameBn && outlet.nameBn !== enTitle
-        ? `${enTitle} (${outlet.nameBn})`
-        : enTitle;
-      const displayLabel = outlet.type ? `${baseLabel} · ${outlet.type}` : baseLabel;
+        const enTitle = formatOutletTitleEn(st.nameEn || sr.nameEn || st.nameBn || sr.name || safeId);
+        const bnTitle = st.nameBn || sr.name || '';
+        const baseLabel = bnTitle && bnTitle !== enTitle ? `${enTitle} (${bnTitle})` : enTitle;
+        const typeSuffix = sr.isMain ? ' · Office & Outlet' : '';
 
-      list.push({
-        id: safeId,
-        label: displayLabel,
-        saveName: baseLabel.slice(0, 140),
+        list.push({
+          id: safeId,
+          label: `${baseLabel}${typeSuffix}`,
+          saveName: baseLabel.slice(0, 140),
+        });
       });
-    });
-
-    // Merge any additional active non-demo Firestore showrooms cleanly without duplicating outlets
-    showrooms.forEach((sr) => {
-      if (!sr.id || sr.deleted || sr.visible === false || isDemoOrDummyShowroom(sr)) return;
-      const safeId = sr.id.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 128);
-      const st = getShowroomText(sr);
-      const normBn = normalizeLookupName(st.nameBn || sr.name || '');
-      const normEn = normalizeLookupName(st.nameEn || sr.nameEn || '');
-      if (
-        !safeId ||
-        seenIds.has(safeId) ||
-        (normBn && seenNames.has(normBn)) ||
-        (normEn && seenNames.has(normEn))
-      ) {
-        return;
-      }
-      seenIds.add(safeId);
-      if (normBn) seenNames.add(normBn);
-      if (normEn) seenNames.add(normEn);
-
-      const primaryName = formatOutletTitleEn(st.nameEn || sr.nameEn || st.nameBn || sr.name || safeId);
-      const areaLabel = st.areaEn || sr.area || '';
-      const fullLabel = areaLabel ? `${primaryName} (${areaLabel})` : primaryName;
-
-      list.push({
-        id: safeId,
-        label: fullLabel,
-        saveName: fullLabel.slice(0, 140),
-      });
-    });
 
     return list;
   }, [showrooms]);

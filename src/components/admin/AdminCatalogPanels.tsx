@@ -34,9 +34,12 @@ import {
 } from 'firebase/firestore';
 import { useStore } from '../../context/StoreContext';
 import {
+  CANONICAL_OUTLET_SHOWROOMS,
   CHATTOGRAM_OUTLETS,
   CONFIRMED_DEMO_SHOWROOM_IDS,
+  OUTLET_REGION_FILTERS,
   isDemoOrDummyShowroom,
+  type OutletRegion,
 } from '../../data/outletsData';
 import { getCatalogStudioPhotos } from '../../data/productPhotoMap';
 import { SEED_PRODUCTS } from '../../data/seedData';
@@ -195,7 +198,13 @@ interface VerifiedWriteSession {
 
 function hasRolePermissionFallback(role: string | undefined, perm: PermissionKey): boolean {
   if (isSuperAdminRole(role)) return true;
-  if (role === 'admin' || role === 'manager' || role === 'support_agent') {
+  if (
+    role === 'admin' ||
+    role === 'manager' ||
+    role === 'editor' ||
+    role === 'moderator' ||
+    role === 'support_agent'
+  ) {
     return (DEFAULT_ROLE_PERMISSIONS[role as StaffRole] ?? []).includes(perm);
   }
   return false;
@@ -5190,6 +5199,7 @@ export function AdminOccasionsPanel() {
 // ========================
 export function AdminShowroomsPanel() {
   const {
+    allShowrooms,
     firestoreShowrooms,
     legacyDemoShowrooms,
     staffRole,
@@ -5199,7 +5209,155 @@ export function AdminShowroomsPanel() {
   const [editing, setEditing] = useState<Showroom | null>(null);
   const [isNew, setIsNew] = useState(false);
   const [purgingDemoDocs, setPurgingDemoDocs] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [search, setSearch] = useState('');
+  const [regionFilter, setRegionFilter] = useState<string>('all');
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [busyShowroomId, setBusyShowroomId] = useState<string | null>(null);
+  const [confirmDeleteTarget, setConfirmDeleteTarget] = useState<Showroom | null>(null);
+
+  const firestoreOverrideIds = useMemo(
+    () => new Set(firestoreShowrooms.map((s) => s.id)),
+    [firestoreShowrooms]
+  );
+  const canonicalIds = useMemo(
+    () => new Set(CANONICAL_OUTLET_SHOWROOMS.map((s) => s.id)),
+    []
+  );
+
+  const managedShowrooms = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return allShowrooms
+      .filter((sr) => !sr.deleted && !isDemoOrDummyShowroom(sr))
+      .filter((sr) => {
+        if (regionFilter !== 'all' && (sr.region || '') !== regionFilter) {
+          return false;
+        }
+        if (!q) return true;
+        const hay = [
+          sr.id,
+          sr.name,
+          sr.nameEn,
+          sr.area,
+          sr.areaEn,
+          sr.address,
+          sr.addressEn,
+          sr.phone,
+          sr.region,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        return hay.includes(q);
+      });
+  }, [allShowrooms, search, regionFilter]);
+
+  const buildShowroomFirestorePayload = (sr: Showroom): Record<string, unknown> => {
+    const st = getShowroomText(sr);
+    const nameEn = (sr.nameEn ?? st.nameEn ?? sr.name ?? '').trim();
+    const nameBn = (sr.name ?? st.nameBn ?? nameEn).trim();
+    const areaEn = (sr.areaEn ?? st.areaEn ?? '').trim();
+    const areaBn = (sr.area ?? st.areaBn ?? areaEn ?? nameBn).trim();
+    const addressEn = (sr.addressEn ?? st.addressEn ?? '').trim();
+    const addressBn = (sr.address ?? st.addressBn ?? addressEn ?? areaBn).trim();
+    const descEn = (sr.descriptionEn ?? st.descriptionEn ?? '').trim();
+    const descBn = (sr.description ?? st.descriptionBn ?? descEn).trim();
+    const hoursEn = (sr.openingHoursEn ?? st.openingHoursEn ?? '').trim();
+    const hoursBn =
+      (sr.openingHours ?? st.openingHoursBn ?? hoursEn).trim() ||
+      'শুক্র–শনিবার · সকাল ৮:০০টা – রাত ১০:০০টা';
+    const rawLat = Number(sr.lat);
+    const rawLng = Number(sr.lng);
+    const hasCoords =
+      Number.isFinite(rawLat) && Number.isFinite(rawLng) && (rawLat !== 0 || rawLng !== 0);
+    const safeMapUrl =
+      (sr.mapUrl || '').trim() ||
+      (hasCoords
+        ? `https://maps.google.com/?q=${rawLat},${rawLng}`
+        : `https://maps.google.com/?q=${encodeURIComponent(addressEn || addressBn || nameEn)}`);
+
+    const validImages = Array.isArray(sr.images)
+      ? sr.images
+          .map((u) => (typeof u === 'string' ? u.trim() : ''))
+          .filter((u) => u && u.length <= 400000)
+          .slice(0, 6)
+      : [];
+
+    return {
+      id: sr.id,
+      name: nameBn.slice(0, 140),
+      nameEn: nameEn.slice(0, 140),
+      name_bn: nameBn.slice(0, 140),
+      name_en: nameEn.slice(0, 140),
+      area: areaBn.slice(0, 100),
+      areaEn: areaEn.slice(0, 100),
+      address: addressBn.slice(0, 400),
+      addressEn: addressEn.slice(0, 400),
+      address_bn: addressBn.slice(0, 400),
+      address_en: addressEn.slice(0, 400),
+      description: descBn.slice(0, 600),
+      descriptionEn: descEn.slice(0, 600),
+      description_bn: descBn.slice(0, 600),
+      description_en: descEn.slice(0, 600),
+      phone: (sr.phone || '').trim().slice(0, 40),
+      alternate_phone: (sr.alternate_phone ?? '').trim().slice(0, 40),
+      email: (sr.email ?? '').trim().slice(0, 254),
+      openingHours: hoursBn.slice(0, 160),
+      openingHoursEn: hoursEn.slice(0, 160),
+      opening_time: (sr.opening_time ?? '').trim().slice(0, 40),
+      closing_time: (sr.closing_time ?? '').trim().slice(0, 40),
+      weekly_holiday: (sr.weekly_holiday ?? '').trim().slice(0, 80),
+      region: (sr.region ?? '').trim().slice(0, 100),
+      orderLineEn: (sr.orderLineEn ?? '').trim().slice(0, 160),
+      orderLineBn: (sr.orderLineBn ?? '').trim().slice(0, 160),
+      mapUrl: safeMapUrl.slice(0, 600),
+      lat: Number.isFinite(rawLat) ? rawLat : 0,
+      lng: Number.isFinite(rawLng) ? rawLng : 0,
+      images: validImages,
+      isMain: Boolean(sr.isMain),
+      visible: sr.visible !== false,
+      deleted: Boolean(sr.deleted),
+      display_order: Math.min(
+        1000,
+        Math.max(0, Math.round(Number(sr.display_order) || 1))
+      ),
+      updatedAt: serverTimestamp(),
+    };
+  };
+
+  const persistShowroomDoc = async (sr: Showroom, actionLabel: 'create' | 'update') => {
+    const firestore = requireDb();
+    const showroomRef = doc(firestore, 'showrooms', sr.id);
+    const existingSnap = await getDoc(showroomRef);
+    const existingData = existingSnap.exists()
+      ? (existingSnap.data() as Record<string, unknown>)
+      : undefined;
+    const preservedValidId =
+      existingData &&
+      typeof existingData.id === 'string' &&
+      /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
+        ? existingData.id
+        : sr.id;
+
+    const payload = buildShowroomFirestorePayload({ ...sr, id: preservedValidId });
+    const titleLabel = String(payload.nameEn || payload.name || sr.id);
+
+    if (!existingSnap.exists()) {
+      await setDoc(showroomRef, {
+        ...payload,
+        createdAt: serverTimestamp(),
+      });
+      await logAdminActivity(actionLabel === 'create' ? 'create' : 'update', 'showrooms', sr.id, titleLabel);
+    } else {
+      await updateDoc(
+        showroomRef,
+        hasValidTimestamp(existingData?.createdAt)
+          ? payload
+          : { ...payload, createdAt: serverTimestamp() }
+      );
+      await logAdminActivity('update', 'showrooms', sr.id, titleLabel);
+    }
+  };
 
   const purgeConfirmedDemoShowrooms = async () => {
     if (legacyDemoShowrooms.length === 0) return;
@@ -5226,20 +5384,54 @@ export function AdminShowroomsPanel() {
         );
         deletedCount += 1;
       }
-      setMsg(
-        deletedCount > 0
-          ? `নিশ্চিতভাবে চিহ্নিত ${deletedCount}টি পুরোনো Demo Showroom ডকুমেন্ট Firestore থেকে স্থায়ীভাবে মুছে ফেলা হয়েছে।`
-          : 'মুছে ফেলার মতো কোনো Demo ডকুমেন্ট পাওয়া যায়নি।'
-      );
+      setMsg({
+        type: 'ok',
+        text:
+          deletedCount > 0
+            ? `Removed ${deletedCount} legacy demo showroom document(s) from Firestore.`
+            : 'No flagged demo showroom documents remain.',
+      });
     } catch (err) {
-      setMsg(
-        mapCatalogSaveError(err, 'showroom_purge', {
+      setMsg({
+        type: 'err',
+        text: mapCatalogSaveError(err, 'showroom_purge', {
           operation: 'DELETE',
           staffRole,
-        })
-      );
+        }),
+      });
     } finally {
       setPurgingDemoDocs(false);
+    }
+  };
+
+  const handlePhotoUpload = async (file: File) => {
+    if (!editing) return;
+    const validationErr = validateCatalogImageFile(file);
+    if (validationErr) {
+      setMsg({ type: 'err', text: validationErr });
+      return;
+    }
+    setUploadingPhoto(true);
+    setMsg(null);
+    try {
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'showrooms_manage',
+      });
+      const res = await uploadCatalogImageToStorage({
+        folder: 'showrooms',
+        entityId: editing.id,
+        file,
+      });
+      setEditing((prev) => (prev ? { ...prev, images: [res.downloadUrl] } : null));
+      setMsg({ type: 'ok', text: 'Outlet photo uploaded to Cloudflare R2. Click Save Outlet to apply.' });
+    } catch (err) {
+      setMsg({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Unable to upload outlet photo.',
+      });
+    } finally {
+      setUploadingPhoto(false);
     }
   };
 
@@ -5247,127 +5439,154 @@ export function AdminShowroomsPanel() {
     e.preventDefault();
     if (!editing) return;
 
-    const nameBn = editing.name.trim();
     const nameEn = (editing.nameEn ?? '').trim();
-    if (!nameBn) {
-      setMsg('অনুগ্রহ করে বাংলা নাম দিন।');
+    const nameBn = (editing.name || '').trim();
+    if (!nameEn) {
+      setMsg({ type: 'err', text: 'Please enter the Outlet Name in English.' });
       return;
     }
-    if (!nameEn) {
-      setMsg('অনুগ্রহ করে English Name দিন।');
+    if (!nameBn) {
+      setMsg({ type: 'err', text: 'Please enter the Outlet Name in Bengali (বাংলা).' });
       return;
     }
 
     const areaEn = (editing.areaEn ?? '').trim();
-    const areaBn = editing.area.trim() || areaEn;
-    if (!areaBn) {
-      setMsg('অনুগ্রহ করে শোরুমের এলাকা (Area) লিখুন।');
+    const areaBn = (editing.area || '').trim() || areaEn;
+    if (!areaBn && !areaEn) {
+      setMsg({ type: 'err', text: 'Please enter the outlet area.' });
       return;
     }
 
     const addressEn = (editing.addressEn ?? '').trim();
-    const addressBn = editing.address.trim() || addressEn;
-    if (!addressBn) {
-      setMsg('অনুগ্রহ করে সম্পূর্ণ ঠিকানা লিখুন।');
+    const addressBn = (editing.address || '').trim() || addressEn;
+    if (!addressBn && !addressEn) {
+      setMsg({ type: 'err', text: 'Please enter the outlet address.' });
       return;
     }
 
     const phone = editing.phone.trim();
-    if (phone.length < 6) {
-      setMsg('অনুগ্রহ করে সঠিক ফোন নম্বর লিখুন।');
+    if (phone.length < 5) {
+      setMsg({ type: 'err', text: 'Please enter a valid contact phone number (at least 5 characters).' });
       return;
     }
 
-    const descEn = (editing.descriptionEn ?? '').trim();
-    const descBn = (editing.description ?? '').trim() || descEn;
-    const hoursEn = (editing.openingHoursEn ?? '').trim();
-    const hoursBn = editing.openingHours.trim() || hoursEn || 'শুক্র–শনিবার · সকাল ৮:০০টা – রাত ১০:০০টা';
-    const rawLat = Number(editing.lat);
-    const rawLng = Number(editing.lng);
-    const hasCoords = Number.isFinite(rawLat) && Number.isFinite(rawLng) && (rawLat !== 0 || rawLng !== 0);
-    const safeMapUrl =
-      editing.mapUrl.trim() ||
-      (hasCoords
-        ? `https://maps.google.com/?q=${rawLat},${rawLng}`
-        : `https://maps.google.com/?q=${encodeURIComponent(addressEn || addressBn)}`);
+    try {
+      setBusyShowroomId(editing.id);
+      setMsg(null);
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'showrooms_manage',
+      });
+      await persistShowroomDoc(editing, isNew ? 'create' : 'update');
+      setEditing(null);
+      setMsg({ type: 'ok', text: `Saved outlet "${nameEn}" to Firestore.` });
+    } catch (err) {
+      setMsg({
+        type: 'err',
+        text: mapCatalogSaveError(err, 'showroom_save', {
+          path: `showrooms/${editing.id}`,
+          operation: isNew ? 'CREATE' : 'UPDATE',
+          staffRole,
+        }),
+      });
+    } finally {
+      setBusyShowroomId(null);
+    }
+  };
 
+  const toggleShowroomVisibility = async (sr: Showroom) => {
+    setBusyShowroomId(sr.id);
+    setMsg(null);
     try {
       await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'showrooms_manage',
       });
-      const firestore = requireDb();
-      const showroomRef = doc(firestore, 'showrooms', editing.id);
-      const existingSnap = await getDoc(showroomRef);
-      const existingData = existingSnap.exists()
-        ? (existingSnap.data() as Record<string, unknown>)
-        : undefined;
-      const preservedValidId =
-        existingData &&
-        typeof existingData.id === 'string' &&
-        /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
-          ? existingData.id
-          : editing.id;
-
-      const payload: Record<string, unknown> = {
-        id: preservedValidId,
-        name: nameBn.slice(0, 140),
-        nameEn: nameEn.slice(0, 140),
-        name_bn: nameBn.slice(0, 140),
-        name_en: nameEn.slice(0, 140),
-        area: areaBn.slice(0, 100),
-        areaEn: areaEn.slice(0, 100),
-        address: addressBn.slice(0, 400),
-        addressEn: addressEn.slice(0, 400),
-        address_bn: addressBn.slice(0, 400),
-        address_en: addressEn.slice(0, 400),
-        description: descBn.slice(0, 600),
-        descriptionEn: descEn.slice(0, 600),
-        description_bn: descBn.slice(0, 600),
-        description_en: descEn.slice(0, 600),
-        phone: phone.slice(0, 40),
-        alternate_phone: (editing.alternate_phone ?? '').trim().slice(0, 40),
-        email: (editing.email ?? '').trim().slice(0, 254),
-        openingHours: hoursBn.slice(0, 160),
-        openingHoursEn: hoursEn.slice(0, 160),
-        opening_time: (editing.opening_time ?? '').trim().slice(0, 40),
-        closing_time: (editing.closing_time ?? '').trim().slice(0, 40),
-        weekly_holiday: (editing.weekly_holiday ?? '').trim().slice(0, 80),
-        mapUrl: safeMapUrl.slice(0, 600),
-        lat: Number.isFinite(rawLat) ? rawLat : 0,
-        lng: Number.isFinite(rawLng) ? rawLng : 0,
-        isMain: Boolean(editing.isMain),
-        visible: editing.visible !== false,
-        deleted: Boolean(editing.deleted),
-        display_order: Math.min(1000, Math.max(0, Math.round(Number(editing.display_order) || 1))),
-        updatedAt: serverTimestamp(),
-      };
-
-      if (!existingSnap.exists()) {
-        await setDoc(showroomRef, {
-          ...payload,
-          createdAt: serverTimestamp(),
-        });
-        await logAdminActivity('create', 'showrooms', editing.id, nameEn);
-      } else {
-        await updateDoc(
-          showroomRef,
-          hasValidTimestamp(existingData?.createdAt)
-            ? payload
-            : { ...payload, createdAt: serverTimestamp() }
-        );
-        await logAdminActivity('update', 'showrooms', editing.id, nameEn);
-      }
-      setEditing(null);
-      setMsg('শোরুম তথ্য সংরক্ষণ করা হয়েছে।');
+      const nextVisible = sr.visible === false;
+      await persistShowroomDoc({ ...sr, visible: nextVisible }, 'update');
+      setMsg({
+        type: 'ok',
+        text: `"${sr.nameEn || sr.name}" is now ${nextVisible ? 'visible' : 'hidden'} on the website.`,
+      });
     } catch (err) {
-      setMsg(
-        mapCatalogSaveError(err, 'showroom_save', {
-          path: `showrooms/${editing.id}`,
-          operation: isNew ? 'CREATE' : 'UPDATE',
+      setMsg({
+        type: 'err',
+        text: mapCatalogSaveError(err, 'showroom_visibility', {
+          path: `showrooms/${sr.id}`,
+          operation: 'UPDATE',
           staffRole,
-        })
+        }),
+      });
+    } finally {
+      setBusyShowroomId(null);
+    }
+  };
+
+  const nudgeShowroomOrder = async (sr: Showroom, delta: number) => {
+    const nextOrder = Math.min(1000, Math.max(1, (sr.display_order ?? 1) + delta));
+    setBusyShowroomId(sr.id);
+    setMsg(null);
+    try {
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'showrooms_manage',
+      });
+      await persistShowroomDoc({ ...sr, display_order: nextOrder }, 'update');
+      setMsg({
+        type: 'ok',
+        text: `Updated display order for "${sr.nameEn || sr.name}" to #${nextOrder}.`,
+      });
+    } catch (err) {
+      setMsg({
+        type: 'err',
+        text: mapCatalogSaveError(err, 'showroom_order', {
+          path: `showrooms/${sr.id}`,
+          operation: 'UPDATE',
+          staffRole,
+        }),
+      });
+    } finally {
+      setBusyShowroomId(null);
+    }
+  };
+
+  const handleConfirmDeleteOrReset = async () => {
+    if (!confirmDeleteTarget) return;
+    const target = confirmDeleteTarget;
+    setBusyShowroomId(target.id);
+    setMsg(null);
+    try {
+      await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'showrooms_manage',
+      });
+      await deleteDoc(doc(requireDb(), 'showrooms', target.id));
+      const isOfficial = canonicalIds.has(target.id);
+      await logAdminActivity(
+        'delete',
+        'showrooms',
+        target.id,
+        target.nameEn || target.name,
+        isOfficial ? 'Reset official outlet override to default' : 'Deleted custom outlet'
       );
+      setConfirmDeleteTarget(null);
+      setMsg({
+        type: 'ok',
+        text: isOfficial
+          ? `Reset "${target.nameEn || target.name}" to its default official configuration.`
+          : `Deleted custom outlet "${target.nameEn || target.name}".`,
+      });
+    } catch (err) {
+      setMsg({
+        type: 'err',
+        text: mapCatalogSaveError(err, 'showroom_delete', {
+          path: `showrooms/${target.id}`,
+          operation: 'DELETE',
+          staffRole,
+        }),
+      });
+    } finally {
+      setBusyShowroomId(null);
     }
   };
 
@@ -5376,10 +5595,10 @@ export function AdminShowroomsPanel() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="font-display text-2xl font-bold text-[#1C1917]">
-            Showroom Management
+            Our Outlets &amp; Showrooms CMS
           </h2>
           <p className="text-xs text-[#57534E]">
-            Manage official Chattogram outlets and additional Firestore branch listings in English and Bengali.
+            Edit any of the <span className="tabular-nums font-semibold">{allShowrooms.filter((s) => !s.deleted).length}</span> active Chattogram outlets or add new branches. Changes reflect live across Our Outlets, Contact, Footer, and Complaint forms.
           </p>
         </div>
         <button
@@ -5403,33 +5622,48 @@ export function AdminShowroomsPanel() {
               descriptionEn: '',
               description_bn: '',
               description_en: '',
-              phone: '',
+              phone: '+880',
               alternate_phone: '',
               email: '',
               openingHours: 'শুক্র–শনিবার · সকাল ৮:০০টা – রাত ১০:০০টা',
               openingHoursEn: 'Friday – Saturday · 8:00 AM – 10:00 PM',
+              orderLineEn: 'Daily · 8:00 AM – 7:00 PM',
+              orderLineBn: 'প্রতিদিন · সকাল ৮:০০টা – সন্ধ্যা ৭:০০টা',
+              region: 'khulshi-gec',
               opening_time: '08:00 AM',
               closing_time: '10:00 PM',
               weekly_holiday: 'Open Daily',
               mapUrl: '',
               lat: 0,
               lng: 0,
+              images: [],
               isMain: false,
               visible: true,
-              display_order: CHATTOGRAM_OUTLETS.length + firestoreShowrooms.length + 1,
+              display_order: allShowrooms.length + 1,
             });
           }}
           className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-4 py-2 text-xs font-semibold text-white hover:bg-[#DC1F26]"
         >
           <Plus className="h-4 w-4" />
-          <span>Add Showroom</span>
+          <span>Add New Outlet</span>
         </button>
       </div>
 
       {msg && (
-        <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-[#B91C1C]">
-          {msg}
-        </p>
+        <div
+          className={`flex items-center gap-2 rounded-lg border px-3.5 py-2.5 text-xs font-semibold ${
+            msg.type === 'ok'
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+              : 'border-red-200 bg-red-50 text-[#B91C1C]'
+          }`}
+        >
+          {msg.type === 'ok' ? (
+            <CheckCircle2 className="h-4 w-4 shrink-0" />
+          ) : (
+            <AlertCircle className="h-4 w-4 shrink-0" />
+          )}
+          <span>{msg.text}</span>
+        </div>
       )}
 
       {legacyDemoShowrooms.length > 0 && (
@@ -5440,7 +5674,7 @@ export function AdminShowroomsPanel() {
                 Legacy Demo Showroom Documents Detected (<span className="tabular-nums">{legacyDemoShowrooms.length}</span>)
               </p>
               <p className="mt-1 text-[11px] text-amber-900">
-                These records are already hidden from the storefront and complaint form. Click below to permanently remove only these flagged demo documents (official outlets remain untouched):
+                These records are already hidden from the storefront and complaint form. Click below to permanently remove only these flagged demo documents:
               </p>
               <ul className="mt-1.5 list-inside list-disc text-[11px] font-mono text-amber-900">
                 {legacyDemoShowrooms.map((d) => (
@@ -5473,8 +5707,36 @@ export function AdminShowroomsPanel() {
           onSubmit={saveShowroom}
           className="grid grid-cols-1 gap-4 rounded-xl border border-[#D6D3D1] bg-white p-5 sm:grid-cols-2"
         >
+          <div className="flex items-center justify-between border-b border-[#F5F4F0] pb-3 sm:col-span-2">
+            <div>
+              <h3 className="font-display text-lg font-bold text-[#1C1917]">
+                {isNew ? 'Add New Outlet' : `Edit Outlet · ${editing.nameEn || editing.name}`}
+              </h3>
+              <p className="font-mono text-[11px] text-[#78716C]">ID: {editing.id}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setEditing(null)}
+              className="cursor-pointer rounded-lg p-1.5 text-[#78716C] hover:bg-[#F5F4F0]"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
           <div>
-            <label className="mb-1 block text-xs font-semibold">Showroom Name (বাংলা) *</label>
+            <label className="mb-1 block text-xs font-semibold">Outlet Name (English) *</label>
+            <input
+              type="text"
+              value={editing.nameEn ?? ''}
+              onChange={(e) =>
+                setEditing({ ...editing, nameEn: e.target.value, name_en: e.target.value })
+              }
+              placeholder="e.g. Khulshi More Outlet"
+              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold">Outlet Name (বাংলা) *</label>
             <input
               type="text"
               value={editing.name}
@@ -5485,15 +5747,14 @@ export function AdminShowroomsPanel() {
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
             />
           </div>
+
           <div>
-            <label className="mb-1 block text-xs font-semibold">Showroom Name (English) *</label>
+            <label className="mb-1 block text-xs font-semibold">Area (English) *</label>
             <input
               type="text"
-              value={editing.nameEn ?? ''}
-              onChange={(e) =>
-                setEditing({ ...editing, nameEn: e.target.value, name_en: e.target.value })
-              }
-              placeholder="e.g. Khulshi More Outlet"
+              value={editing.areaEn ?? ''}
+              onChange={(e) => setEditing({ ...editing, areaEn: e.target.value })}
+              placeholder="e.g. Khulshi, Chattogram"
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
             />
           </div>
@@ -5507,16 +5768,35 @@ export function AdminShowroomsPanel() {
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
             />
           </div>
+
           <div>
-            <label className="mb-1 block text-xs font-semibold">Area (English)</label>
+            <label className="mb-1 block text-xs font-semibold">Region Filter Group</label>
+            <select
+              value={editing.region || 'khulshi-gec'}
+              onChange={(e) => setEditing({ ...editing, region: e.target.value as OutletRegion })}
+              className="w-full rounded-lg border border-[#D6D3D1] bg-white px-3 py-2 text-sm"
+            >
+              {OUTLET_REGION_FILTERS.filter((f) => f.id !== 'all').map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.labelEn} ({f.labelBn})
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold">Display Order</label>
             <input
-              type="text"
-              value={editing.areaEn ?? ''}
-              onChange={(e) => setEditing({ ...editing, areaEn: e.target.value })}
-              placeholder="e.g. Khulshi, Chattogram"
-              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+              type="number"
+              min={1}
+              max={1000}
+              value={editing.display_order ?? 1}
+              onChange={(e) =>
+                setEditing({ ...editing, display_order: Number(e.target.value) || 1 })
+              }
+              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 font-mono text-sm tabular-nums"
             />
           </div>
+
           <div>
             <label className="mb-1 block text-xs font-semibold">Primary Phone *</label>
             <input
@@ -5524,7 +5804,7 @@ export function AdminShowroomsPanel() {
               value={editing.phone}
               onChange={(e) => setEditing({ ...editing, phone: e.target.value })}
               placeholder="+8801XXXXXXXXX"
-              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 font-mono text-sm"
             />
           </div>
           <div>
@@ -5546,42 +5826,16 @@ export function AdminShowroomsPanel() {
               />
             </div>
           </div>
+
           <div>
-            <label className="mb-1 block text-xs font-semibold">Google Maps URL</label>
-            <input
-              type="url"
-              value={editing.mapUrl}
-              onChange={(e) => setEditing({ ...editing, mapUrl: e.target.value })}
-              placeholder="https://maps.app.goo.gl/..."
-              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold">Weekly Holiday</label>
+            <label className="mb-1 block text-xs font-semibold">Full Address (English) *</label>
             <input
               type="text"
-              value={editing.weekly_holiday ?? ''}
-              onChange={(e) => setEditing({ ...editing, weekly_holiday: e.target.value })}
-              placeholder="e.g. Open Daily"
-              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold">Opening Hours (বাংলা) *</label>
-            <input
-              type="text"
-              value={editing.openingHours}
-              onChange={(e) => setEditing({ ...editing, openingHours: e.target.value })}
-              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold">Opening Hours (English)</label>
-            <input
-              type="text"
-              value={editing.openingHoursEn ?? ''}
-              onChange={(e) => setEditing({ ...editing, openingHoursEn: e.target.value })}
-              placeholder="e.g. Daily 8:00 AM – 10:00 PM"
+              value={editing.addressEn ?? ''}
+              onChange={(e) =>
+                setEditing({ ...editing, addressEn: e.target.value, address_en: e.target.value })
+              }
+              placeholder="Full address in English"
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
             />
           </div>
@@ -5596,50 +5850,86 @@ export function AdminShowroomsPanel() {
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
             />
           </div>
+
           <div>
-            <label className="mb-1 block text-xs font-semibold">Full Address (English)</label>
+            <label className="mb-1 block text-xs font-semibold">Counter Hours (English)</label>
             <input
               type="text"
-              value={editing.addressEn ?? ''}
-              onChange={(e) =>
-                setEditing({ ...editing, addressEn: e.target.value, address_en: e.target.value })
-              }
-              placeholder="Full address in English"
+              value={editing.openingHoursEn ?? ''}
+              onChange={(e) => setEditing({ ...editing, openingHoursEn: e.target.value })}
+              placeholder="e.g. Friday – Saturday · 8:00 AM – 10:00 PM"
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs font-semibold">Description (বাংলা)</label>
+            <label className="mb-1 block text-xs font-semibold">Counter Hours (বাংলা) *</label>
             <input
               type="text"
-              value={editing.description ?? ''}
-              onChange={(e) =>
-                setEditing({
-                  ...editing,
-                  description: e.target.value,
-                  description_bn: e.target.value,
-                })
-              }
-              placeholder="বাংলা বিবরণ (ঐচ্ছিক)"
+              value={editing.openingHours}
+              onChange={(e) => setEditing({ ...editing, openingHours: e.target.value })}
+              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold">Order Line Hours (English)</label>
+            <input
+              type="text"
+              value={editing.orderLineEn ?? ''}
+              onChange={(e) => setEditing({ ...editing, orderLineEn: e.target.value })}
+              placeholder="Daily · 8:00 AM – 7:00 PM"
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs font-semibold">Description (English)</label>
+            <label className="mb-1 block text-xs font-semibold">Order Line Hours (বাংলা)</label>
             <input
               type="text"
-              value={editing.descriptionEn ?? ''}
-              onChange={(e) =>
-                setEditing({
-                  ...editing,
-                  descriptionEn: e.target.value,
-                  description_en: e.target.value,
-                })
-              }
-              placeholder="English description (optional)"
+              value={editing.orderLineBn ?? ''}
+              onChange={(e) => setEditing({ ...editing, orderLineBn: e.target.value })}
+              placeholder="প্রতিদিন · সকাল ৮:০০টা – সন্ধ্যা ৭:০০টা"
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
             />
           </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold">Google Maps URL</label>
+            <input
+              type="url"
+              value={editing.mapUrl}
+              onChange={(e) => setEditing({ ...editing, mapUrl: e.target.value })}
+              placeholder="https://maps.app.goo.gl/..."
+              className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold">Weekly Holiday / Badge Note</label>
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                type="text"
+                value={editing.weekly_holiday ?? ''}
+                onChange={(e) => setEditing({ ...editing, weekly_holiday: e.target.value })}
+                placeholder="e.g. Open Daily"
+                className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-xs"
+              />
+              <input
+                type="text"
+                value={editing.descriptionEn ?? ''}
+                onChange={(e) =>
+                  setEditing({
+                    ...editing,
+                    descriptionEn: e.target.value,
+                    description_en: e.target.value,
+                    description: e.target.value,
+                    description_bn: e.target.value,
+                  })
+                }
+                placeholder="e.g. Office & Outlet"
+                className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-xs"
+              />
+            </div>
+          </div>
+
           <div>
             <label className="mb-1 block text-xs font-semibold">Latitude</label>
             <input
@@ -5660,6 +5950,72 @@ export function AdminShowroomsPanel() {
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 font-mono text-sm"
             />
           </div>
+
+          {/* Outlet Photo Upload (Cloudflare R2) */}
+          <div className="rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-4 sm:col-span-2">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-[#1C1917]">
+                  Outlet Photo (Cloudflare R2 · Optional)
+                </p>
+                <p className="text-[11px] text-[#78716C]">
+                  Upload a real storefront photograph or paste a valid R2 image URL.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#D6D3D1] bg-white px-3 py-2 text-xs font-semibold text-[#1C1917] hover:border-[#DC1F26]">
+                  {uploadingPhoto ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-[#DC1F26]" />
+                  ) : (
+                    <Upload className="h-3.5 w-3.5 text-[#DC1F26]" />
+                  )}
+                  <span>{uploadingPhoto ? 'Uploading...' : 'Upload Photo'}</span>
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    disabled={uploadingPhoto}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      e.target.value = '';
+                      if (f) void handlePhotoUpload(f);
+                    }}
+                    className="hidden"
+                  />
+                </label>
+                {editing.images && editing.images.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setEditing({ ...editing, images: [] })}
+                    className="cursor-pointer rounded-lg border border-red-200 bg-white px-2.5 py-2 text-xs font-semibold text-[#B91C1C] hover:bg-red-50"
+                  >
+                    Remove Photo
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center">
+              {editing.images?.[0] && (
+                <img
+                  src={resolveAssetUrl(editing.images[0])}
+                  alt={editing.nameEn || editing.name}
+                  className="h-20 w-32 shrink-0 rounded-lg border border-[#E7E5E4] object-cover bg-white"
+                />
+              )}
+              <input
+                type="url"
+                value={editing.images?.[0] ?? ''}
+                onChange={(e) =>
+                  setEditing({
+                    ...editing,
+                    images: e.target.value.trim() ? [e.target.value] : [],
+                  })
+                }
+                placeholder="https://images.homerecipefoods.com.bd/showrooms/..."
+                className="w-full rounded-lg border border-[#D6D3D1] bg-white px-3 py-2 text-xs"
+              />
+            </div>
+          </div>
+
           <div className="flex flex-wrap gap-5 sm:col-span-2">
             <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-semibold">
               <input
@@ -5688,39 +6044,75 @@ export function AdminShowroomsPanel() {
             </button>
             <button
               type="submit"
-              className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C]"
+              disabled={busyShowroomId === editing.id || uploadingPhoto}
+              className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C] disabled:opacity-50"
             >
-              Save Showroom
+              {busyShowroomId === editing.id ? 'Saving...' : 'Save Outlet'}
             </button>
           </div>
         </form>
       )}
 
-      {/* Firestore Custom Showrooms */}
-      <div className="space-y-3">
-        <h3 className="text-sm font-bold text-[#1C1917]">
-          Custom Firestore Showrooms
-        </h3>
-        {firestoreShowrooms.length === 0 ? (
-          <div className="rounded-xl border border-[#E7E5E4] bg-white p-6 text-center text-xs text-[#57534E]">
-            No additional showroom documents are stored in Firestore. Use “Add Showroom” above to add a custom branch.
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            {firestoreShowrooms.map((sr) => {
-              const st = getShowroomText(sr);
-              const namePair = resolveBilingualPair(st.nameEn, st.nameBn);
-              const areaPair = resolveBilingualPair(st.areaEn, st.areaBn);
-              const addrPair = resolveBilingualPair(st.addressEn, st.addressBn);
-              return (
-                <div key={sr.id} className="rounded-xl border border-[#E7E5E4] bg-white p-5">
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <p className="text-xs font-semibold text-[#DC1F26]">
-                        {areaPair.primary}
-                        {sr.visible === false ? ' · (Hidden)' : ''}
+      {/* Search & Region Filter */}
+      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-[#E7E5E4] bg-white p-3.5">
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search outlet name, area, address, or phone..."
+          className="min-w-[220px] flex-1 rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3 py-2 text-xs focus:border-[#DC1F26] focus:bg-white focus:outline-none"
+        />
+        <select
+          value={regionFilter}
+          onChange={(e) => setRegionFilter(e.target.value)}
+          className="rounded-lg border border-[#D6D3D1] bg-[#FAFAF8] px-3 py-2 text-xs font-semibold text-[#1C1917]"
+        >
+          {OUTLET_REGION_FILTERS.map((f) => (
+            <option key={f.id} value={f.id}>
+              {f.labelEn}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* Unified Dynamic Outlet List (All 16+ Outlets) */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        {managedShowrooms.map((sr) => {
+          const st = getShowroomText(sr);
+          const namePair = resolveBilingualPair(st.nameEn, st.nameBn);
+          const areaPair = resolveBilingualPair(st.areaEn, st.areaBn);
+          const addrPair = resolveBilingualPair(st.addressEn, st.addressBn);
+          const isOfficial = canonicalIds.has(sr.id);
+          const hasOverride = firestoreOverrideIds.has(sr.id);
+          const isBusy = busyShowroomId === sr.id;
+          const regionMeta = OUTLET_REGION_FILTERS.find((r) => r.id === sr.region);
+
+          return (
+            <div
+              key={sr.id}
+              className={`flex flex-col justify-between rounded-xl border bg-white p-5 ${
+                sr.visible === false ? 'border-[#E7E5E4] opacity-70' : 'border-[#E7E5E4]'
+              }`}
+            >
+              <div>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex min-w-0 items-start gap-3">
+                    {sr.images?.[0] && (
+                      <img
+                        src={resolveAssetUrl(sr.images[0])}
+                        alt={namePair.primary}
+                        className="h-14 w-14 shrink-0 rounded-lg border border-[#E7E5E4] object-cover"
+                      />
+                    )}
+                    <div className="min-w-0">
+                      <p className="text-[11px] font-semibold text-[#B91C1C]">
+                        <span className="tabular-nums">#{sr.display_order ?? 1}</span>
+                        {' · '}
+                        {regionMeta ? regionMeta.labelEn : areaPair.primary}
+                        {sr.isMain ? ' · Office & Outlet' : ''}
+                        {hasOverride ? ' · Synced' : ' · Default'}
                       </p>
-                      <h3 className="font-display text-xl font-bold text-[#1C1917]">
+                      <h3 className="font-display mt-0.5 text-lg font-bold text-[#1C1917]">
                         {namePair.primary}
                       </h3>
                       {namePair.secondaryBn && (
@@ -5729,131 +6121,167 @@ export function AdminShowroomsPanel() {
                         </p>
                       )}
                     </div>
-                    <div className="flex gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsNew(false);
-                          setMsg(null);
-                          setEditing({
-                            ...sr,
-                            name: st.nameBn,
-                            nameEn: st.nameEn,
-                            name_bn: st.nameBn,
-                            name_en: st.nameEn,
-                            area: st.areaBn,
-                            areaEn: st.areaEn,
-                            address: st.addressBn,
-                            addressEn: st.addressEn,
-                            address_bn: st.addressBn,
-                            address_en: st.addressEn,
-                            description: st.descriptionBn,
-                            descriptionEn: st.descriptionEn,
-                            description_bn: st.descriptionBn,
-                            description_en: st.descriptionEn,
-                            openingHours: st.openingHoursBn,
-                            openingHoursEn: st.openingHoursEn,
-                          });
-                        }}
-                        className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-[#1C1917]"
-                      >
-                        <Edit3 className="h-3.5 w-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          try {
-                            await ensureVerifiedAdminWriteSession({
-                              hasPermission,
-                              requiredPermission: 'showrooms_manage',
-                            });
-                            await deleteDoc(doc(requireDb(), 'showrooms', sr.id));
-                            await logAdminActivity('delete', 'showrooms', sr.id, st.nameEn || st.nameBn);
-                          } catch (err) {
-                            setMsg(
-                              mapCatalogSaveError(err, 'showroom_delete', {
-                                path: `showrooms/${sr.id}`,
-                                operation: 'DELETE',
-                                staffRole,
-                              })
-                            );
-                          }
-                        }}
-                        className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-red-700"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
                   </div>
-                  {addrPair.primary && (
-                    <p className="mt-2 text-xs text-[#57534E]">{addrPair.primary}</p>
-                  )}
-                  {addrPair.secondaryBn && (
-                    <p className="font-bn mt-0.5 text-[11px] text-[#78716C]">
-                      {addrPair.secondaryBn}
-                    </p>
-                  )}
-                  <p className="mt-2 font-mono text-xs font-semibold text-[#1C1917]">
-                    {sr.phone} {sr.alternate_phone ? `· ${sr.alternate_phone}` : ''}
-                  </p>
-                  <p className="mt-1 text-xs text-[#78716C]">
-                    {st.openingHoursEn || st.openingHoursBn}
-                    {sr.weekly_holiday ? ` · ${sr.weekly_holiday}` : ''}
-                  </p>
+                  <span
+                    className={`shrink-0 text-[11px] font-semibold ${
+                      sr.visible === false ? 'text-[#78716C]' : 'text-emerald-700'
+                    }`}
+                  >
+                    {sr.visible === false ? 'Hidden' : 'Visible'}
+                  </span>
                 </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
 
-      {/* Approved Official Outlets Reference */}
-      <div className="space-y-3 border-t border-[#E7E5E4] pt-5">
-        <div>
-          <h3 className="text-sm font-bold text-[#1C1917]">
-            Official Chattogram Outlets
-          </h3>
-          <p className="text-[11px] text-[#57534E]">
-            Verified outlet directory referenced across Our Outlets, Contact, and the Complaint Box.
-          </p>
-        </div>
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          {CHATTOGRAM_OUTLETS.map((outlet) => {
-            const outletName = resolveBilingualPair(outlet.nameEn, outlet.nameBn);
-            const outletAddr = resolveBilingualPair(outlet.addressEn, outlet.addressBn);
-            return (
-              <div key={outlet.id} className="rounded-xl border border-[#E7E5E4] bg-[#FAFAF8] p-4">
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <h4 className="font-display text-lg font-bold text-[#1C1917]">
-                      {outletName.primary}
-                    </h4>
-                    {outletName.secondaryBn && (
-                      <p className="font-bn text-xs font-medium text-[#78716C]">
-                        {outletName.secondaryBn}
-                      </p>
-                    )}
-                  </div>
-                  {outlet.type && (
-                    <span className="text-[11px] font-bold text-[#B91C1C]">
-                      {outlet.type}
-                    </span>
-                  )}
-                </div>
-                <p className="mt-2 text-xs text-[#57534E]">{outletAddr.primary}</p>
-                {outletAddr.secondaryBn && (
-                  <p className="font-bn mt-0.5 text-[11px] text-[#78716C]">
-                    {outletAddr.secondaryBn}
-                  </p>
+                {addrPair.primary && (
+                  <p className="mt-2.5 text-xs leading-relaxed text-[#57534E]">{addrPair.primary}</p>
                 )}
-                <p className="mt-2 font-mono text-xs font-semibold text-[#1C1917]">
-                  {outlet.phone}
+                {addrPair.secondaryBn && (
+                  <p className="font-bn mt-0.5 text-[11px] text-[#78716C]">{addrPair.secondaryBn}</p>
+                )}
+
+                <p className="mt-2 font-mono text-xs font-semibold tabular-nums text-[#1C1917]">
+                  {sr.phone} {sr.alternate_phone ? `· ${sr.alternate_phone}` : ''}
+                </p>
+                <p className="mt-1 text-xs text-[#78716C]">
+                  {st.openingHoursEn || st.openingHoursBn}
+                  {sr.orderLineEn ? ` · Orders: ${sr.orderLineEn}` : ''}
                 </p>
               </div>
-            );
-          })}
-        </div>
+
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-[#F5F4F0] pt-3">
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={isBusy}
+                    onClick={() => void nudgeShowroomOrder(sr, -1)}
+                    title="Move earlier in display order"
+                    className="cursor-pointer rounded-md border border-[#E7E5E4] px-2 py-1 text-[11px] font-semibold text-[#57534E] hover:border-[#1C1917] hover:text-[#1C1917] disabled:opacity-50"
+                  >
+                    Order −
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isBusy}
+                    onClick={() => void nudgeShowroomOrder(sr, 1)}
+                    title="Move later in display order"
+                    className="cursor-pointer rounded-md border border-[#E7E5E4] px-2 py-1 text-[11px] font-semibold text-[#57534E] hover:border-[#1C1917] hover:text-[#1C1917] disabled:opacity-50"
+                  >
+                    Order +
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isBusy}
+                    onClick={() => void toggleShowroomVisibility(sr)}
+                    className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-[#E7E5E4] px-2.5 py-1 text-[11px] font-semibold text-[#1C1917] hover:border-[#DC1F26] disabled:opacity-50"
+                  >
+                    {sr.visible === false ? (
+                      <>
+                        <Eye className="h-3 w-3 text-emerald-700" />
+                        <span>Show</span>
+                      </>
+                    ) : (
+                      <>
+                        <EyeOff className="h-3 w-3 text-[#78716C]" />
+                        <span>Hide</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={isBusy}
+                    onClick={() => {
+                      setIsNew(!hasOverride);
+                      setMsg(null);
+                      setEditing({
+                        ...sr,
+                        name: st.nameBn || st.nameEn,
+                        nameEn: st.nameEn,
+                        name_bn: st.nameBn || st.nameEn,
+                        name_en: st.nameEn,
+                        area: st.areaBn || st.areaEn,
+                        areaEn: st.areaEn,
+                        address: st.addressBn || st.addressEn,
+                        addressEn: st.addressEn,
+                        address_bn: st.addressBn || st.addressEn,
+                        address_en: st.addressEn,
+                        description: st.descriptionBn,
+                        descriptionEn: st.descriptionEn,
+                        description_bn: st.descriptionBn,
+                        description_en: st.descriptionEn,
+                        openingHours: st.openingHoursBn || st.openingHoursEn,
+                        openingHoursEn: st.openingHoursEn,
+                      });
+                    }}
+                    className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-[#E7E5E4] px-2.5 py-1 text-[11px] font-semibold text-[#1C1917] hover:border-[#1C1917]"
+                  >
+                    <Edit3 className="h-3 w-3" />
+                    <span>Edit</span>
+                  </button>
+
+                  {hasOverride && (
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() => setConfirmDeleteTarget(sr)}
+                      title={isOfficial ? 'Reset to official default' : 'Delete custom outlet'}
+                      className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-[#E7E5E4] px-2.5 py-1 text-[11px] font-semibold text-[#B91C1C] hover:bg-red-50"
+                    >
+                      {isOfficial ? (
+                        <>
+                          <RotateCcw className="h-3 w-3" />
+                          <span>Reset</span>
+                        </>
+                      ) : (
+                        <>
+                          <Trash2 className="h-3 w-3" />
+                          <span>Delete</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })}
       </div>
+
+      {/* Delete / Reset Confirmation Modal */}
+      {confirmDeleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-red-200 bg-white p-6 shadow-xl">
+            <h3 className="font-display text-lg font-bold text-[#1C1917]">
+              {canonicalIds.has(confirmDeleteTarget.id)
+                ? 'Reset Outlet to Default?'
+                : 'Delete Custom Outlet?'}
+            </h3>
+            <p className="mt-1.5 text-xs leading-relaxed text-[#57534E]">
+              {canonicalIds.has(confirmDeleteTarget.id)
+                ? `This removes custom Firestore overrides for "${confirmDeleteTarget.nameEn || confirmDeleteTarget.name}" and restores the official baseline configuration.`
+                : `This permanently deletes custom outlet "${confirmDeleteTarget.nameEn || confirmDeleteTarget.name}" from Firestore.`}
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteTarget(null)}
+                className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold text-[#44403C]"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busyShowroomId === confirmDeleteTarget.id}
+                onClick={() => void handleConfirmDeleteOrReset()}
+                className="cursor-pointer rounded-lg bg-[#DC1F26] px-4 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C] disabled:opacity-50"
+              >
+                {canonicalIds.has(confirmDeleteTarget.id) ? 'Reset to Default' : 'Confirm Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

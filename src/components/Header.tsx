@@ -64,7 +64,7 @@ export function Header({ onOpenChat }: HeaderProps) {
         </div>
       )}
       <header className="border-b border-[#292524] bg-[#1C1917]">
-        <div className="mx-auto flex h-12 max-w-7xl items-center justify-between gap-3 px-3 sm:h-14 sm:px-6 lg:gap-6 lg:px-8">
+        <div className="mx-auto flex h-13 max-w-7xl items-center justify-between gap-3 px-3 sm:h-14 sm:px-6 lg:gap-6 lg:px-8">
           {/* Official Brand Logo */}
           <Link
             to="/"
@@ -145,14 +145,14 @@ export function Header({ onOpenChat }: HeaderProps) {
             <Link
               to="/products"
               aria-label="Search products"
-              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[#44403C] bg-[#292524] text-[#FAFAF8] transition-colors hover:border-[#FACC15] md:hidden"
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#44403C] bg-[#292524] text-[#FAFAF8] transition-colors hover:border-[#FACC15] md:hidden"
             >
-              <Search className="h-3.5 w-3.5" />
+              <Search className="h-4 w-4" />
             </Link>
 
             <Link
               to="/outlets"
-              className="inline-flex h-8 shrink-0 items-center gap-1 whitespace-nowrap rounded-lg bg-[#DC1F26] px-2.5 text-[11px] font-semibold text-white transition-colors hover:bg-[#B91C1C] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#FACC15] sm:h-9 sm:gap-1.5 sm:px-3.5 sm:text-xs"
+              className="inline-flex h-9 shrink-0 items-center gap-1 whitespace-nowrap rounded-lg bg-[#DC1F26] px-2.5 text-[11px] font-semibold text-white transition-colors hover:bg-[#B91C1C] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#FACC15] sm:gap-1.5 sm:px-3.5 sm:text-xs"
             >
               <MapPin className="h-3.5 w-3.5" />
               <span>Our Outlets</span>
@@ -162,7 +162,7 @@ export function Header({ onOpenChat }: HeaderProps) {
               type="button"
               onClick={() => setMobileMenuOpen((v) => !v)}
               aria-label="Toggle navigation menu"
-              className="inline-flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-lg border border-[#44403C] bg-[#292524] text-[#FAFAF8] hover:border-[#FACC15] sm:h-9 sm:w-9 lg:hidden"
+              className="inline-flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-lg border border-[#44403C] bg-[#292524] text-[#FAFAF8] hover:border-[#FACC15] lg:hidden"
             >
               {mobileMenuOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
             </button>

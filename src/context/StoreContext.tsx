@@ -475,6 +475,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         r === 'super_admin' ||
         r === 'admin' ||
         r === 'manager' ||
+        r === 'editor' ||
+        r === 'moderator' ||
         r === 'support_agent';
 
       const evaluateAuthorityDocs = (
@@ -1280,6 +1282,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           description_bn: docItem.description_bn || docItem.description || '',
           description_en: docItem.description_en || docItem.descriptionEn || '',
           openingHoursEn: docItem.openingHoursEn || '',
+          region: docItem.region || undefined,
+          orderLineEn: docItem.orderLineEn || '',
+          orderLineBn: docItem.orderLineBn || '',
+          images: Array.isArray(docItem.images) ? docItem.images.filter(Boolean) : [],
           visible: docItem.visible !== false,
           deleted: Boolean(docItem.deleted),
         } as Showroom;
@@ -1454,6 +1460,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       userRole === 'super_admin' ||
       userRole === 'admin' ||
       userRole === 'manager' ||
+      userRole === 'editor' ||
+      userRole === 'moderator' ||
       userRole === 'support_agent'
     ) {
       return userRole;

@@ -12,16 +12,63 @@ import {
 } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
 import {
-  CHATTOGRAM_OUTLETS,
   OUTLET_REGION_FILTERS,
+  SHARED_OUTLET_HOURS,
   formatPhoneHref,
   getOutletSearchHaystack,
+  isDemoOrDummyShowroom,
   type OutletItem,
+  type OutletRegion,
 } from '../data/outletsData';
+import { resolveAssetUrl } from '../lib/assets';
+import { getShowroomText } from '../lib/bilingual';
+import type { Showroom } from '../types';
 
 interface OutletsShowcaseProps {
   variant?: 'page' | 'section';
   showHeader?: boolean;
+}
+
+interface DynamicOutletCardItem extends OutletItem {
+  imageUrl?: string;
+}
+
+const VALID_REGIONS: ReadonlySet<OutletRegion> = new Set([
+  'khulshi-gec',
+  'halishahar-agrabad',
+  'chandgaon-chawkbazar',
+  'kotwali-oxygen',
+]);
+
+function mapShowroomToOutletItem(sr: Showroom): DynamicOutletCardItem {
+  const st = getShowroomText(sr);
+  const rawType = (st.descriptionEn || st.descriptionBn || '').trim();
+  const isOffice =
+    sr.isMain ||
+    sr.id === 'shah-garibullah-hs' ||
+    /office\s*&\s*outlet/i.test(rawType);
+  const region: OutletRegion =
+    sr.region && VALID_REGIONS.has(sr.region as OutletRegion)
+      ? (sr.region as OutletRegion)
+      : 'khulshi-gec';
+
+  return {
+    id: sr.id,
+    nameBn: st.nameBn || st.nameEn || sr.name,
+    nameEn: st.nameEn || st.nameBn || sr.name,
+    type: isOffice ? 'Office & Outlet' : undefined,
+    addressEn: st.addressEn || st.addressBn || sr.address,
+    addressBn: st.addressBn || st.addressEn || sr.address,
+    counterHoursEn: st.openingHoursEn || SHARED_OUTLET_HOURS.counterHoursEn,
+    counterHoursBn: st.openingHoursBn || SHARED_OUTLET_HOURS.counterHoursBn,
+    orderLineEn: sr.orderLineEn?.trim() || SHARED_OUTLET_HOURS.orderLineEn,
+    orderLineBn: sr.orderLineBn?.trim() || SHARED_OUTLET_HOURS.orderLineBn,
+    phone: sr.phone || '',
+    mapsUrl: sr.mapUrl || 'https://maps.google.com/?q=Chattogram+Home+Recipe+Foods',
+    status: 'active',
+    region,
+    imageUrl: Array.isArray(sr.images) && sr.images[0] ? sr.images[0] : undefined,
+  };
 }
 
 function formatOutletTitleEn(raw: string): string {
@@ -46,7 +93,7 @@ function OutletCard({
   outlet,
   languageMode,
 }: {
-  outlet: OutletItem;
+  outlet: DynamicOutletCardItem;
   languageMode: 'bn' | 'en' | 'both';
 }) {
   const showEnglishFirst = languageMode !== 'bn';
@@ -65,114 +112,132 @@ function OutletCard({
   return (
     <article
       data-outlet-id={outlet.id}
-      className="flex h-full flex-col justify-between rounded-xl border border-[#E7E5E4] bg-white p-5 transition-colors duration-200 hover:border-[#1C1917]/30 sm:p-6"
+      className="flex h-full flex-col justify-between overflow-hidden rounded-xl border border-[#E7E5E4] bg-white transition-colors duration-200 hover:border-[#1C1917]/30"
     >
       <div>
-        {/* Outlet Name & Status (NO serial numbers; Office & Outlet ONLY on first outlet) */}
-        <div className="flex items-start justify-between gap-3 border-b border-[#F5F4F0] pb-3.5">
-          <div className="min-w-0">
-            <h3
-              className={`text-lg font-semibold leading-snug text-[#1C1917] sm:text-xl ${
-                showEnglishFirst ? 'font-display' : 'font-bn'
-              }`}
-            >
-              {primaryTitle}
-            </h3>
-            {showBothLanguages && (
-              <p
-                className={`mt-0.5 text-xs font-normal text-[#57534E] ${
-                  showEnglishFirst ? 'font-bn' : ''
+        {outlet.imageUrl && (
+          <div className="aspect-[16/9] w-full overflow-hidden border-b border-[#F5F4F0] bg-[#FAFAF8]">
+            <img
+              src={resolveAssetUrl(outlet.imageUrl)}
+              alt={`${displayNameEn} showroom`}
+              loading="lazy"
+              decoding="async"
+              referrerPolicy="no-referrer"
+              className="h-full w-full object-cover"
+            />
+          </div>
+        )}
+        <div className="p-5 pb-0 sm:p-6 sm:pb-0">
+          {/* Outlet Name & Status */}
+          <div className="flex items-start justify-between gap-3 border-b border-[#F5F4F0] pb-3.5">
+            <div className="min-w-0">
+              <h3
+                className={`text-lg font-semibold leading-snug text-[#1C1917] sm:text-xl ${
+                  showEnglishFirst ? 'font-display' : 'font-bn'
                 }`}
               >
-                {secondaryTitle}
-              </p>
-            )}
-            {outlet.type && (
-              <p className="mt-1 text-[11px] font-semibold tracking-wide text-[#B91C1C]">
-                {outlet.type}
-              </p>
-            )}
-          </div>
-
-          <span className="inline-flex shrink-0 items-center gap-1 pt-1 text-[11px] font-medium text-[#166534]">
-            <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            <span>{showEnglishFirst ? 'Active' : 'সক্রিয়'}</span>
-          </span>
-        </div>
-
-        {/* Address */}
-        <div className="mt-3.5 flex items-start gap-2.5 text-xs leading-relaxed text-[#44403C]">
-          <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-[#DC1F26]" aria-hidden="true" />
-          <div className="space-y-1">
-            <p className="font-medium text-[#1C1917]">{primaryAddress}</p>
-            {showBothLanguages && (
-              <p className="font-bn text-[11px] leading-relaxed text-[#78716C]">
-                {secondaryAddress}
-              </p>
-            )}
-          </div>
-        </div>
-
-        {/* Counter Hours, Order Line & Direct Phone */}
-        <dl className="mt-4 space-y-2 border-t border-[#F5F4F0] pt-3.5 text-xs">
-          <div className="flex items-start gap-2.5">
-            <Clock className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#78716C]" aria-hidden="true" />
-            <div className="min-w-0 flex-1">
-              <dt className="text-[11px] font-medium text-[#78716C]">
-                {showEnglishFirst ? 'Counter Hours' : 'কাউন্টার সময়'}
-              </dt>
-              <dd className="mt-0.5 font-medium text-[#1C1917]">{counterHoursText}</dd>
-              {showBothLanguages && (
-                <dd className="font-bn text-[11px] text-[#78716C]">
-                  {outlet.counterHoursBn}
-                </dd>
-              )}
-            </div>
-          </div>
-
-          <div className="flex items-start gap-2.5">
-            <PhoneCall className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#78716C]" aria-hidden="true" />
-            <div className="min-w-0 flex-1">
-              <dt className="text-[11px] font-medium text-[#78716C]">
-                {showEnglishFirst ? 'Order Line' : 'অর্ডার লাইন'}
-              </dt>
-              <dd className="mt-0.5 font-medium text-[#1C1917]">{orderLineText}</dd>
-              {showBothLanguages && (
-                <dd className="font-bn text-[11px] text-[#78716C]">
-                  {outlet.orderLineBn}
-                </dd>
-              )}
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2.5 pt-0.5">
-            <Phone className="h-3.5 w-3.5 shrink-0 text-[#DC1F26]" aria-hidden="true" />
-            <div className="min-w-0 flex-1">
-              <dt className="sr-only">{showEnglishFirst ? 'Phone' : 'ফোন'}</dt>
-              <dd>
-                <a
-                  href={formatPhoneHref(outlet.phone)}
-                  aria-label={`Call ${displayNameEn} at ${outlet.phone}`}
-                  className="font-mono text-xs font-semibold tabular-nums text-[#1C1917] transition-colors hover:text-[#DC1F26]"
+                {primaryTitle}
+              </h3>
+              {showBothLanguages && secondaryTitle && secondaryTitle !== primaryTitle && (
+                <p
+                  className={`mt-0.5 text-xs font-normal text-[#57534E] ${
+                    showEnglishFirst ? 'font-bn' : ''
+                  }`}
                 >
-                  {outlet.phone}
-                </a>
-              </dd>
+                  {secondaryTitle}
+                </p>
+              )}
+              {outlet.type && (
+                <p className="mt-1 text-[11px] font-semibold tracking-wide text-[#B91C1C]">
+                  {outlet.type}
+                </p>
+              )}
+            </div>
+
+            <span className="inline-flex shrink-0 items-center gap-1 pt-1 text-[11px] font-medium text-[#166534]">
+              <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <span>{showEnglishFirst ? 'Active' : 'সক্রিয়'}</span>
+            </span>
+          </div>
+
+          {/* Address */}
+          <div className="mt-3.5 flex items-start gap-2.5 text-xs leading-relaxed text-[#44403C]">
+            <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-[#DC1F26]" aria-hidden="true" />
+            <div className="space-y-1">
+              <p className="font-medium text-[#1C1917]">{primaryAddress}</p>
+              {showBothLanguages && secondaryAddress && secondaryAddress !== primaryAddress && (
+                <p className="font-bn text-[11px] leading-relaxed text-[#78716C]">
+                  {secondaryAddress}
+                </p>
+              )}
             </div>
           </div>
-        </dl>
+
+          {/* Counter Hours, Order Line & Direct Phone */}
+          <dl className="mt-4 space-y-2 border-t border-[#F5F4F0] pt-3.5 text-xs">
+            <div className="flex items-start gap-2.5">
+              <Clock className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#78716C]" aria-hidden="true" />
+              <div className="min-w-0 flex-1">
+                <dt className="text-[11px] font-medium text-[#78716C]">
+                  {showEnglishFirst ? 'Counter Hours' : 'কাউন্টার সময়'}
+                </dt>
+                <dd className="mt-0.5 font-medium text-[#1C1917]">{counterHoursText}</dd>
+                {showBothLanguages && outlet.counterHoursBn && (
+                  <dd className="font-bn text-[11px] text-[#78716C]">
+                    {outlet.counterHoursBn}
+                  </dd>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-start gap-2.5">
+              <PhoneCall className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#78716C]" aria-hidden="true" />
+              <div className="min-w-0 flex-1">
+                <dt className="text-[11px] font-medium text-[#78716C]">
+                  {showEnglishFirst ? 'Order Line' : 'অর্ডার লাইন'}
+                </dt>
+                <dd className="mt-0.5 font-medium text-[#1C1917]">{orderLineText}</dd>
+                {showBothLanguages && outlet.orderLineBn && (
+                  <dd className="font-bn text-[11px] text-[#78716C]">
+                    {outlet.orderLineBn}
+                  </dd>
+                )}
+              </div>
+            </div>
+
+            {outlet.phone && (
+              <div className="flex items-center gap-2.5 pt-0.5">
+                <Phone className="h-3.5 w-3.5 shrink-0 text-[#DC1F26]" aria-hidden="true" />
+                <div className="min-w-0 flex-1">
+                  <dt className="sr-only">{showEnglishFirst ? 'Phone' : 'ফোন'}</dt>
+                  <dd>
+                    <a
+                      href={formatPhoneHref(outlet.phone)}
+                      aria-label={`Call ${displayNameEn} at ${outlet.phone}`}
+                      className="font-mono text-xs font-semibold tabular-nums text-[#1C1917] transition-colors hover:text-[#DC1F26]"
+                    >
+                      {outlet.phone}
+                    </a>
+                  </dd>
+                </div>
+              </div>
+            )}
+          </dl>
+        </div>
       </div>
 
       {/* Action Buttons Row */}
-      <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-[#E7E5E4] pt-4">
-        <a
-          href={formatPhoneHref(outlet.phone)}
-          aria-label={`Call ${displayNameEn}`}
-          className="inline-flex min-h-[40px] flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg bg-[#1C1917] px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#DC1F26]"
-        >
-          <Phone className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-          <span>{showEnglishFirst ? 'Call' : 'কল করুন'}</span>
-        </a>
+      <div className="mx-5 mb-5 mt-5 flex flex-wrap items-center gap-2 border-t border-[#E7E5E4] pt-4 sm:mx-6 sm:mb-6">
+        {outlet.phone && (
+          <a
+            href={formatPhoneHref(outlet.phone)}
+            aria-label={`Call ${displayNameEn}`}
+            className="inline-flex min-h-[40px] flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg bg-[#1C1917] px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#DC1F26]"
+          >
+            <Phone className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <span>{showEnglishFirst ? 'Call' : 'কল করুন'}</span>
+          </a>
+        )}
 
         <a
           href={outlet.mapsUrl}
@@ -194,23 +259,31 @@ export function OutletsShowcase({
   variant = 'page',
   showHeader = true,
 }: OutletsShowcaseProps) {
-  const { languageMode, setLanguageMode } = useStore();
+  const { showrooms, languageMode, setLanguageMode } = useStore();
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedRegion, setSelectedRegion] = useState<string>('all');
 
   const showEnglishFirst = languageMode !== 'bn';
   const showBothLanguages = languageMode === 'both';
 
+  const activeOutlets = useMemo(
+    () =>
+      showrooms
+        .filter((sr) => sr.visible !== false && !sr.deleted && !isDemoOrDummyShowroom(sr))
+        .map(mapShowroomToOutletItem),
+    [showrooms]
+  );
+
   const filteredOutlets = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return CHATTOGRAM_OUTLETS.filter((outlet) => {
+    return activeOutlets.filter((outlet) => {
       if (selectedRegion !== 'all' && outlet.region !== selectedRegion) {
         return false;
       }
       if (!q) return true;
       return getOutletSearchHaystack(outlet).includes(q);
     });
-  }, [searchQuery, selectedRegion]);
+  }, [activeOutlets, searchQuery, selectedRegion]);
 
   return (
     <div className="space-y-6">
@@ -242,12 +315,12 @@ export function OutletsShowcase({
 
               <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[#57534E]">
                 {showEnglishFirst
-                  ? 'Visit any of our 16 outlets across Chattogram for freshly prepared bakery items, sweets, and custom orders.'
-                  : 'চট্টগ্রামে আমাদের শো-রুমসমূহ থেকে Home Recipe Foods-এর পণ্য সংগ্রহ করুন।'}
+                  ? `Visit any of our ${activeOutlets.length} outlets across Chattogram for freshly prepared bakery items, sweets, and custom orders.`
+                  : `চট্টগ্রামে আমাদের ${activeOutlets.length}টি শো-রুম থেকে Home Recipe Foods-এর পণ্য সংগ্রহ করুন।`}
               </p>
               {showBothLanguages && (
                 <p className="font-bn mt-0.5 max-w-2xl text-xs text-[#78716C]">
-                  চট্টগ্রামে আমাদের ১৬টি শো-রুম থেকে সরাসরি Home Recipe Foods-এর পণ্য সংগ্রহ করুন।
+                  চট্টগ্রামে আমাদের {activeOutlets.length}টি শো-রুম থেকে সরাসরি Home Recipe Foods-এর পণ্য সংগ্রহ করুন।
                 </p>
               )}
             </div>

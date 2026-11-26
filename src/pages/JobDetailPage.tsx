@@ -153,17 +153,17 @@ export function JobDetailPage() {
 
         {/* Main Header Card */}
         <div className="mt-4 rounded-2xl border border-[#E7E5E4] bg-white p-6 sm:p-8">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <span className="rounded-lg border border-[#E7E5E4] bg-[#FAFAF8] px-3 py-1 text-xs font-semibold text-[#1C1917]">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#F5F4F0] pb-3.5">
+            <span className="text-xs font-semibold uppercase tracking-wider text-[#78716C]">
               {job.department ? `${job.department} · ${catInfo.en}` : catInfo.en}
             </span>
             <span
-              className={`rounded-lg border px-3 py-1 text-xs font-semibold ${
+              className={`text-xs font-semibold ${
                 isOpen
-                  ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                  ? 'text-emerald-700'
                   : winState === 'upcoming'
-                  ? 'border-amber-200 bg-amber-50 text-amber-800'
-                  : 'border-red-200 bg-red-50 text-red-800'
+                  ? 'text-amber-700'
+                  : 'text-[#B91C1C]'
               }`}
             >
               {statusLabel}
