@@ -4,6 +4,7 @@ import {
   processAiChatRequest,
   type AiChatRequestBody,
 } from '../shared/aiChat';
+import { checkAdminRateLimit } from '../shared/adminRateLimit';
 import {
   EXPECTED_FIREBASE_PROJECT_ID as SHARED_EXPECTED_FIREBASE_PROJECT_ID,
   inspectServiceAccountConfig as inspectSharedServiceAccountConfig,
@@ -211,7 +212,8 @@ function scopedErrorResponse(
   message: string,
   status: number,
   corsOrigin: string | null,
-  extra?: Record<string, unknown>
+  extra?: Record<string, unknown>,
+  extraHeaders?: Record<string, string>
 ): Response {
   return scopedJsonResponse(
     {
@@ -223,7 +225,8 @@ function scopedErrorResponse(
       ...(extra || {}),
     },
     status,
-    corsOrigin
+    corsOrigin,
+    extraHeaders
   );
 }
 
@@ -899,6 +902,92 @@ async function firestoreDocExistsWorker(
   return resp.ok;
 }
 
+async function managerIdExistsWorker(
+  adminToken: string,
+  projectId: string,
+  databaseId: string,
+  managerId: string
+): Promise<boolean> {
+  if (!managerId) return false;
+  const queryUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+    projectId
+  )}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
+  try {
+    const resp = await fetch(queryUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({
+        structuredQuery: {
+          from: [{ collectionId: 'rbac_roles' }],
+          where: {
+            fieldFilter: {
+              field: { fieldPath: 'managerId' },
+              op: 'EQUAL',
+              value: { stringValue: managerId },
+            },
+          },
+          limit: 1,
+        },
+      }),
+    });
+    if (!resp.ok) return false;
+    const rows = (await resp.json()) as Array<{ document?: unknown }>;
+    return Array.isArray(rows) && rows.some((r) => Boolean(r.document));
+  } catch {
+    return false;
+  }
+}
+
+async function lookupFirebaseAuthUserByEmailWorker(params: {
+  adminToken: string;
+  projectId: string;
+  email: string;
+}): Promise<{ ok: true; uid: string; email: string; emailVerified: boolean } | { ok: false; code: string; message: string; status: number }> {
+  const resp = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(
+      params.projectId
+    )}/accounts:lookup`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.adminToken}`,
+      },
+      body: JSON.stringify({ email: [params.email] }),
+    }
+  );
+  if (!resp.ok) {
+    return {
+      ok: false,
+      code: 'AUTH_LOOKUP_FAILED',
+      message: 'Failed to look up Firebase Authentication account.',
+      status: 502,
+    };
+  }
+  const data = (await resp.json()) as {
+    users?: Array<{ localId?: string; email?: string; emailVerified?: boolean }>;
+  };
+  const found = Array.isArray(data.users) ? data.users[0] : undefined;
+  if (!found?.localId) {
+    return {
+      ok: false,
+      code: 'USER_NOT_FOUND',
+      message:
+        'No Firebase Authentication account exists for this email. Use "Create New Auth User" to create their account first.',
+      status: 404,
+    };
+  }
+  return {
+    ok: true,
+    uid: found.localId,
+    email: (found.email || params.email).trim().toLowerCase(),
+    emailVerified: Boolean(found.emailVerified),
+  };
+}
+
 async function commitStaffProfileFirestoreWorker(params: {
   adminToken: string;
   projectId: string;
@@ -914,6 +1003,7 @@ async function commitStaffProfileFirestoreWorker(params: {
   managerId: string;
   managerTitle: string;
   creatorEmail: string;
+  existingUserDoc?: boolean;
 }): Promise<{ ok: true } | { ok: false; message: string }> {
   const basePath = `projects/${params.projectId}/databases/${params.databaseId}/documents`;
   const isActive = params.status === 'active';
@@ -946,6 +1036,7 @@ async function commitStaffProfileFirestoreWorker(params: {
     permissions: toFirestoreStringArray(params.permissions),
     role: { stringValue: params.role },
     active: { booleanValue: isActive },
+    isActive: { booleanValue: isActive },
     status: { stringValue: params.status },
     created_by: { stringValue: params.creatorEmail },
   };
@@ -959,13 +1050,36 @@ async function commitStaffProfileFirestoreWorker(params: {
     email: { stringValue: params.email },
     name: { stringValue: params.name },
     displayName: { stringValue: params.name },
-    photoUrl: { stringValue: '' },
+    ...(params.existingUserDoc ? {} : { photoUrl: { stringValue: '' } }),
     phone: { stringValue: params.phone },
     permissions: toFirestoreStringArray(params.permissions),
     role: { stringValue: params.role },
     status: { stringValue: params.status },
     createdBy: { stringValue: params.creatorEmail },
     ...(params.role === 'manager' ? { managerId: { stringValue: params.managerId } } : {}),
+  };
+
+  const userWrite: Record<string, unknown> = {
+    update: {
+      name: `${basePath}/users/${params.uid}`,
+      fields: userFields,
+    },
+    ...(params.existingUserDoc
+      ? {
+          updateMask: {
+            fieldPaths: Object.keys(userFields),
+          },
+          updateTransforms: [
+            { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+          ],
+        }
+      : {
+          updateTransforms: [
+            { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+            { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+            { fieldPath: 'lastLoginAt', setToServerValue: 'REQUEST_TIME' },
+          ],
+        }),
   };
 
   const writes: Array<Record<string, unknown>> = [
@@ -989,17 +1103,7 @@ async function commitStaffProfileFirestoreWorker(params: {
         { fieldPath: 'updated_at', setToServerValue: 'REQUEST_TIME' },
       ],
     },
-    {
-      update: {
-        name: `${basePath}/users/${params.uid}`,
-        fields: userFields,
-      },
-      updateTransforms: [
-        { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
-        { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
-        { fieldPath: 'lastLoginAt', setToServerValue: 'REQUEST_TIME' },
-      ],
-    },
+    userWrite,
   ];
 
   if (params.username) {
@@ -1140,24 +1244,29 @@ async function handleAiChat(request: Request, env: Env): Promise<Response> {
   }
 }
 
-async function handleSessionInit(request: Request, env: Env): Promise<Response> {
+async function handleSessionInit(
+  request: Request,
+  env: Env,
+  corsOrigin: string | null
+): Promise<Response> {
   try {
     const authHeader = request.headers.get('authorization') || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
     if (!token) {
-      return errorResponse('UNAUTHORIZED', 'Missing Bearer token.', 401);
+      return scopedErrorResponse('UNAUTHORIZED', 'Missing Bearer token.', 401, corsOrigin);
     }
     const { projectId, firestoreDatabaseId } = getFirebaseRuntimeConfig(env);
     const decoded = await verifyFirebaseIdTokenWorker(token, projectId);
     if (!decoded.email || !decoded.emailVerified) {
-      return jsonResponse(
+      return scopedJsonResponse(
         {
           success: false,
           verified: false,
           authorizedSuperAdmin: false,
           role: 'customer',
         },
-        403
+        403,
+        corsOrigin
       );
     }
 
@@ -1273,6 +1382,104 @@ async function handleSessionInit(request: Request, env: Env): Promise<Response> 
       }
     }
 
+    // Backfill admins/{uid} for pre-authorized active staff (from fallback rbac_roles/{email})
+    if (
+      adminToken &&
+      saCheck.ok &&
+      !adminDocExists &&
+      authority.status === 'active' &&
+      ['super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'].includes(
+        authority.role
+      )
+    ) {
+      try {
+        const targetProject = saCheck.config.project_id;
+        const emailLower = decoded.email.trim().toLowerCase();
+        const rbacUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+          targetProject
+        )}/databases/${encodeURIComponent(
+          firestoreDatabaseId
+        )}/documents/rbac_roles/${encodeURIComponent(emailLower)}`;
+        const rbacResp = await fetch(rbacUrl, {
+          headers: { Authorization: `Bearer ${adminToken}` },
+        });
+        if (rbacResp.ok) {
+          const rbacDoc = (await rbacResp.json()) as {
+            fields?: {
+              username?: { stringValue?: string };
+              displayName?: { stringValue?: string };
+              name?: { stringValue?: string };
+              phone?: { stringValue?: string };
+              managerId?: { stringValue?: string };
+              managerTitle?: { stringValue?: string };
+              createdBy?: { stringValue?: string };
+              permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
+            };
+          };
+          const f = rbacDoc.fields || {};
+          const perms = (f.permissions?.arrayValue?.values || [])
+            .map((v) => v.stringValue || '')
+            .filter(Boolean);
+          const nowIso = new Date().toISOString();
+          const backfillFields: Record<string, unknown> = {
+            uid: { stringValue: decoded.uid },
+            email: { stringValue: emailLower },
+            username: { stringValue: f.username?.stringValue || '' },
+            name: { stringValue: f.name?.stringValue || f.displayName?.stringValue || decoded.name || emailLower },
+            display_name: { stringValue: f.displayName?.stringValue || decoded.name || emailLower },
+            phone: { stringValue: f.phone?.stringValue || '' },
+            permissions: toFirestoreStringArray(
+              perms.length > 0 ? perms : DEFAULT_ROLE_PERMISSIONS[authority.role as StaffRole] || []
+            ),
+            role: { stringValue: authority.role },
+            active: { booleanValue: true },
+            isActive: { booleanValue: true },
+            status: { stringValue: 'active' },
+            created_by: { stringValue: f.createdBy?.stringValue || 'server-session-init' },
+            created_at: { timestampValue: nowIso },
+            updated_at: { timestampValue: nowIso },
+            last_login_at: { timestampValue: nowIso },
+          };
+          if (authority.role === 'manager' && f.managerId?.stringValue) {
+            backfillFields.manager_id = { stringValue: f.managerId.stringValue };
+            backfillFields.manager_title = { stringValue: f.managerTitle?.stringValue || 'Store Manager' };
+          }
+          const createAdminUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+            targetProject
+          )}/databases/${encodeURIComponent(
+            firestoreDatabaseId
+          )}/documents/admins?documentId=${encodeURIComponent(decoded.uid)}`;
+          const backfillResp = await fetch(createAdminUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${adminToken}`,
+            },
+            body: JSON.stringify({ fields: backfillFields }),
+          });
+          if (backfillResp.ok) {
+            adminDocCreated = true;
+            adminDocExists = true;
+            await fetch(`${rbacUrl}?updateMask.fieldPaths=uid&updateMask.fieldPaths=updatedAt`, {
+              method: 'PATCH',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${adminToken}`,
+              },
+              body: JSON.stringify({
+                fields: {
+                  uid: { stringValue: decoded.uid },
+                  updatedAt: { timestampValue: nowIso },
+                },
+              }),
+            }).catch(() => {});
+          }
+        }
+      } catch {
+        // Non-blocking backfill
+      }
+    }
+
     let claimsSynced = false;
     if (
       adminToken &&
@@ -1295,41 +1502,50 @@ async function handleSessionInit(request: Request, env: Env): Promise<Response> 
       }
     }
 
-    return jsonResponse({
-      success: true,
-      ok: true,
-      verified: true,
-      uid: decoded.uid,
-      email: decoded.email,
-      isPrimarySuperAdmin: authority.isPrimarySuperAdmin,
-      authorizedSuperAdmin: authority.isSuperAdmin,
-      adminDocExists,
-      adminDocCreated,
-      adminDocPath,
-      adminRole: authority.role,
-      hasAdminCredentials: saCheck.ok && cryptoInitialized,
-      claimsSynced,
-      serviceAccountStatus,
-      serviceAccountMessage,
-      role: isSuperAdminRole(authority.role) && authority.status === 'active'
-        ? authority.role
-        : ['admin', 'manager', 'editor', 'moderator', 'support_agent'].includes(authority.role) && authority.status === 'active'
-        ? authority.role
-        : authority.canManageManagers
-        ? 'manager'
-        : 'customer',
-    });
+    return scopedJsonResponse(
+      {
+        success: true,
+        ok: true,
+        verified: true,
+        uid: decoded.uid,
+        email: decoded.email,
+        isPrimarySuperAdmin: authority.isPrimarySuperAdmin,
+        authorizedSuperAdmin: authority.isSuperAdmin,
+        adminDocExists,
+        adminDocCreated,
+        adminDocPath,
+        adminRole: authority.role,
+        hasAdminCredentials: saCheck.ok && cryptoInitialized,
+        claimsSynced,
+        serviceAccountStatus,
+        serviceAccountMessage,
+        role: isSuperAdminRole(authority.role) && authority.status === 'active'
+          ? authority.role
+          : ['admin', 'manager', 'editor', 'moderator', 'support_agent'].includes(authority.role) && authority.status === 'active'
+          ? authority.role
+          : authority.canManageManagers
+          ? 'manager'
+          : 'customer',
+      },
+      200,
+      corsOrigin
+    );
   } catch {
-    return errorResponse('UNAUTHORIZED', 'Invalid or expired Firebase ID token.', 401);
+    return scopedErrorResponse('UNAUTHORIZED', 'Invalid or expired Firebase ID token.', 401, corsOrigin);
   }
 }
 
-async function handleAdminCreateUser(request: Request, env: Env): Promise<Response> {
+async function handleAdminCreateUser(
+  request: Request,
+  env: Env,
+  corsOrigin: string | null,
+  defaultMode: 'new_auth' | 'existing_auth' = 'new_auth'
+): Promise<Response> {
   try {
     const authHeader = request.headers.get('authorization') || '';
     const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
     if (!idToken) {
-      return errorResponse('UNAUTHORIZED', 'Missing Authorization Bearer token.', 401);
+      return scopedErrorResponse('UNAUTHORIZED', 'Missing Authorization Bearer token.', 401, corsOrigin);
     }
 
     const { projectId, firestoreDatabaseId } = getFirebaseRuntimeConfig(env);
@@ -1337,13 +1553,30 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
     try {
       decoded = await verifyFirebaseIdTokenWorker(idToken, projectId);
     } catch {
-      return errorResponse('UNAUTHORIZED', 'Invalid or expired Firebase ID token.', 401);
+      return scopedErrorResponse('UNAUTHORIZED', 'Invalid or expired Firebase ID token.', 401, corsOrigin);
     }
     if (!decoded.email || !decoded.emailVerified) {
-      return errorResponse(
+      return scopedErrorResponse(
         'UNVERIFIED_ADMIN',
         'Verified administrator token required.',
-        403
+        403,
+        corsOrigin
+      );
+    }
+
+    const clientIp =
+      request.headers.get('cf-connecting-ip')?.trim() ||
+      request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+      'worker-ip';
+    const rateCheck = checkAdminRateLimit(`${clientIp}:${decoded.uid}`);
+    if (rateCheck.allowed === false) {
+      return scopedErrorResponse(
+        rateCheck.code,
+        rateCheck.message,
+        rateCheck.status,
+        corsOrigin,
+        { retryAfterSec: rateCheck.retryAfterSec },
+        { 'Retry-After': String(rateCheck.retryAfterSec) }
       );
     }
 
@@ -1355,14 +1588,16 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
       decoded.uid
     );
     if (!authority.isSuperAdmin) {
-      return errorResponse(
+      return scopedErrorResponse(
         'PERMISSION_DENIED',
         'Only a verified Super Admin can create Admin, Manager, or Staff accounts.',
-        403
+        403,
+        corsOrigin
       );
     }
 
     let body: {
+      mode?: unknown;
       email?: unknown;
       password?: unknown;
       name?: unknown;
@@ -1379,12 +1614,15 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
     try {
       const parsed = await request.json();
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        return errorResponse('INVALID_REQUEST', 'Request body must be a JSON object.', 400);
+        return scopedErrorResponse('INVALID_REQUEST', 'Request body must be a JSON object.', 400, corsOrigin);
       }
       body = parsed as typeof body;
     } catch {
-      return errorResponse('INVALID_REQUEST', 'Invalid JSON request payload.', 400);
+      return scopedErrorResponse('INVALID_REQUEST', 'Invalid JSON request payload.', 400, corsOrigin);
     }
+
+    const mode: 'new_auth' | 'existing_auth' =
+      body.mode === 'existing_auth' ? 'existing_auth' : defaultMode;
 
     const cleanEmail = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
     const rawName =
@@ -1408,41 +1646,44 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
       body.status === 'suspended' || body.status === 'disabled' ? body.status : 'active';
 
     if (!cleanName) {
-      return errorResponse('VALIDATION_ERROR', 'Full Name is required.', 400);
+      return scopedErrorResponse('VALIDATION_ERROR', 'Full Name is required.', 400, corsOrigin);
     }
     if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-      return errorResponse('INVALID_EMAIL', 'Please enter a valid email address.', 400);
+      return scopedErrorResponse('INVALID_EMAIL', 'Please enter a valid email address.', 400, corsOrigin);
     }
     if (cleanEmail === PRIMARY_SUPER_ADMIN_EMAIL) {
-      return errorResponse(
+      return scopedErrorResponse(
         'EMAIL_EXISTS',
         'এই email দিয়ে ইতিমধ্যে একটি account রয়েছে।',
-        409
+        409,
+        corsOrigin
       );
     }
     if (!['super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'].includes(cleanRole)) {
-      return errorResponse('VALIDATION_ERROR', 'Invalid role selected.', 400);
+      return scopedErrorResponse('VALIDATION_ERROR', 'Invalid role selected.', 400, corsOrigin);
     }
     const targetRole = cleanRole as StaffRole;
 
     if (targetRole === 'super_admin') {
       if (!authority.isPrimarySuperAdmin || body.allowSuperAdminCreation !== true) {
-        return errorResponse(
+        return scopedErrorResponse(
           'PERMISSION_DENIED',
           'Only the primary Super Admin can explicitly authorize creating another Super Admin account.',
-          403
+          403,
+          corsOrigin
         );
       }
     }
-    if (typeof body.password !== 'string' || body.password.length < 8) {
-      return errorResponse(
+    if (mode === 'new_auth' && (typeof body.password !== 'string' || body.password.length < 8)) {
+      return scopedErrorResponse(
         'WEAK_PASSWORD',
         'Password must be at least 8 characters.',
-        400
+        400,
+        corsOrigin
       );
     }
     if (cleanUsername === 'mahmud') {
-      return errorResponse('VALIDATION_ERROR', 'Username "mahmud" is reserved.', 400);
+      return scopedErrorResponse('VALIDATION_ERROR', 'Username "mahmud" is reserved.', 400, corsOrigin);
     }
 
     const validPermSet = new Set<string>(VALID_PERMISSIONS);
@@ -1466,10 +1707,11 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
             .slice(0, 40)
         : '';
     if (targetRole === 'manager' && !/^[A-Za-z0-9_-]{3,40}$/.test(cleanManagerId)) {
-      return errorResponse(
+      return scopedErrorResponse(
         'VALIDATION_ERROR',
         'Manager ID must be 3–40 characters using letters, numbers, - or _.',
-        400
+        400,
+        corsOrigin
       );
     }
     const cleanManagerTitle =
@@ -1485,23 +1727,24 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
       SHARED_EXPECTED_FIREBASE_PROJECT_ID || projectId
     );
     if (!saCheck.ok) {
-      return errorResponse(saCheck.errorCode, saCheck.message, saCheck.status);
+      return scopedErrorResponse(saCheck.errorCode, saCheck.message, saCheck.status, corsOrigin);
     }
 
     let adminToken: string;
     try {
       adminToken = await getGoogleAdminAccessTokenWorker(saCheck.config);
     } catch {
-      return errorResponse(
+      return scopedErrorResponse(
         'FIREBASE_ADMIN_INIT_FAILED',
         'Firebase Admin SDK initialization failed. Verify the FIREBASE_SERVICE_ACCOUNT_JSON secret.',
-        500
+        500,
+        corsOrigin
       );
     }
 
     const targetProject = saCheck.config.project_id;
 
-    // Pre-check email/username collision in Firestore before Auth creation
+    // Pre-check email/username/managerId collision in Firestore before Auth creation or assignment
     const existingRbacDoc = await firestoreDocExistsWorker(
       adminToken,
       targetProject,
@@ -1510,10 +1753,11 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
       cleanEmail
     );
     if (existingRbacDoc) {
-      return errorResponse(
+      return scopedErrorResponse(
         'EMAIL_EXISTS',
         'এই email দিয়ে ইতিমধ্যে একটি account রয়েছে।',
-        409
+        409,
+        corsOrigin
       );
     }
 
@@ -1526,57 +1770,124 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
         cleanUsername
       );
       if (existingUsernameDoc) {
-        return errorResponse(
+        return scopedErrorResponse(
           'USERNAME_EXISTS',
           `Username "@${cleanUsername}" is already in use.`,
-          409
+          409,
+          corsOrigin
         );
       }
     }
 
-    // Step 1: Create pre-verified user in Firebase Authentication (Admin Identity Toolkit REST)
-    const createResp = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(
-        targetProject
-      )}/accounts`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`,
-        },
-        body: JSON.stringify({
-          email: cleanEmail,
-          password: body.password,
-          displayName: cleanName,
-          emailVerified: true,
-          disabled: cleanStatus !== 'active',
-        }),
+    if (targetRole === 'manager' && cleanManagerId) {
+      const existingMgrId = await managerIdExistsWorker(
+        adminToken,
+        targetProject,
+        firestoreDatabaseId,
+        cleanManagerId
+      );
+      if (existingMgrId) {
+        return scopedErrorResponse(
+          'MANAGER_ID_EXISTS',
+          `Manager ID "${cleanManagerId}" is already assigned.`,
+          409,
+          corsOrigin
+        );
       }
-    );
-
-    const createJson = (await createResp.json()) as {
-      localId?: string;
-      email?: string;
-      error?: { message?: string };
-    };
-
-    if (!createResp.ok || !createJson.localId) {
-      const rawCode = createJson.error?.message || 'ADMIN_CREATE_FAILED';
-      const mapped = mapIdentityToolkitErrorWorker(rawCode);
-      return errorResponse(mapped.code, mapped.message, mapped.status);
     }
 
-    const createdUid = createJson.localId;
-    const createdEmail = (createJson.email || cleanEmail).toLowerCase();
+    let targetUid = '';
+    let targetEmail = cleanEmail;
+    let existingUserDoc = false;
+    let emailVerifiedResult = true;
+
+    if (mode === 'existing_auth') {
+      const lookup = await lookupFirebaseAuthUserByEmailWorker({
+        adminToken,
+        projectId: targetProject,
+        email: cleanEmail,
+      });
+      if (lookup.ok === false) {
+        return scopedErrorResponse(lookup.code, lookup.message, lookup.status, corsOrigin);
+      }
+      if (lookup.uid === decoded.uid) {
+        return scopedErrorResponse(
+          'PERMISSION_DENIED',
+          'You cannot overwrite your own active Super Admin record.',
+          403,
+          corsOrigin
+        );
+      }
+      const existingAdminDoc = await firestoreDocExistsWorker(
+        adminToken,
+        targetProject,
+        firestoreDatabaseId,
+        'admins',
+        lookup.uid
+      );
+      if (existingAdminDoc) {
+        return scopedErrorResponse(
+          'EMAIL_EXISTS',
+          'এই email দিয়ে ইতিমধ্যে একটি account রয়েছে।',
+          409,
+          corsOrigin
+        );
+      }
+      existingUserDoc = await firestoreDocExistsWorker(
+        adminToken,
+        targetProject,
+        firestoreDatabaseId,
+        'users',
+        lookup.uid
+      );
+      targetUid = lookup.uid;
+      targetEmail = lookup.email;
+      emailVerifiedResult = lookup.emailVerified;
+    } else {
+      // Step 1: Create pre-verified user in Firebase Authentication (Admin Identity Toolkit REST)
+      const createResp = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(
+          targetProject
+        )}/accounts`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({
+            email: cleanEmail,
+            password: body.password,
+            displayName: cleanName,
+            emailVerified: true,
+            disabled: cleanStatus !== 'active',
+          }),
+        }
+      );
+
+      const createJson = (await createResp.json()) as {
+        localId?: string;
+        email?: string;
+        error?: { message?: string };
+      };
+
+      if (!createResp.ok || !createJson.localId) {
+        const rawCode = createJson.error?.message || 'ADMIN_CREATE_FAILED';
+        const mapped = mapIdentityToolkitErrorWorker(rawCode);
+        return scopedErrorResponse(mapped.code, mapped.message, mapped.status, corsOrigin);
+      }
+
+      targetUid = createJson.localId;
+      targetEmail = (createJson.email || cleanEmail).toLowerCase();
+    }
 
     // Step 2: Create Firestore RBAC / Admin / User profile atomically via REST commit
     const firestoreResult = await commitStaffProfileFirestoreWorker({
       adminToken,
       projectId: targetProject,
       databaseId: firestoreDatabaseId,
-      uid: createdUid,
-      email: createdEmail,
+      uid: targetUid,
+      email: targetEmail,
       name: cleanName,
       phone: cleanPhone,
       username: cleanUsername,
@@ -1586,21 +1897,25 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
       managerId: cleanManagerId,
       managerTitle: cleanManagerTitle,
       creatorEmail: decoded.email,
+      existingUserDoc,
     });
 
     if (!firestoreResult.ok) {
-      // Strictly roll back ONLY the newly created Auth UID
-      const rolledBack = await rollbackCreatedAuthUserWorker(
-        adminToken,
-        targetProject,
-        createdUid
-      );
-      return errorResponse(
+      let rolledBack = false;
+      if (mode === 'new_auth') {
+        rolledBack = await rollbackCreatedAuthUserWorker(
+          adminToken,
+          targetProject,
+          targetUid
+        );
+      }
+      return scopedErrorResponse(
         'FIRESTORE_PROFILE_FAILED',
         rolledBack
           ? 'Failed to create Firestore user profile; newly created Auth user was automatically rolled back.'
           : 'Failed to create Firestore user profile.',
         500,
+        corsOrigin,
         { rolledBack }
       );
     }
@@ -1608,7 +1923,7 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
     await syncFirebaseStaffCustomClaimsWorker({
       adminToken,
       projectId: targetProject,
-      uid: createdUid,
+      uid: targetUid,
       role: targetRole,
       status: cleanStatus,
     });
@@ -1626,14 +1941,14 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
         ? 'Super Admin successfully created'
         : 'Staff user successfully created';
 
-    return jsonResponse(
+    return scopedJsonResponse(
       {
         success: true,
         ok: true,
-        uid: createdUid,
+        uid: targetUid,
         name: cleanName,
         displayName: cleanName,
-        email: createdEmail,
+        email: targetEmail,
         phone: cleanPhone,
         username: cleanUsername,
         role: targetRole,
@@ -1642,29 +1957,36 @@ async function handleAdminCreateUser(request: Request, env: Env): Promise<Respon
         ...(targetRole === 'manager'
           ? { managerId: cleanManagerId, managerTitle: cleanManagerTitle }
           : {}),
-        emailVerified: true,
+        emailVerified: emailVerifiedResult,
         verificationEmailSent: false,
         authMode: 'admin_sdk',
+        mode,
         firestoreSynced: true,
         message: successMessage,
       },
-      201
+      201,
+      corsOrigin
     );
   } catch {
-    return errorResponse(
+    return scopedErrorResponse(
       'INTERNAL_SERVER_ERROR',
       'Unexpected server error while creating administrator account.',
-      500
+      500,
+      corsOrigin
     );
   }
 }
 
-async function handleAdminRollbackUser(request: Request, env: Env): Promise<Response> {
+async function handleAdminRollbackUser(
+  request: Request,
+  env: Env,
+  corsOrigin: string | null
+): Promise<Response> {
   try {
     const authHeader = request.headers.get('authorization') || '';
     const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
     if (!idToken) {
-      return errorResponse('UNAUTHORIZED', 'Missing Authorization Bearer token.', 401);
+      return scopedErrorResponse('UNAUTHORIZED', 'Missing Authorization Bearer token.', 401, corsOrigin);
     }
 
     const { projectId, firestoreDatabaseId } = getFirebaseRuntimeConfig(env);
@@ -1672,13 +1994,14 @@ async function handleAdminRollbackUser(request: Request, env: Env): Promise<Resp
     try {
       decoded = await verifyFirebaseIdTokenWorker(idToken, projectId);
     } catch {
-      return errorResponse('UNAUTHORIZED', 'Invalid or expired Firebase ID token.', 401);
+      return scopedErrorResponse('UNAUTHORIZED', 'Invalid or expired Firebase ID token.', 401, corsOrigin);
     }
     if (!decoded.email || !decoded.emailVerified) {
-      return errorResponse(
+      return scopedErrorResponse(
         'UNVERIFIED_ADMIN',
         'Verified administrator token required.',
-        403
+        403,
+        corsOrigin
       );
     }
 
@@ -1690,13 +2013,13 @@ async function handleAdminRollbackUser(request: Request, env: Env): Promise<Resp
       decoded.uid
     );
     if (!authority.isSuperAdmin) {
-      return errorResponse('PERMISSION_DENIED', 'Unauthorized rollback request.', 403);
+      return scopedErrorResponse('PERMISSION_DENIED', 'Unauthorized rollback request.', 403, corsOrigin);
     }
 
     const body = (await request.json()) as { uid?: string };
     const targetUid = typeof body.uid === 'string' ? body.uid.trim() : '';
     if (!targetUid || targetUid === decoded.uid) {
-      return errorResponse('INVALID_REQUEST', 'Invalid rollback target UID.', 400);
+      return scopedErrorResponse('INVALID_REQUEST', 'Invalid rollback target UID.', 400, corsOrigin);
     }
 
     const saCheck = inspectSharedServiceAccountConfig(
@@ -1704,7 +2027,7 @@ async function handleAdminRollbackUser(request: Request, env: Env): Promise<Resp
       SHARED_EXPECTED_FIREBASE_PROJECT_ID || projectId
     );
     if (!saCheck.ok) {
-      return errorResponse(saCheck.errorCode, saCheck.message, saCheck.status);
+      return scopedErrorResponse(saCheck.errorCode, saCheck.message, saCheck.status, corsOrigin);
     }
 
     const adminToken = await getGoogleAdminAccessTokenWorker(saCheck.config);
@@ -1714,20 +2037,24 @@ async function handleAdminRollbackUser(request: Request, env: Env): Promise<Resp
       targetUid
     );
     if (!rolledBack) {
-      return errorResponse('ROLLBACK_FAILED', 'Admin SDK rollback delete failed.', 500);
+      return scopedErrorResponse('ROLLBACK_FAILED', 'Admin SDK rollback delete failed.', 500, corsOrigin);
     }
-    return jsonResponse({ success: true, ok: true });
+    return scopedJsonResponse({ success: true, ok: true }, 200, corsOrigin);
   } catch {
-    return errorResponse('ROLLBACK_FAILED', 'Rollback failed.', 500);
+    return scopedErrorResponse('ROLLBACK_FAILED', 'Rollback failed.', 500, corsOrigin);
   }
 }
 
-async function handleAdminUpdateUserStatus(request: Request, env: Env): Promise<Response> {
+async function handleAdminUpdateUserStatus(
+  request: Request,
+  env: Env,
+  corsOrigin: string | null
+): Promise<Response> {
   try {
     const authHeader = request.headers.get('authorization') || '';
     const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
     if (!idToken) {
-      return errorResponse('UNAUTHORIZED', 'Missing Authorization Bearer token.', 401);
+      return scopedErrorResponse('UNAUTHORIZED', 'Missing Authorization Bearer token.', 401, corsOrigin);
     }
 
     const { projectId, firestoreDatabaseId } = getFirebaseRuntimeConfig(env);
@@ -1735,13 +2062,30 @@ async function handleAdminUpdateUserStatus(request: Request, env: Env): Promise<
     try {
       decoded = await verifyFirebaseIdTokenWorker(idToken, projectId);
     } catch {
-      return errorResponse('UNAUTHORIZED', 'Invalid or expired Firebase ID token.', 401);
+      return scopedErrorResponse('UNAUTHORIZED', 'Invalid or expired Firebase ID token.', 401, corsOrigin);
     }
     if (!decoded.email || !decoded.emailVerified) {
-      return errorResponse(
+      return scopedErrorResponse(
         'UNVERIFIED_ADMIN',
         'Verified administrator token required.',
-        403
+        403,
+        corsOrigin
+      );
+    }
+
+    const clientIp =
+      request.headers.get('cf-connecting-ip')?.trim() ||
+      request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+      'worker-ip';
+    const rateCheck = checkAdminRateLimit(`${clientIp}:${decoded.uid}`);
+    if (rateCheck.allowed === false) {
+      return scopedErrorResponse(
+        rateCheck.code,
+        rateCheck.message,
+        rateCheck.status,
+        corsOrigin,
+        { retryAfterSec: rateCheck.retryAfterSec },
+        { 'Retry-After': String(rateCheck.retryAfterSec) }
       );
     }
 
@@ -1753,7 +2097,7 @@ async function handleAdminUpdateUserStatus(request: Request, env: Env): Promise<
       decoded.uid
     );
     if (!authority.allowed) {
-      return errorResponse('PERMISSION_DENIED', 'Insufficient privileges.', 403);
+      return scopedErrorResponse('PERMISSION_DENIED', 'Insufficient privileges.', 403, corsOrigin);
     }
 
     const body = (await request.json()) as {
@@ -1766,17 +2110,19 @@ async function handleAdminUpdateUserStatus(request: Request, env: Env): Promise<
     const cleanUid = typeof body.uid === 'string' ? body.uid.trim() : '';
 
     if (cleanEmail === PRIMARY_SUPER_ADMIN_EMAIL || (cleanUid && cleanUid === decoded.uid)) {
-      return errorResponse(
+      return scopedErrorResponse(
         'PERMISSION_DENIED',
         'Primary Super Admin or current session cannot be disabled.',
-        403
+        403,
+        corsOrigin
       );
     }
     if (!authority.isSuperAdmin && body.role !== 'manager') {
-      return errorResponse(
+      return scopedErrorResponse(
         'PERMISSION_DENIED',
         'Only a Super Admin can modify non-manager accounts.',
-        403
+        403,
+        corsOrigin
       );
     }
 
@@ -1785,7 +2131,7 @@ async function handleAdminUpdateUserStatus(request: Request, env: Env): Promise<
       SHARED_EXPECTED_FIREBASE_PROJECT_ID || projectId
     );
     if (!saCheck.ok || !cleanUid) {
-      return jsonResponse({ success: true, ok: true, authSynced: false });
+      return scopedJsonResponse({ success: true, ok: true, authSynced: false }, 200, corsOrigin);
     }
 
     const adminToken = await getGoogleAdminAccessTokenWorker(saCheck.config);
@@ -1819,25 +2165,30 @@ async function handleAdminUpdateUserStatus(request: Request, env: Env): Promise<
 
     if (!updateResp.ok) {
       const errJson = (await updateResp.json()) as { error?: { message?: string } };
-      return errorResponse(
+      return scopedErrorResponse(
         'AUTH_UPDATE_FAILED',
         errJson.error?.message || 'Failed to update Firebase Auth user status.',
-        400
+        400,
+        corsOrigin
       );
     }
 
-    return jsonResponse({ success: true, ok: true, authSynced: true });
+    return scopedJsonResponse({ success: true, ok: true, authSynced: true }, 200, corsOrigin);
   } catch {
-    return errorResponse('INTERNAL_SERVER_ERROR', 'Failed to update user status.', 500);
+    return scopedErrorResponse('INTERNAL_SERVER_ERROR', 'Failed to update user status.', 500, corsOrigin);
   }
 }
 
-async function handleAdminResetPassword(request: Request, env: Env): Promise<Response> {
+async function handleAdminResetPassword(
+  request: Request,
+  env: Env,
+  corsOrigin: string | null
+): Promise<Response> {
   try {
     const authHeader = request.headers.get('authorization') || '';
     const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
     if (!idToken) {
-      return errorResponse('UNAUTHORIZED', 'Missing Authorization Bearer token.', 401);
+      return scopedErrorResponse('UNAUTHORIZED', 'Missing Authorization Bearer token.', 401, corsOrigin);
     }
 
     const { projectId, apiKey, firestoreDatabaseId } = getFirebaseRuntimeConfig(env);
@@ -1845,13 +2196,30 @@ async function handleAdminResetPassword(request: Request, env: Env): Promise<Res
     try {
       decoded = await verifyFirebaseIdTokenWorker(idToken, projectId);
     } catch {
-      return errorResponse('UNAUTHORIZED', 'Invalid or expired Firebase ID token.', 401);
+      return scopedErrorResponse('UNAUTHORIZED', 'Invalid or expired Firebase ID token.', 401, corsOrigin);
     }
     if (!decoded.email || !decoded.emailVerified) {
-      return errorResponse(
+      return scopedErrorResponse(
         'UNVERIFIED_ADMIN',
         'Verified administrator token required.',
-        403
+        403,
+        corsOrigin
+      );
+    }
+
+    const clientIp =
+      request.headers.get('cf-connecting-ip')?.trim() ||
+      request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+      'worker-ip';
+    const rateCheck = checkAdminRateLimit(`${clientIp}:${decoded.uid}`);
+    if (rateCheck.allowed === false) {
+      return scopedErrorResponse(
+        rateCheck.code,
+        rateCheck.message,
+        rateCheck.status,
+        corsOrigin,
+        { retryAfterSec: rateCheck.retryAfterSec },
+        { 'Retry-After': String(rateCheck.retryAfterSec) }
       );
     }
 
@@ -1863,27 +2231,30 @@ async function handleAdminResetPassword(request: Request, env: Env): Promise<Res
       decoded.uid
     );
     if (!authority.isSuperAdmin) {
-      return errorResponse(
+      return scopedErrorResponse(
         'PERMISSION_DENIED',
         'Only a Super Admin can send user password resets.',
-        403
+        403,
+        corsOrigin
       );
     }
 
     const body = (await request.json()) as { email?: string };
     const cleanEmail = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
     if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-      return errorResponse(
+      return scopedErrorResponse(
         'VALIDATION_ERROR',
         'Valid target email address is required.',
-        400
+        400,
+        corsOrigin
       );
     }
     if (!apiKey) {
-      return errorResponse(
+      return scopedErrorResponse(
         'FIREBASE_CONFIG_MISSING',
         'Firebase Web API key missing on worker.',
-        500
+        500,
+        corsOrigin
       );
     }
 
@@ -1904,25 +2275,30 @@ async function handleAdminResetPassword(request: Request, env: Env): Promise<Res
     if (!resetResp.ok) {
       const errJson = (await resetResp.json()) as { error?: { message?: string } };
       const mapped = mapIdentityToolkitErrorWorker(errJson.error?.message || 'RESET_FAILED');
-      return errorResponse(mapped.code, mapped.message, mapped.status);
+      return scopedErrorResponse(mapped.code, mapped.message, mapped.status, corsOrigin);
     }
 
-    return jsonResponse({ success: true, ok: true, email: cleanEmail });
+    return scopedJsonResponse({ success: true, ok: true, email: cleanEmail }, 200, corsOrigin);
   } catch {
-    return errorResponse(
+    return scopedErrorResponse(
       'INTERNAL_SERVER_ERROR',
       'Failed to send password reset email.',
-      500
+      500,
+      corsOrigin
     );
   }
 }
 
-async function handleAdminDeleteUser(request: Request, env: Env): Promise<Response> {
+async function handleAdminDeleteUser(
+  request: Request,
+  env: Env,
+  corsOrigin: string | null
+): Promise<Response> {
   try {
     const authHeader = request.headers.get('authorization') || '';
     const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
     if (!idToken) {
-      return errorResponse('UNAUTHORIZED', 'Missing Authorization Bearer token.', 401);
+      return scopedErrorResponse('UNAUTHORIZED', 'Missing Authorization Bearer token.', 401, corsOrigin);
     }
 
     const { projectId, firestoreDatabaseId } = getFirebaseRuntimeConfig(env);
@@ -1930,13 +2306,30 @@ async function handleAdminDeleteUser(request: Request, env: Env): Promise<Respon
     try {
       decoded = await verifyFirebaseIdTokenWorker(idToken, projectId);
     } catch {
-      return errorResponse('UNAUTHORIZED', 'Invalid or expired Firebase ID token.', 401);
+      return scopedErrorResponse('UNAUTHORIZED', 'Invalid or expired Firebase ID token.', 401, corsOrigin);
     }
     if (!decoded.email || !decoded.emailVerified) {
-      return errorResponse(
+      return scopedErrorResponse(
         'UNVERIFIED_ADMIN',
         'Verified administrator token required.',
-        403
+        403,
+        corsOrigin
+      );
+    }
+
+    const clientIp =
+      request.headers.get('cf-connecting-ip')?.trim() ||
+      request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+      'worker-ip';
+    const rateCheck = checkAdminRateLimit(`${clientIp}:${decoded.uid}`);
+    if (rateCheck.allowed === false) {
+      return scopedErrorResponse(
+        rateCheck.code,
+        rateCheck.message,
+        rateCheck.status,
+        corsOrigin,
+        { retryAfterSec: rateCheck.retryAfterSec },
+        { 'Retry-After': String(rateCheck.retryAfterSec) }
       );
     }
 
@@ -1948,10 +2341,11 @@ async function handleAdminDeleteUser(request: Request, env: Env): Promise<Respon
       decoded.uid
     );
     if (!authority.isSuperAdmin) {
-      return errorResponse(
+      return scopedErrorResponse(
         'PERMISSION_DENIED',
         'Only a Super Admin can delete user accounts.',
-        403
+        403,
+        corsOrigin
       );
     }
 
@@ -1960,10 +2354,11 @@ async function handleAdminDeleteUser(request: Request, env: Env): Promise<Respon
     const cleanUid = typeof body.uid === 'string' ? body.uid.trim() : '';
 
     if (cleanEmail === PRIMARY_SUPER_ADMIN_EMAIL || (cleanUid && cleanUid === decoded.uid)) {
-      return errorResponse(
+      return scopedErrorResponse(
         'PERMISSION_DENIED',
         'Primary Super Admin or current account cannot be deleted.',
-        403
+        403,
+        corsOrigin
       );
     }
 
@@ -1972,7 +2367,7 @@ async function handleAdminDeleteUser(request: Request, env: Env): Promise<Respon
       SHARED_EXPECTED_FIREBASE_PROJECT_ID || projectId
     );
     if (!saCheck.ok || !cleanUid) {
-      return jsonResponse({ success: true, ok: true, authDeleted: false });
+      return scopedJsonResponse({ success: true, ok: true, authDeleted: false }, 200, corsOrigin);
     }
 
     const adminToken = await getGoogleAdminAccessTokenWorker(saCheck.config);
@@ -1994,17 +2389,18 @@ async function handleAdminDeleteUser(request: Request, env: Env): Promise<Respon
       const errJson = (await delResp.json()) as { error?: { message?: string } };
       const code = errJson.error?.message || 'AUTH_DELETE_FAILED';
       if (!code.includes('USER_NOT_FOUND')) {
-        return errorResponse(
+        return scopedErrorResponse(
           code,
           'Failed to delete user from Firebase Authentication.',
-          400
+          400,
+          corsOrigin
         );
       }
     }
 
-    return jsonResponse({ success: true, ok: true, authDeleted: true });
+    return scopedJsonResponse({ success: true, ok: true, authDeleted: true }, 200, corsOrigin);
   } catch {
-    return errorResponse('INTERNAL_SERVER_ERROR', 'Failed to delete Firebase Auth user.', 500);
+    return scopedErrorResponse('INTERNAL_SERVER_ERROR', 'Failed to delete Firebase Auth user.', 500, corsOrigin);
   }
 }
 
@@ -2834,30 +3230,38 @@ export default {
       }
 
       if (url.pathname === '/api/auth/session-init' && request.method === 'POST') {
-        return handleSessionInit(request, env);
+        return handleSessionInit(request, env, corsOrigin);
       }
 
       if (
-        (url.pathname === '/api/admin/create-user' || url.pathname === '/api/admin/create') &&
+        (url.pathname === '/api/admin/users' ||
+          url.pathname === '/api/admin/create-user' ||
+          url.pathname === '/api/admin/create' ||
+          url.pathname === '/api/admin/assign-user') &&
         request.method === 'POST'
       ) {
-        return handleAdminCreateUser(request, env);
+        return handleAdminCreateUser(
+          request,
+          env,
+          corsOrigin,
+          url.pathname === '/api/admin/assign-user' ? 'existing_auth' : 'new_auth'
+        );
       }
 
       if (url.pathname === '/api/admin/rollback-user' && request.method === 'POST') {
-        return handleAdminRollbackUser(request, env);
+        return handleAdminRollbackUser(request, env, corsOrigin);
       }
 
       if (url.pathname === '/api/admin/update-user-status' && request.method === 'POST') {
-        return handleAdminUpdateUserStatus(request, env);
+        return handleAdminUpdateUserStatus(request, env, corsOrigin);
       }
 
       if (url.pathname === '/api/admin/reset-password' && request.method === 'POST') {
-        return handleAdminResetPassword(request, env);
+        return handleAdminResetPassword(request, env, corsOrigin);
       }
 
       if (url.pathname === '/api/admin/delete-user' && request.method === 'POST') {
-        return handleAdminDeleteUser(request, env);
+        return handleAdminDeleteUser(request, env, corsOrigin);
       }
 
       if (
@@ -2865,6 +3269,15 @@ export default {
         request.method === 'POST'
       ) {
         return handleAiChat(request, env);
+      }
+
+      if (url.pathname.startsWith('/api/admin/') || url.pathname.startsWith('/api/auth/')) {
+        return scopedErrorResponse(
+          'API_ROUTE_NOT_FOUND',
+          `API endpoint ${url.pathname} not found.`,
+          404,
+          corsOrigin
+        );
       }
 
       return errorResponse(

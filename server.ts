@@ -9,6 +9,7 @@ import {
   processAiChatRequest,
   type AiChatRequestBody,
 } from './shared/aiChat';
+import { checkAdminRateLimit } from './shared/adminRateLimit';
 import {
   EXPECTED_FIREBASE_PROJECT_ID as SHARED_EXPECTED_FIREBASE_PROJECT_ID,
   inspectServiceAccountConfig,
@@ -812,6 +813,92 @@ async function firestoreDocExists(
   return resp.ok;
 }
 
+async function managerIdExists(
+  adminToken: string,
+  projectId: string,
+  databaseId: string,
+  managerId: string
+): Promise<boolean> {
+  if (!managerId) return false;
+  const queryUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+    projectId
+  )}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
+  try {
+    const resp = await fetch(queryUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({
+        structuredQuery: {
+          from: [{ collectionId: 'rbac_roles' }],
+          where: {
+            fieldFilter: {
+              field: { fieldPath: 'managerId' },
+              op: 'EQUAL',
+              value: { stringValue: managerId },
+            },
+          },
+          limit: 1,
+        },
+      }),
+    });
+    if (!resp.ok) return false;
+    const rows = (await resp.json()) as Array<{ document?: unknown }>;
+    return Array.isArray(rows) && rows.some((r) => Boolean(r.document));
+  } catch {
+    return false;
+  }
+}
+
+async function lookupFirebaseAuthUserByEmail(params: {
+  adminToken: string;
+  projectId: string;
+  email: string;
+}): Promise<{ ok: true; uid: string; email: string; emailVerified: boolean } | { ok: false; code: string; message: string; status: number }> {
+  const resp = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(
+      params.projectId
+    )}/accounts:lookup`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.adminToken}`,
+      },
+      body: JSON.stringify({ email: [params.email] }),
+    }
+  );
+  if (!resp.ok) {
+    return {
+      ok: false,
+      code: 'AUTH_LOOKUP_FAILED',
+      message: 'Failed to look up Firebase Authentication account.',
+      status: 502,
+    };
+  }
+  const data = (await resp.json()) as {
+    users?: Array<{ localId?: string; email?: string; emailVerified?: boolean }>;
+  };
+  const found = Array.isArray(data.users) ? data.users[0] : undefined;
+  if (!found?.localId) {
+    return {
+      ok: false,
+      code: 'USER_NOT_FOUND',
+      message:
+        'No Firebase Authentication account exists for this email. Use "Create New Auth User" to create their account first.',
+      status: 404,
+    };
+  }
+  return {
+    ok: true,
+    uid: found.localId,
+    email: (found.email || params.email).trim().toLowerCase(),
+    emailVerified: Boolean(found.emailVerified),
+  };
+}
+
 async function commitStaffProfileFirestore(params: {
   adminToken: string;
   projectId: string;
@@ -827,6 +914,7 @@ async function commitStaffProfileFirestore(params: {
   managerId: string;
   managerTitle: string;
   creatorEmail: string;
+  existingUserDoc?: boolean;
 }): Promise<{ ok: true } | { ok: false; message: string }> {
   const basePath = `projects/${params.projectId}/databases/${params.databaseId}/documents`;
   const isActive = params.status === 'active';
@@ -859,6 +947,7 @@ async function commitStaffProfileFirestore(params: {
     permissions: toFirestoreStringArray(params.permissions),
     role: { stringValue: params.role },
     active: { booleanValue: isActive },
+    isActive: { booleanValue: isActive },
     status: { stringValue: params.status },
     created_by: { stringValue: params.creatorEmail },
   };
@@ -872,13 +961,36 @@ async function commitStaffProfileFirestore(params: {
     email: { stringValue: params.email },
     name: { stringValue: params.name },
     displayName: { stringValue: params.name },
-    photoUrl: { stringValue: '' },
+    ...(params.existingUserDoc ? {} : { photoUrl: { stringValue: '' } }),
     phone: { stringValue: params.phone },
     permissions: toFirestoreStringArray(params.permissions),
     role: { stringValue: params.role },
     status: { stringValue: params.status },
     createdBy: { stringValue: params.creatorEmail },
     ...(params.role === 'manager' ? { managerId: { stringValue: params.managerId } } : {}),
+  };
+
+  const userWrite: Record<string, unknown> = {
+    update: {
+      name: `${basePath}/users/${params.uid}`,
+      fields: userFields,
+    },
+    ...(params.existingUserDoc
+      ? {
+          updateMask: {
+            fieldPaths: Object.keys(userFields),
+          },
+          updateTransforms: [
+            { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+          ],
+        }
+      : {
+          updateTransforms: [
+            { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+            { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+            { fieldPath: 'lastLoginAt', setToServerValue: 'REQUEST_TIME' },
+          ],
+        }),
   };
 
   const writes: Array<Record<string, unknown>> = [
@@ -902,17 +1014,7 @@ async function commitStaffProfileFirestore(params: {
         { fieldPath: 'updated_at', setToServerValue: 'REQUEST_TIME' },
       ],
     },
-    {
-      update: {
-        name: `${basePath}/users/${params.uid}`,
-        fields: userFields,
-      },
-      updateTransforms: [
-        { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
-        { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
-        { fieldPath: 'lastLoginAt', setToServerValue: 'REQUEST_TIME' },
-      ],
-    },
+    userWrite,
   ];
 
   if (params.username) {
@@ -1118,6 +1220,104 @@ app.post('/api/auth/session-init', async (req, res) => {
       }
     }
 
+    // Backfill admins/{uid} for pre-authorized active staff (from fallback rbac_roles/{email})
+    if (
+      adminToken &&
+      saCheck.ok &&
+      !adminDocExists &&
+      authority.status === 'active' &&
+      ['super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'].includes(
+        authority.role
+      )
+    ) {
+      try {
+        const targetProject = saCheck.config.project_id;
+        const emailLower = decoded.email.trim().toLowerCase();
+        const rbacUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+          targetProject
+        )}/databases/${encodeURIComponent(
+          firestoreDatabaseId
+        )}/documents/rbac_roles/${encodeURIComponent(emailLower)}`;
+        const rbacResp = await fetch(rbacUrl, {
+          headers: { Authorization: `Bearer ${adminToken}` },
+        });
+        if (rbacResp.ok) {
+          const rbacDoc = (await rbacResp.json()) as {
+            fields?: {
+              username?: { stringValue?: string };
+              displayName?: { stringValue?: string };
+              name?: { stringValue?: string };
+              phone?: { stringValue?: string };
+              managerId?: { stringValue?: string };
+              managerTitle?: { stringValue?: string };
+              createdBy?: { stringValue?: string };
+              permissions?: { arrayValue?: { values?: Array<{ stringValue?: string }> } };
+            };
+          };
+          const f = rbacDoc.fields || {};
+          const perms = (f.permissions?.arrayValue?.values || [])
+            .map((v) => v.stringValue || '')
+            .filter(Boolean);
+          const nowIso = new Date().toISOString();
+          const backfillFields: Record<string, unknown> = {
+            uid: { stringValue: decoded.uid },
+            email: { stringValue: emailLower },
+            username: { stringValue: f.username?.stringValue || '' },
+            name: { stringValue: f.name?.stringValue || f.displayName?.stringValue || decoded.name || emailLower },
+            display_name: { stringValue: f.displayName?.stringValue || decoded.name || emailLower },
+            phone: { stringValue: f.phone?.stringValue || '' },
+            permissions: toFirestoreStringArray(
+              perms.length > 0 ? perms : DEFAULT_ROLE_PERMISSIONS[authority.role as StaffRole] || []
+            ),
+            role: { stringValue: authority.role },
+            active: { booleanValue: true },
+            isActive: { booleanValue: true },
+            status: { stringValue: 'active' },
+            created_by: { stringValue: f.createdBy?.stringValue || 'server-session-init' },
+            created_at: { timestampValue: nowIso },
+            updated_at: { timestampValue: nowIso },
+            last_login_at: { timestampValue: nowIso },
+          };
+          if (authority.role === 'manager' && f.managerId?.stringValue) {
+            backfillFields.manager_id = { stringValue: f.managerId.stringValue };
+            backfillFields.manager_title = { stringValue: f.managerTitle?.stringValue || 'Store Manager' };
+          }
+          const createAdminUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+            targetProject
+          )}/databases/${encodeURIComponent(
+            firestoreDatabaseId
+          )}/documents/admins?documentId=${encodeURIComponent(decoded.uid)}`;
+          const backfillResp = await fetch(createAdminUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${adminToken}`,
+            },
+            body: JSON.stringify({ fields: backfillFields }),
+          });
+          if (backfillResp.ok) {
+            adminDocCreated = true;
+            adminDocExists = true;
+            await fetch(`${rbacUrl}?updateMask.fieldPaths=uid&updateMask.fieldPaths=updatedAt`, {
+              method: 'PATCH',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${adminToken}`,
+              },
+              body: JSON.stringify({
+                fields: {
+                  uid: { stringValue: decoded.uid },
+                  updatedAt: { timestampValue: nowIso },
+                },
+              }),
+            }).catch(() => {});
+          }
+        }
+      } catch {
+        // Non-blocking backfill
+      }
+    }
+
     let claimsSynced = false;
     if (
       adminToken &&
@@ -1169,7 +1369,11 @@ app.post('/api/auth/session-init', async (req, res) => {
   }
 });
 
-async function handleCreateAdminUser(req: Request, res: Response) {
+async function handleCreateAdminUser(
+  req: Request,
+  res: Response,
+  defaultMode: 'new_auth' | 'existing_auth' = 'new_auth'
+) {
   try {
     const authHeader = req.headers.authorization || '';
     const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
@@ -1190,6 +1394,21 @@ async function handleCreateAdminUser(req: Request, res: Response) {
       return;
     }
 
+    const clientIp =
+      (typeof req.headers['x-forwarded-for'] === 'string'
+        ? req.headers['x-forwarded-for'].split(',')[0]?.trim()
+        : '') ||
+      req.ip ||
+      'express-ip';
+    const rateCheck = checkAdminRateLimit(`${clientIp}:${decoded.uid}`);
+    if (rateCheck.allowed === false) {
+      res.setHeader('Retry-After', String(rateCheck.retryAfterSec));
+      sendError(res, rateCheck.code, rateCheck.message, rateCheck.status, {
+        retryAfterSec: rateCheck.retryAfterSec,
+      });
+      return;
+    }
+
     const authority = await verifyCallerStaffAuthority(idToken, decoded.email, decoded.uid);
     if (!authority.isSuperAdmin) {
       sendError(
@@ -1202,6 +1421,7 @@ async function handleCreateAdminUser(req: Request, res: Response) {
     }
 
     const body = (req.body || {}) as {
+      mode?: unknown;
       email?: unknown;
       password?: unknown;
       name?: unknown;
@@ -1215,6 +1435,9 @@ async function handleCreateAdminUser(req: Request, res: Response) {
       managerTitle?: unknown;
       allowSuperAdminCreation?: unknown;
     };
+
+    const mode: 'new_auth' | 'existing_auth' =
+      body.mode === 'existing_auth' ? 'existing_auth' : defaultMode;
 
     const cleanEmail = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
     const rawName =
@@ -1271,7 +1494,7 @@ async function handleCreateAdminUser(req: Request, res: Response) {
         return;
       }
     }
-    if (typeof body.password !== 'string' || body.password.length < 8) {
+    if (mode === 'new_auth' && (typeof body.password !== 'string' || body.password.length < 8)) {
       sendError(res, 'WEAK_PASSWORD', 'Password must be at least 8 characters.', 400);
       return;
     }
@@ -1377,48 +1600,118 @@ async function handleCreateAdminUser(req: Request, res: Response) {
       }
     }
 
-    const createResp = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(
-        targetProject
-      )}/accounts`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`,
-        },
-        body: JSON.stringify({
-          email: cleanEmail,
-          password: body.password,
-          displayName: cleanName,
-          emailVerified: true,
-          disabled: cleanStatus !== 'active',
-        }),
+    if (targetRole === 'manager' && cleanManagerId) {
+      const existingMgrId = await managerIdExists(
+        adminToken,
+        targetProject,
+        firestoreDatabaseId,
+        cleanManagerId
+      );
+      if (existingMgrId) {
+        sendError(
+          res,
+          'MANAGER_ID_EXISTS',
+          `Manager ID "${cleanManagerId}" is already assigned.`,
+          409
+        );
+        return;
       }
-    );
-
-    const createJson = (await createResp.json()) as {
-      localId?: string;
-      email?: string;
-      error?: { message?: string };
-    };
-
-    if (!createResp.ok || !createJson.localId) {
-      const rawCode = createJson.error?.message || 'ADMIN_CREATE_FAILED';
-      const mapped = mapIdentityToolkitError(rawCode);
-      sendError(res, mapped.code, mapped.message, mapped.status);
-      return;
     }
 
-    const createdUid = createJson.localId;
-    const createdEmail = (createJson.email || cleanEmail).toLowerCase();
+    let targetUid = '';
+    let targetEmail = cleanEmail;
+    let existingUserDoc = false;
+    let emailVerifiedResult = true;
+
+    if (mode === 'existing_auth') {
+      const lookup = await lookupFirebaseAuthUserByEmail({
+        adminToken,
+        projectId: targetProject,
+        email: cleanEmail,
+      });
+      if (lookup.ok === false) {
+        sendError(res, lookup.code, lookup.message, lookup.status);
+        return;
+      }
+      if (lookup.uid === decoded.uid) {
+        sendError(
+          res,
+          'PERMISSION_DENIED',
+          'You cannot overwrite your own active Super Admin record.',
+          403
+        );
+        return;
+      }
+      const existingAdminDoc = await firestoreDocExists(
+        adminToken,
+        targetProject,
+        firestoreDatabaseId,
+        'admins',
+        lookup.uid
+      );
+      if (existingAdminDoc) {
+        sendError(
+          res,
+          'EMAIL_EXISTS',
+          'এই email দিয়ে ইতিমধ্যে একটি account রয়েছে।',
+          409
+        );
+        return;
+      }
+      existingUserDoc = await firestoreDocExists(
+        adminToken,
+        targetProject,
+        firestoreDatabaseId,
+        'users',
+        lookup.uid
+      );
+      targetUid = lookup.uid;
+      targetEmail = lookup.email;
+      emailVerifiedResult = lookup.emailVerified;
+    } else {
+      const createResp = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(
+          targetProject
+        )}/accounts`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({
+            email: cleanEmail,
+            password: body.password,
+            displayName: cleanName,
+            emailVerified: true,
+            disabled: cleanStatus !== 'active',
+          }),
+        }
+      );
+
+      const createJson = (await createResp.json()) as {
+        localId?: string;
+        email?: string;
+        error?: { message?: string };
+      };
+
+      if (!createResp.ok || !createJson.localId) {
+        const rawCode = createJson.error?.message || 'ADMIN_CREATE_FAILED';
+        const mapped = mapIdentityToolkitError(rawCode);
+        sendError(res, mapped.code, mapped.message, mapped.status);
+        return;
+      }
+
+      targetUid = createJson.localId;
+      targetEmail = (createJson.email || cleanEmail).toLowerCase();
+    }
 
     const firestoreResult = await commitStaffProfileFirestore({
       adminToken,
       projectId: targetProject,
       databaseId: firestoreDatabaseId,
-      uid: createdUid,
-      email: createdEmail,
+      uid: targetUid,
+      email: targetEmail,
       name: cleanName,
       phone: cleanPhone,
       username: cleanUsername,
@@ -1428,14 +1721,18 @@ async function handleCreateAdminUser(req: Request, res: Response) {
       managerId: cleanManagerId,
       managerTitle: cleanManagerTitle,
       creatorEmail: decoded.email,
+      existingUserDoc,
     });
 
     if (!firestoreResult.ok) {
-      const rolledBack = await rollbackCreatedAuthUser(
-        adminToken,
-        targetProject,
-        createdUid
-      );
+      let rolledBack = false;
+      if (mode === 'new_auth') {
+        rolledBack = await rollbackCreatedAuthUser(
+          adminToken,
+          targetProject,
+          targetUid
+        );
+      }
       sendError(
         res,
         'FIRESTORE_PROFILE_FAILED',
@@ -1451,7 +1748,7 @@ async function handleCreateAdminUser(req: Request, res: Response) {
     await syncFirebaseStaffCustomClaims({
       adminToken,
       projectId: targetProject,
-      uid: createdUid,
+      uid: targetUid,
       role: targetRole,
       status: cleanStatus,
     });
@@ -1472,10 +1769,10 @@ async function handleCreateAdminUser(req: Request, res: Response) {
     res.status(201).json({
       success: true,
       ok: true,
-      uid: createdUid,
+      uid: targetUid,
       name: cleanName,
       displayName: cleanName,
-      email: createdEmail,
+      email: targetEmail,
       phone: cleanPhone,
       username: cleanUsername,
       role: targetRole,
@@ -1484,9 +1781,10 @@ async function handleCreateAdminUser(req: Request, res: Response) {
       ...(targetRole === 'manager'
         ? { managerId: cleanManagerId, managerTitle: cleanManagerTitle }
         : {}),
-      emailVerified: true,
+      emailVerified: emailVerifiedResult,
       verificationEmailSent: false,
       authMode: 'admin_sdk',
+      mode,
       firestoreSynced: true,
       message: successMessage,
     });
@@ -1501,8 +1799,10 @@ async function handleCreateAdminUser(req: Request, res: Response) {
   }
 }
 
-app.post('/api/admin/create-user', handleCreateAdminUser);
-app.post('/api/admin/create', handleCreateAdminUser);
+app.post('/api/admin/users', (req, res) => handleCreateAdminUser(req, res, 'new_auth'));
+app.post('/api/admin/create-user', (req, res) => handleCreateAdminUser(req, res, 'new_auth'));
+app.post('/api/admin/create', (req, res) => handleCreateAdminUser(req, res, 'new_auth'));
+app.post('/api/admin/assign-user', (req, res) => handleCreateAdminUser(req, res, 'existing_auth'));
 
 app.post('/api/admin/rollback-user', async (req, res) => {
   try {
@@ -1581,6 +1881,21 @@ app.post('/api/admin/update-user-status', async (req, res) => {
     }
     if (!decoded.email || !decoded.emailVerified) {
       sendError(res, 'UNVERIFIED_ADMIN', 'Verified administrator token required.', 403);
+      return;
+    }
+
+    const clientIp =
+      (typeof req.headers['x-forwarded-for'] === 'string'
+        ? req.headers['x-forwarded-for'].split(',')[0]?.trim()
+        : '') ||
+      req.ip ||
+      'express-ip';
+    const rateCheck = checkAdminRateLimit(`${clientIp}:${decoded.uid}`);
+    if (rateCheck.allowed === false) {
+      res.setHeader('Retry-After', String(rateCheck.retryAfterSec));
+      sendError(res, rateCheck.code, rateCheck.message, rateCheck.status, {
+        retryAfterSec: rateCheck.retryAfterSec,
+      });
       return;
     }
 
@@ -1696,6 +2011,21 @@ app.post('/api/admin/reset-password', async (req, res) => {
       return;
     }
 
+    const clientIp =
+      (typeof req.headers['x-forwarded-for'] === 'string'
+        ? req.headers['x-forwarded-for'].split(',')[0]?.trim()
+        : '') ||
+      req.ip ||
+      'express-ip';
+    const rateCheck = checkAdminRateLimit(`${clientIp}:${decoded.uid}`);
+    if (rateCheck.allowed === false) {
+      res.setHeader('Retry-After', String(rateCheck.retryAfterSec));
+      sendError(res, rateCheck.code, rateCheck.message, rateCheck.status, {
+        retryAfterSec: rateCheck.retryAfterSec,
+      });
+      return;
+    }
+
     const authority = await verifyCallerStaffAuthority(idToken, decoded.email, decoded.uid);
     if (!authority.isSuperAdmin) {
       sendError(
@@ -1764,6 +2094,21 @@ app.post('/api/admin/delete-user', async (req, res) => {
     }
     if (!decoded.email || !decoded.emailVerified) {
       sendError(res, 'UNVERIFIED_ADMIN', 'Verified administrator token required.', 403);
+      return;
+    }
+
+    const clientIp =
+      (typeof req.headers['x-forwarded-for'] === 'string'
+        ? req.headers['x-forwarded-for'].split(',')[0]?.trim()
+        : '') ||
+      req.ip ||
+      'express-ip';
+    const rateCheck = checkAdminRateLimit(`${clientIp}:${decoded.uid}`);
+    if (rateCheck.allowed === false) {
+      res.setHeader('Retry-After', String(rateCheck.retryAfterSec));
+      sendError(res, rateCheck.code, rateCheck.message, rateCheck.status, {
+        retryAfterSec: rateCheck.retryAfterSec,
+      });
       return;
     }
 

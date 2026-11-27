@@ -5415,8 +5415,8 @@ export function AdminShowroomsPanel() {
     logAdminActivity,
   } = useStore();
   const [editing, setEditing] = useState<Showroom | null>(null);
-  const [isNew, setIsNew] = useState(false);
-  const [isCreatingBrandNew, setIsCreatingBrandNew] = useState(false);
+  const [editingOriginal, setEditingOriginal] = useState<Showroom | null>(null);
+  const [formMode, setFormMode] = useState<'create' | 'edit'>('create');
   const [purgingDemoDocs, setPurgingDemoDocs] = useState(false);
   const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [search, setSearch] = useState('');
@@ -5598,24 +5598,195 @@ export function AdminShowroomsPanel() {
     return payload;
   };
 
-  const persistShowroomDoc = async (
+  const fetchShowroomServerSnap = async (
+    showroomRef: ReturnType<typeof doc>
+  ) => {
+    try {
+      return await getDocFromServer(showroomRef);
+    } catch (err) {
+      const code =
+        err && typeof err === 'object' && 'code' in err
+          ? String((err as { code?: unknown }).code || '').toLowerCase()
+          : '';
+      if (code === 'unavailable' || code.endsWith('/unavailable') || code.includes('failed-precondition')) {
+        return await getDoc(showroomRef);
+      }
+      throw err;
+    }
+  };
+
+  const buildPartialShowroomUpdatePayload = (
+    draft: Showroom,
+    original: Showroom | null,
+    existingData: Record<string, unknown>
+  ): Record<string, unknown> => {
+    const fullNormalized = buildShowroomFirestorePayload(draft, existingData);
+    const updatePayload: Record<string, unknown> = {
+      updatedAt: serverTimestamp(),
+    };
+
+    const trimStr = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+    const sameStringList = (a: unknown, b: unknown) => {
+      const cleanA = sanitizeStoredImageUrls(a);
+      const cleanB = sanitizeStoredImageUrls(b);
+      return cleanA.length === cleanB.length && cleanA.every((item, idx) => item === cleanB[idx]);
+    };
+
+    if (!original) {
+      Object.assign(updatePayload, fullNormalized);
+      delete updatePayload.id;
+    } else {
+      if (trimStr(draft.nameEn) !== trimStr(original.nameEn)) {
+        updatePayload.nameEn = fullNormalized.nameEn;
+        updatePayload.name_en = fullNormalized.name_en;
+      }
+      if (trimStr(draft.name) !== trimStr(original.name)) {
+        updatePayload.name = fullNormalized.name;
+        updatePayload.name_bn = fullNormalized.name_bn;
+      }
+      if (trimStr(draft.areaEn) !== trimStr(original.areaEn)) {
+        updatePayload.areaEn = fullNormalized.areaEn;
+        if (!trimStr(draft.area)) {
+          updatePayload.area = fullNormalized.area;
+        }
+      }
+      if (trimStr(draft.area) !== trimStr(original.area)) {
+        updatePayload.area = fullNormalized.area;
+      }
+      if (trimStr(draft.addressEn) !== trimStr(original.addressEn)) {
+        updatePayload.addressEn = fullNormalized.addressEn;
+        updatePayload.address_en = fullNormalized.address_en;
+        if (!trimStr(draft.address)) {
+          updatePayload.address = fullNormalized.address;
+          updatePayload.address_bn = fullNormalized.address_bn;
+        }
+      }
+      if (trimStr(draft.address) !== trimStr(original.address)) {
+        updatePayload.address = fullNormalized.address;
+        updatePayload.address_bn = fullNormalized.address_bn;
+      }
+      if (trimStr(draft.descriptionEn) !== trimStr(original.descriptionEn)) {
+        updatePayload.descriptionEn = fullNormalized.descriptionEn;
+        updatePayload.description_en = fullNormalized.description_en;
+        updatePayload.description = fullNormalized.description;
+        updatePayload.description_bn = fullNormalized.description_bn;
+      }
+      if (trimStr(draft.phone) !== trimStr(original.phone)) {
+        updatePayload.phone = fullNormalized.phone;
+      }
+      if (trimStr(draft.alternate_phone) !== trimStr(original.alternate_phone)) {
+        updatePayload.alternate_phone = fullNormalized.alternate_phone;
+      }
+      if (trimStr(draft.email) !== trimStr(original.email)) {
+        updatePayload.email = fullNormalized.email;
+      }
+      if (trimStr(draft.openingHoursEn) !== trimStr(original.openingHoursEn)) {
+        updatePayload.openingHoursEn = fullNormalized.openingHoursEn;
+        if (!trimStr(draft.openingHours)) {
+          updatePayload.openingHours = fullNormalized.openingHours;
+        }
+      }
+      if (trimStr(draft.openingHours) !== trimStr(original.openingHours)) {
+        updatePayload.openingHours = fullNormalized.openingHours;
+      }
+      if (trimStr(draft.orderLineEn) !== trimStr(original.orderLineEn)) {
+        updatePayload.orderLineEn = fullNormalized.orderLineEn;
+      }
+      if (trimStr(draft.orderLineBn) !== trimStr(original.orderLineBn)) {
+        updatePayload.orderLineBn = fullNormalized.orderLineBn;
+      }
+      if (trimStr(draft.region) !== trimStr(original.region)) {
+        updatePayload.region = fullNormalized.region;
+      }
+      if (trimStr(draft.weekly_holiday) !== trimStr(original.weekly_holiday)) {
+        updatePayload.weekly_holiday = fullNormalized.weekly_holiday;
+      }
+      if (trimStr(draft.mapUrl) !== trimStr(original.mapUrl)) {
+        updatePayload.mapUrl = fullNormalized.mapUrl;
+      }
+      const origLat = Number(original.lat);
+      const draftLat = Number(draft.lat);
+      if ((Number.isFinite(draftLat) ? draftLat : 0) !== (Number.isFinite(origLat) ? origLat : 0)) {
+        updatePayload.lat = fullNormalized.lat;
+      }
+      const origLng = Number(original.lng);
+      const draftLng = Number(draft.lng);
+      if ((Number.isFinite(draftLng) ? draftLng : 0) !== (Number.isFinite(origLng) ? origLng : 0)) {
+        updatePayload.lng = fullNormalized.lng;
+      }
+      if (!sameStringList(draft.images, original.images)) {
+        updatePayload.images = fullNormalized.images;
+      }
+      if (Boolean(draft.isMain) !== Boolean(original.isMain)) {
+        updatePayload.isMain = fullNormalized.isMain;
+      }
+      if ((draft.visible !== false) !== (original.visible !== false)) {
+        updatePayload.visible = fullNormalized.visible;
+      }
+      const origOrder = Math.min(1000, Math.max(0, Math.round(Number(original.display_order) || 1)));
+      const draftOrder = Math.min(1000, Math.max(0, Math.round(Number(draft.display_order) || 1)));
+      if (draftOrder !== origOrder) {
+        updatePayload.display_order = fullNormalized.display_order;
+      }
+    }
+
+    // Backfill only missing/invalid required or optional fields on legacy documents without overwriting valid fields
+    const existingIssues = inspectExistingShowroomIssues(existingData);
+    if (existingIssues.length > 0) {
+      for (const reqKey of REQUIRED_SHOWROOM_SCHEMA_KEYS) {
+        if (!(reqKey in existingData) || existingIssues.includes(`invalid_${reqKey}`)) {
+          if (reqKey in fullNormalized) {
+            updatePayload[reqKey] = fullNormalized[reqKey];
+          }
+        }
+      }
+      const optionalRepairKeys = [
+        ...SHOWROOM_OPTIONAL_STRING_BOUNDS.map(([k]) => k),
+        'images',
+        'available_categories',
+        'available_products',
+        'visible',
+        'deleted',
+        'display_order',
+        'archivedAt',
+      ];
+      for (const optKey of optionalRepairKeys) {
+        const hasIssue =
+          existingIssues.includes(`invalid_${optKey}`) ||
+          (optKey === 'images' && existingIssues.includes('forbidden_inline_images'));
+        if (hasIssue) {
+          updatePayload[optKey] =
+            optKey in fullNormalized ? fullNormalized[optKey] : deleteField();
+        }
+      }
+      for (const unknownKey of getUnknownKeys(existingData, ALLOWED_SHOWROOM_KEYS)) {
+        updatePayload[unknownKey] = deleteField();
+      }
+    }
+
+    if (!hasValidTimestamp(existingData.createdAt)) {
+      updatePayload.createdAt = serverTimestamp();
+    }
+
+    return updatePayload;
+  };
+
+  const createNewShowroomDoc = async (
     sr: Showroom,
-    actionLabel: 'create' | 'update',
     opts?: {
-      rejectIfAlreadyExists?: boolean;
       preflightIssuesOut?: string[];
-      existingIssuesOut?: string[];
+      onOperation?: (op: 'CREATE' | 'UPDATE') => void;
     }
   ) => {
     const firestore = requireDb();
     let targetId = sr.id;
     let showroomRef = doc(firestore, 'showrooms', targetId);
-    let existingSnap = await getDoc(showroomRef);
+    let existingSnap = await fetchShowroomServerSnap(showroomRef);
 
-    if (opts?.rejectIfAlreadyExists && existingSnap.exists()) {
+    if (existingSnap.exists()) {
       const altId = `${targetId.slice(0, 110)}-${Date.now().toString(36)}`;
       const altRef = doc(firestore, 'showrooms', altId);
-      const altSnap = await getDoc(altRef);
+      const altSnap = await fetchShowroomServerSnap(altRef);
       if (altSnap.exists()) {
         throw new CatalogAuthError(
           'validation/duplicate-showroom-id',
@@ -5627,70 +5798,48 @@ export function AdminShowroomsPanel() {
       existingSnap = altSnap;
     }
 
-    const existingData = existingSnap.exists()
-      ? (existingSnap.data() as Record<string, unknown>)
-      : undefined;
-    if (existingData && opts?.existingIssuesOut) {
-      const foundIssues = inspectExistingShowroomIssues(existingData);
-      opts.existingIssuesOut.splice(0, opts.existingIssuesOut.length, ...foundIssues);
-    }
-
-    const preservedValidId =
-      existingData &&
-      typeof existingData.id === 'string' &&
-      /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
-        ? existingData.id
-        : targetId;
-
-    const payload = buildShowroomFirestorePayload(
-      { ...sr, id: preservedValidId },
-      existingData
+    opts?.onOperation?.('CREATE');
+    const payload = buildShowroomFirestorePayload({ ...sr, id: targetId });
+    const createPayload: Record<string, unknown> = {
+      ...payload,
+      createdAt: serverTimestamp(),
+    };
+    assertValidShowroomWritePreflight(
+      {
+        docId: targetId,
+        payload: createPayload,
+        isCreate: true,
+      },
+      opts?.preflightIssuesOut
     );
-    const titleLabel = String(payload.nameEn || payload.name || targetId);
+    await setDoc(showroomRef, createPayload);
+    const titleLabel = String(createPayload.nameEn || createPayload.name || targetId);
+    await logAdminActivity('create', 'showrooms', targetId, titleLabel);
+    return targetId;
+  };
 
-    if (!existingSnap.exists()) {
-      const createPayload = {
-        ...payload,
-        createdAt: serverTimestamp(),
-      };
-      assertValidShowroomWritePreflight(
-        {
-          docId: targetId,
-          payload: createPayload,
-          isCreate: true,
-        },
-        opts?.preflightIssuesOut
-      );
-      await setDoc(showroomRef, createPayload);
-      await logAdminActivity(
-        actionLabel === 'create' ? 'create' : 'update',
-        'showrooms',
-        targetId,
-        titleLabel
-      );
-    } else if (getUnknownKeys(existingData!, ALLOWED_SHOWROOM_KEYS).length > 0) {
-      const replacePayload = {
-        ...payload,
-        createdAt: hasValidTimestamp(existingData?.createdAt)
-          ? existingData!.createdAt
-          : serverTimestamp(),
-      };
-      assertValidShowroomWritePreflight(
-        {
-          docId: targetId,
-          payload: replacePayload,
-          existingData,
-          isCreate: false,
-          isFullReplace: true,
-        },
-        opts?.preflightIssuesOut
-      );
-      await setDoc(showroomRef, replacePayload);
-      await logAdminActivity('update', 'showrooms', targetId, titleLabel);
-    } else {
-      const updatePayload = hasValidTimestamp(existingData?.createdAt)
-        ? payload
-        : { ...payload, createdAt: serverTimestamp() };
+  const updateExistingShowroomDoc = async (
+    sr: Showroom,
+    original: Showroom | null,
+    opts?: {
+      preflightIssuesOut?: string[];
+      existingIssuesOut?: string[];
+      onOperation?: (op: 'CREATE' | 'UPDATE') => void;
+    }
+  ) => {
+    const firestore = requireDb();
+    const targetId = sr.id;
+    const showroomRef = doc(firestore, 'showrooms', targetId);
+    const existingSnap = await fetchShowroomServerSnap(showroomRef);
+
+    if (existingSnap.exists()) {
+      opts?.onOperation?.('UPDATE');
+      const existingData = existingSnap.data() as Record<string, unknown>;
+      if (opts?.existingIssuesOut) {
+        const foundIssues = inspectExistingShowroomIssues(existingData);
+        opts.existingIssuesOut.splice(0, opts.existingIssuesOut.length, ...foundIssues);
+      }
+      const updatePayload = buildPartialShowroomUpdatePayload(sr, original, existingData);
       assertValidShowroomWritePreflight(
         {
           docId: targetId,
@@ -5701,9 +5850,32 @@ export function AdminShowroomsPanel() {
         opts?.preflightIssuesOut
       );
       await updateDoc(showroomRef, updatePayload);
+      const titleLabel = String(
+        updatePayload.nameEn || existingData.nameEn || sr.nameEn || sr.name || targetId
+      );
       await logAdminActivity('update', 'showrooms', targetId, titleLabel);
+      return { id: targetId, operation: 'UPDATE' as const };
     }
-    return targetId;
+
+    // Canonical baseline outlet has no Firestore document yet: create its initial record at its canonical ID
+    opts?.onOperation?.('CREATE');
+    const payload = buildShowroomFirestorePayload({ ...sr, id: targetId });
+    const createPayload: Record<string, unknown> = {
+      ...payload,
+      createdAt: serverTimestamp(),
+    };
+    assertValidShowroomWritePreflight(
+      {
+        docId: targetId,
+        payload: createPayload,
+        isCreate: true,
+      },
+      opts?.preflightIssuesOut
+    );
+    await setDoc(showroomRef, createPayload);
+    const titleLabel = String(createPayload.nameEn || createPayload.name || targetId);
+    await logAdminActivity('create', 'showrooms', targetId, titleLabel);
+    return { id: targetId, operation: 'CREATE' as const };
   };
 
   const purgeConfirmedDemoShowrooms = async () => {
@@ -5864,12 +6036,14 @@ export function AdminShowroomsPanel() {
       validatedImages = [imageCheck.normalizedUrl];
     }
 
-    const targetId = isCreatingBrandNew
+    const isCreateMode = formMode === 'create';
+    const targetId = isCreateMode
       ? generateUniqueShowroomSlugId(nameEn, editing.id || `showroom-${Date.now()}`)
       : editing.id;
     const preflightIssues: string[] = [];
     const existingIssues: string[] = [];
     let authSession: VerifiedWriteSession | null = null;
+    let executedOperation: 'CREATE' | 'UPDATE' = isCreateMode ? 'CREATE' : 'UPDATE';
 
     try {
       setBusyShowroomId(editing.id);
@@ -5878,18 +6052,33 @@ export function AdminShowroomsPanel() {
         hasPermission,
         requiredPermission: 'showrooms_manage',
       });
-      const savedId = await persistShowroomDoc(
-        { ...editing, id: targetId, images: validatedImages },
-        isNew ? 'create' : 'update',
-        {
-          rejectIfAlreadyExists: isCreatingBrandNew,
-          preflightIssuesOut: preflightIssues,
-          existingIssuesOut: existingIssues,
-        }
-      );
+      const draft: Showroom = { ...editing, id: targetId, images: validatedImages };
+      const savedId = isCreateMode
+        ? await createNewShowroomDoc(draft, {
+            preflightIssuesOut: preflightIssues,
+            onOperation: (op) => {
+              executedOperation = op;
+            },
+          })
+        : (
+            await updateExistingShowroomDoc(draft, editingOriginal, {
+              preflightIssuesOut: preflightIssues,
+              existingIssuesOut: existingIssues,
+              onOperation: (op) => {
+                executedOperation = op;
+              },
+            })
+          ).id;
+
       setEditing(null);
-      setIsCreatingBrandNew(false);
-      setMsg({ type: 'ok', text: `Saved outlet "${nameEn}" (${savedId}) to Firestore.` });
+      setEditingOriginal(null);
+      setFormMode('create');
+      setMsg({
+        type: 'ok',
+        text: isCreateMode
+          ? `Created new outlet "${nameEn}" (${savedId}) in Firestore.`
+          : `Updated outlet "${nameEn}" (${savedId}) in Firestore.`,
+      });
     } catch (err) {
       setMsg({
         type: 'err',
@@ -5897,7 +6086,7 @@ export function AdminShowroomsPanel() {
           collection: 'showrooms',
           documentId: targetId,
           path: `showrooms/${targetId}`,
-          operation: isNew ? 'CREATE' : 'UPDATE',
+          operation: executedOperation,
           staffRole,
           authSession,
           preflightIssues,
@@ -5915,6 +6104,7 @@ export function AdminShowroomsPanel() {
     let authSession: VerifiedWriteSession | null = null;
     const preflightIssues: string[] = [];
     const existingIssues: string[] = [];
+    let executedOperation: 'CREATE' | 'UPDATE' = 'UPDATE';
     try {
       authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
@@ -5922,19 +6112,19 @@ export function AdminShowroomsPanel() {
       });
       const firestore = requireDb();
       const showroomRef = doc(firestore, 'showrooms', sr.id);
-      const existingSnap = await getDoc(showroomRef);
-      const existingData = existingSnap.exists()
-        ? (existingSnap.data() as Record<string, unknown>)
-        : undefined;
-      if (existingData) {
-        existingIssues.push(...inspectExistingShowroomIssues(existingData));
-      }
+      const existingSnap = await fetchShowroomServerSnap(showroomRef);
       const nextVisible = sr.visible === false;
-      if (existingSnap.exists() && isExistingShowroomDocRuleReady(existingData)) {
-        const minimalUpdate = {
-          visible: nextVisible,
-          updatedAt: serverTimestamp(),
-        };
+
+      if (existingSnap.exists()) {
+        executedOperation = 'UPDATE';
+        const existingData = existingSnap.data() as Record<string, unknown>;
+        existingIssues.push(...inspectExistingShowroomIssues(existingData));
+        const minimalUpdate = buildPartialShowroomUpdatePayload(
+          { ...sr, visible: nextVisible },
+          sr,
+          existingData
+        );
+        minimalUpdate.visible = nextVisible;
         assertValidShowroomWritePreflight(
           {
             docId: sr.id,
@@ -5952,14 +6142,14 @@ export function AdminShowroomsPanel() {
           sr.nameEn || sr.name
         );
       } else {
-        await persistShowroomDoc(
-          { ...sr, visible: nextVisible },
-          existingSnap.exists() ? 'update' : 'create',
-          {
-            preflightIssuesOut: preflightIssues,
-            existingIssuesOut: existingIssues,
-          }
-        );
+        executedOperation = 'CREATE';
+        await updateExistingShowroomDoc({ ...sr, visible: nextVisible }, sr, {
+          preflightIssuesOut: preflightIssues,
+          existingIssuesOut: existingIssues,
+          onOperation: (op) => {
+            executedOperation = op;
+          },
+        });
       }
       setMsg({
         type: 'ok',
@@ -5972,7 +6162,7 @@ export function AdminShowroomsPanel() {
           collection: 'showrooms',
           documentId: sr.id,
           path: `showrooms/${sr.id}`,
-          operation: 'UPDATE',
+          operation: executedOperation,
           staffRole,
           authSession,
           preflightIssues,
@@ -5991,6 +6181,7 @@ export function AdminShowroomsPanel() {
     let authSession: VerifiedWriteSession | null = null;
     const preflightIssues: string[] = [];
     const existingIssues: string[] = [];
+    let executedOperation: 'CREATE' | 'UPDATE' = 'UPDATE';
     try {
       authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
@@ -5998,18 +6189,18 @@ export function AdminShowroomsPanel() {
       });
       const firestore = requireDb();
       const showroomRef = doc(firestore, 'showrooms', sr.id);
-      const existingSnap = await getDoc(showroomRef);
-      const existingData = existingSnap.exists()
-        ? (existingSnap.data() as Record<string, unknown>)
-        : undefined;
-      if (existingData) {
+      const existingSnap = await fetchShowroomServerSnap(showroomRef);
+
+      if (existingSnap.exists()) {
+        executedOperation = 'UPDATE';
+        const existingData = existingSnap.data() as Record<string, unknown>;
         existingIssues.push(...inspectExistingShowroomIssues(existingData));
-      }
-      if (existingSnap.exists() && isExistingShowroomDocRuleReady(existingData)) {
-        const orderUpdate = {
-          display_order: nextOrder,
-          updatedAt: serverTimestamp(),
-        };
+        const orderUpdate = buildPartialShowroomUpdatePayload(
+          { ...sr, display_order: nextOrder },
+          sr,
+          existingData
+        );
+        orderUpdate.display_order = nextOrder;
         assertValidShowroomWritePreflight(
           {
             docId: sr.id,
@@ -6022,14 +6213,14 @@ export function AdminShowroomsPanel() {
         await updateDoc(showroomRef, orderUpdate);
         await logAdminActivity('update', 'showrooms', sr.id, sr.nameEn || sr.name);
       } else {
-        await persistShowroomDoc(
-          { ...sr, display_order: nextOrder },
-          existingSnap.exists() ? 'update' : 'create',
-          {
-            preflightIssuesOut: preflightIssues,
-            existingIssuesOut: existingIssues,
-          }
-        );
+        executedOperation = 'CREATE';
+        await updateExistingShowroomDoc({ ...sr, display_order: nextOrder }, sr, {
+          preflightIssuesOut: preflightIssues,
+          existingIssuesOut: existingIssues,
+          onOperation: (op) => {
+            executedOperation = op;
+          },
+        });
       }
       setMsg({
         type: 'ok',
@@ -6042,7 +6233,7 @@ export function AdminShowroomsPanel() {
           collection: 'showrooms',
           documentId: sr.id,
           path: `showrooms/${sr.id}`,
-          operation: 'UPDATE',
+          operation: executedOperation,
           staffRole,
           authSession,
           preflightIssues,
@@ -6112,8 +6303,8 @@ export function AdminShowroomsPanel() {
         <button
           type="button"
           onClick={() => {
-            setIsNew(true);
-            setIsCreatingBrandNew(true);
+            setFormMode('create');
+            setEditingOriginal(null);
             setMsg(null);
             setEditing({
               id: `showroom-${Date.now()}`,
@@ -6219,13 +6410,13 @@ export function AdminShowroomsPanel() {
           <div className="flex items-center justify-between border-b border-[#F5F4F0] pb-3 sm:col-span-2">
             <div>
               <h3 className="font-display text-lg font-bold text-[#1C1917]">
-                {isCreatingBrandNew
+                {formMode === 'create'
                   ? 'Add New Outlet'
                   : `Edit Outlet · ${editing.nameEn || editing.name}`}
               </h3>
               <p className="font-mono text-[11px] text-[#78716C]">
                 ID:{' '}
-                {isCreatingBrandNew
+                {formMode === 'create'
                   ? generateUniqueShowroomSlugId(editing.nameEn || '', editing.id)
                   : editing.id}
               </p>
@@ -6234,7 +6425,8 @@ export function AdminShowroomsPanel() {
               type="button"
               onClick={() => {
                 setEditing(null);
-                setIsCreatingBrandNew(false);
+                setEditingOriginal(null);
+                setFormMode('create');
               }}
               className="cursor-pointer rounded-lg p-1.5 text-[#78716C] hover:bg-[#F5F4F0]"
             >
@@ -6574,7 +6766,8 @@ export function AdminShowroomsPanel() {
               type="button"
               onClick={() => {
                 setEditing(null);
-                setIsCreatingBrandNew(false);
+                setEditingOriginal(null);
+                setFormMode('create');
               }}
               className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold"
             >
@@ -6730,10 +6923,7 @@ export function AdminShowroomsPanel() {
                     type="button"
                     disabled={isBusy}
                     onClick={() => {
-                      setIsNew(!hasOverride);
-                      setIsCreatingBrandNew(false);
-                      setMsg(null);
-                      setEditing({
+                      const initialDraft: Showroom = {
                         ...sr,
                         name: st.nameBn || st.nameEn,
                         nameEn: st.nameEn,
@@ -6751,7 +6941,11 @@ export function AdminShowroomsPanel() {
                         description_en: st.descriptionEn,
                         openingHours: st.openingHoursBn || st.openingHoursEn,
                         openingHoursEn: st.openingHoursEn,
-                      });
+                      };
+                      setFormMode('edit');
+                      setMsg(null);
+                      setEditingOriginal(initialDraft);
+                      setEditing(initialDraft);
                     }}
                     className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-[#E7E5E4] px-2.5 py-1 text-[11px] font-semibold text-[#1C1917] hover:border-[#1C1917]"
                   >

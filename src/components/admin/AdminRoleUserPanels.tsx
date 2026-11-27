@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   BadgeCheck,
@@ -23,6 +23,7 @@ import {
 import {
   collection,
   doc,
+  getDoc,
   onSnapshot,
   orderBy,
   query,
@@ -198,6 +199,7 @@ export function AdminRoleManagementPanel() {
   const [hasAdminCredentials, setHasAdminCredentials] = useState<boolean | null>(null);
   const [serviceAccountStatus, setServiceAccountStatus] = useState<string | null>(null);
   const [serviceAccountMessage, setServiceAccountMessage] = useState<string | null>(null);
+  const [checkingSdkStatus, setCheckingSdkStatus] = useState(false);
 
   // Add New User Form State
   const [creationMode, setCreationMode] = useState<'new_auth' | 'existing_auth'>('new_auth');
@@ -264,42 +266,57 @@ export function AdminRoleManagementPanel() {
     return () => unsub();
   }, [canManageManagers]);
 
-  useEffect(() => {
-    let active = true;
-    const checkCapabilities = async () => {
-      if (!user) return;
-      try {
-        const idToken = await user.getIdToken();
-        const resp = await fetch('/api/auth/session-init', {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${idToken}` },
-        });
-        if (!resp.ok) return;
-        const data = (await resp.json()) as {
-          hasAdminCredentials?: boolean;
-          serviceAccountStatus?: string;
-          serviceAccountMessage?: string;
-        };
-        if (active) {
-          if (typeof data.hasAdminCredentials === 'boolean') {
-            setHasAdminCredentials(data.hasAdminCredentials);
-          }
-          if (typeof data.serviceAccountStatus === 'string') {
-            setServiceAccountStatus(data.serviceAccountStatus);
-          }
-          if (typeof data.serviceAccountMessage === 'string') {
-            setServiceAccountMessage(data.serviceAccountMessage);
-          }
-        }
-      } catch {
-        // Ignore non-fatal capability probe
+  const refreshAdminSdkStatus = useCallback(async () => {
+    if (!user) return;
+    setCheckingSdkStatus(true);
+    try {
+      const idToken = await user.getIdToken();
+      const resp = await fetch('/api/auth/session-init', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      if (!resp.ok) {
+        setHasAdminCredentials(false);
+        setServiceAccountStatus('probe_error');
+        setServiceAccountMessage(
+          `Admin SDK capability probe returned HTTP ${resp.status}. Verify Worker deployment and FIREBASE_SERVICE_ACCOUNT_JSON secret.`
+        );
+        return;
       }
-    };
-    void checkCapabilities();
-    return () => {
-      active = false;
-    };
+      const data = (await resp.json()) as {
+        hasAdminCredentials?: boolean;
+        serviceAccountStatus?: string;
+        serviceAccountMessage?: string;
+      };
+      if (typeof data.hasAdminCredentials === 'boolean') {
+        setHasAdminCredentials(data.hasAdminCredentials);
+      } else {
+        setHasAdminCredentials(false);
+      }
+      setServiceAccountStatus(
+        typeof data.serviceAccountStatus === 'string'
+          ? data.serviceAccountStatus
+          : data.hasAdminCredentials
+          ? 'ready'
+          : 'missing_secret'
+      );
+      setServiceAccountMessage(
+        typeof data.serviceAccountMessage === 'string' ? data.serviceAccountMessage : null
+      );
+    } catch {
+      setHasAdminCredentials(false);
+      setServiceAccountStatus('probe_error');
+      setServiceAccountMessage(
+        'Could not reach /api/auth/session-init to verify Firebase Admin SDK status.'
+      );
+    } finally {
+      setCheckingSdkStatus(false);
+    }
   }, [user]);
+
+  useEffect(() => {
+    void refreshAdminSdkStatus();
+  }, [refreshAdminSdkStatus]);
 
   useEffect(() => {
     if (!isSuperAdmin && roleInput !== 'manager') {
@@ -494,22 +511,27 @@ export function AdminRoleManagementPanel() {
     let successHeadline = '';
 
     try {
-      if (creationMode === 'new_auth') {
+      const useServerAdminEndpoint =
+        creationMode === 'new_auth' ||
+        (creationMode === 'existing_auth' && hasAdminCredentials === true);
+
+      if (useServerAdminEndpoint) {
         if (!user) {
           throw new Error('Active Super Admin session not found.');
         }
         const idToken = await user.getIdToken();
-        const apiResp = await fetch('/api/admin/create-user', {
+        const apiResp = await fetch('/api/admin/users', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${idToken}`,
           },
           body: JSON.stringify({
+            mode: creationMode,
             name: cleanName,
             displayName: cleanName,
             email: cleanEmail,
-            password: passwordInput,
+            ...(creationMode === 'new_auth' ? { password: passwordInput } : {}),
             phone: cleanPhone,
             username: cleanUsername,
             role: effectiveRole,
@@ -542,11 +564,18 @@ export function AdminRoleManagementPanel() {
           apiJson = JSON.parse(rawText) as typeof apiJson;
         } catch {
           throw new Error(
-            `Unexpected server response (HTTP ${apiResp.status}). Verify Worker /api/admin/create-user route is deployed.`
+            `Unexpected server response (HTTP ${apiResp.status}). Verify Worker /api/admin/users route is deployed.`
           );
         }
 
         if (!apiResp.ok || !apiJson.uid || (!apiJson.success && !apiJson.ok)) {
+          if (
+            apiJson.code === 'FIREBASE_CONFIG_MISSING' ||
+            apiJson.code === 'INVALID_JSON' ||
+            apiJson.code === 'FIREBASE_ADMIN_INIT_FAILED'
+          ) {
+            void refreshAdminSdkStatus();
+          }
           const detail = apiJson.message || apiJson.error || 'Failed to create Admin user.';
           throw new Error(
             apiJson.code && !detail.includes(apiJson.code)
@@ -558,11 +587,13 @@ export function AdminRoleManagementPanel() {
         createdUid = apiJson.uid;
         successHeadline =
           apiJson.message ||
-          (effectiveRole === 'admin'
+          (creationMode === 'existing_auth'
+            ? `Assigned ${ROLE_LABEL[effectiveRole]} permissions to existing Auth user ${cleanEmail}.`
+            : effectiveRole === 'admin'
             ? 'Admin successfully created'
             : effectiveRole === 'manager'
             ? 'Manager successfully created'
-            : 'Staff user successfully created');
+            : `${ROLE_LABEL[effectiveRole]} successfully created`);
       } else {
         const firestore = requireDb();
         const now = serverTimestamp();
@@ -601,7 +632,7 @@ export function AdminRoleManagementPanel() {
         }
 
         await batch.commit();
-        successHeadline = `Assigned ${ROLE_LABEL[effectiveRole]} permissions to existing Auth user ${cleanEmail}.`;
+        successHeadline = `Assigned ${ROLE_LABEL[effectiveRole]} permissions to existing Auth user ${cleanEmail} (admins/{uid} will sync automatically on first login).`;
       }
 
       try {
@@ -632,10 +663,9 @@ export function AdminRoleManagementPanel() {
 
       setFeedback({
         type: 'ok',
-        text:
-          creationMode === 'new_auth'
-            ? `${successHeadline} · "${cleanName}" (${cleanEmail}) · UID: ${createdUid}. Your Super Admin session remains active.`
-            : successHeadline,
+        text: createdUid
+          ? `${successHeadline} · "${cleanName}" (${cleanEmail}) · UID: ${createdUid}. Your Super Admin session remains active.`
+          : successHeadline,
       });
     } catch (err) {
       setFeedback({
@@ -757,6 +787,8 @@ export function AdminRoleManagementPanel() {
       batch.update(doc(firestore, 'rbac_roles', editingEntry.email), rbacUpdate);
 
       if (editingEntry.uid) {
+        const adminRef = doc(firestore, 'admins', editingEntry.uid);
+        const adminSnap = await getDoc(adminRef);
         const adminUpdate: Record<string, unknown> = {
           display_name: cleanName,
           phone: cleanPhone,
@@ -764,6 +796,7 @@ export function AdminRoleManagementPanel() {
           permissions: sanitizedPerms,
           role: targetRole,
           active: isActive,
+          isActive,
           status: editStatus,
           updated_at: now,
         };
@@ -771,18 +804,37 @@ export function AdminRoleManagementPanel() {
           adminUpdate.manager_id = cleanManagerId;
           adminUpdate.manager_title = cleanManagerTitle || 'Store Manager';
         }
-        batch.update(doc(firestore, 'admins', editingEntry.uid), adminUpdate);
+        if (adminSnap.exists()) {
+          batch.update(adminRef, adminUpdate);
+        } else {
+          batch.set(adminRef, {
+            ...adminUpdate,
+            uid: editingEntry.uid,
+            email: editingEntry.email.toLowerCase(),
+            name: cleanName,
+            created_by:
+              editingEntry.createdBy ||
+              editingEntry.addedByEmail ||
+              user?.email?.toLowerCase() ||
+              PRIMARY_SUPER_ADMIN_EMAIL,
+            created_at: now,
+          });
+        }
 
         if (isSuperAdmin) {
-          batch.update(doc(firestore, 'users', editingEntry.uid), {
-            displayName: cleanName,
-            phone: cleanPhone,
-            ...(targetRole === 'manager' ? { managerId: cleanManagerId } : {}),
-            permissions: sanitizedPerms,
-            role: targetRole,
-            status: editStatus,
-            updatedAt: now,
-          });
+          const userRef = doc(firestore, 'users', editingEntry.uid);
+          const userSnap = await getDoc(userRef);
+          if (userSnap.exists()) {
+            batch.update(userRef, {
+              displayName: cleanName,
+              phone: cleanPhone,
+              ...(targetRole === 'manager' ? { managerId: cleanManagerId } : {}),
+              permissions: sanitizedPerms,
+              role: targetRole,
+              status: editStatus,
+              updatedAt: now,
+            });
+          }
         }
       }
 
@@ -805,7 +857,11 @@ export function AdminRoleManagementPanel() {
 
       await batch.commit();
 
-      if (editingEntry.uid && user && editStatus !== editingEntry.status) {
+      if (
+        editingEntry.uid &&
+        user &&
+        (editStatus !== editingEntry.status || targetRole !== editingEntry.role)
+      ) {
         try {
           const idToken = await user.getIdToken();
           await fetch('/api/admin/update-user-status', {
@@ -869,16 +925,25 @@ export function AdminRoleManagementPanel() {
         );
       }
       if (entry.uid) {
-        batch.update(doc(firestore, 'admins', entry.uid), {
-          active: isActive,
-          status: nextStatus,
-          updated_at: serverTimestamp(),
-        });
-        if (isSuperAdmin) {
-          batch.update(doc(firestore, 'users', entry.uid), {
+        const adminRef = doc(firestore, 'admins', entry.uid);
+        const adminSnap = await getDoc(adminRef);
+        if (adminSnap.exists()) {
+          batch.update(adminRef, {
+            active: isActive,
+            isActive,
             status: nextStatus,
-            updatedAt: serverTimestamp(),
+            updated_at: serverTimestamp(),
           });
+        }
+        if (isSuperAdmin) {
+          const userRef = doc(firestore, 'users', entry.uid);
+          const userSnap = await getDoc(userRef);
+          if (userSnap.exists()) {
+            batch.update(userRef, {
+              status: nextStatus,
+              updatedAt: serverTimestamp(),
+            });
+          }
         }
       }
       await batch.commit();
@@ -1071,20 +1136,42 @@ export function AdminRoleManagementPanel() {
                 . Server-side creation uses Firebase Admin SDK and keeps your current Super Admin
                 session signed in. Passwords are never stored in Firestore or client storage.
               </p>
-              {hasAdminCredentials !== null && (
-                <div className="mt-1.5 text-[11px] font-medium text-[#44403C]">
+              <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] font-medium text-[#44403C]">
+                <span>
                   Admin SDK Status:{' '}
-                  {hasAdminCredentials ? (
-                    <span className="font-semibold text-emerald-700">
-                      Ready
-                    </span>
+                  {checkingSdkStatus && hasAdminCredentials === null ? (
+                    <span className="font-semibold text-[#57534E]">Checking...</span>
+                  ) : hasAdminCredentials ? (
+                    <span className="font-semibold text-emerald-700">Ready</span>
                   ) : (
                     <span className="font-semibold text-[#B91C1C]">
                       Not Ready ({serviceAccountStatus || 'missing_secret'})
                       {serviceAccountMessage ? ` — ${serviceAccountMessage}` : ''}
                     </span>
                   )}
-                </div>
+                </span>
+                <button
+                  type="button"
+                  disabled={checkingSdkStatus}
+                  onClick={() => void refreshAdminSdkStatus()}
+                  className="inline-flex cursor-pointer items-center gap-1 rounded border border-[#D6D3D1] bg-white px-2 py-0.5 text-[10px] font-semibold text-[#1C1917] hover:border-[#1C1917] disabled:opacity-50"
+                >
+                  <RefreshCw className={`h-2.5 w-2.5 ${checkingSdkStatus ? 'animate-spin' : ''}`} />
+                  <span>Refresh Status</span>
+                </button>
+              </div>
+              {hasAdminCredentials === false && (
+                <p className="mt-1 text-[11px] text-[#78716C]">
+                  To enable server-side account creation, configure{' '}
+                  <span className="font-mono font-semibold text-[#1C1917]">
+                    FIREBASE_SERVICE_ACCOUNT_JSON
+                  </span>{' '}
+                  via Cloudflare Worker secret (
+                  <span className="font-mono text-[#1C1917]">
+                    npx wrangler secret put FIREBASE_SERVICE_ACCOUNT_JSON
+                  </span>
+                  ), then click Refresh Status.
+                </p>
               )}
             </div>
           </div>
@@ -1454,6 +1541,24 @@ export function AdminRoleManagementPanel() {
             })}
           </div>
         </div>
+
+        {creationMode === 'new_auth' && hasAdminCredentials === false && (
+          <div className="mt-4 flex items-start gap-2.5 rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs text-[#78350F]">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+            <div>
+              <p className="font-bold">
+                Server-side Firebase Admin SDK secret is not configured yet.
+              </p>
+              <p className="mt-0.5 text-[11px]">
+                Creating a new Firebase Auth user requires{' '}
+                <span className="font-mono font-semibold">FIREBASE_SERVICE_ACCOUNT_JSON</span> on the
+                Cloudflare Worker so your Super Admin session stays signed in. You can configure the
+                secret and click Refresh Status, or switch to Existing Auth User for pre-registered
+                accounts.
+              </p>
+            </div>
+          </div>
+        )}
 
         <div className="mt-4 flex justify-end">
           <button
@@ -2152,38 +2257,95 @@ export function AdminUserManagementPanel() {
     setFeedback(null);
     try {
       const firestore = requireDb();
+      const now = serverTimestamp();
       const batch = writeBatch(firestore);
       const nextPermissions =
         nextRole === 'customer' ? [] : DEFAULT_ROLE_PERMISSIONS[nextRole as StaffRole];
+      const isActive = target.status === 'active';
+      const cleanEmail = target.email.toLowerCase();
 
       batch.update(doc(firestore, 'users', target.uid), {
         role: nextRole,
         permissions: nextPermissions,
-        updatedAt: serverTimestamp(),
+        updatedAt: now,
       });
       if (nextRole === 'customer') {
-        batch.delete(doc(firestore, 'rbac_roles', target.email));
+        batch.delete(doc(firestore, 'rbac_roles', cleanEmail));
         batch.delete(doc(firestore, 'admins', target.uid));
       } else {
+        const cleanDisplayName = (target.displayName || cleanEmail.split('@')[0] || 'Staff').slice(0, 120);
+        const creatorEmail = user?.email?.toLowerCase() || PRIMARY_SUPER_ADMIN_EMAIL;
         batch.set(
-          doc(firestore, 'rbac_roles', target.email),
+          doc(firestore, 'rbac_roles', cleanEmail),
           {
-            email: target.email,
+            email: cleanEmail,
             uid: target.uid,
-            displayName: target.displayName,
+            displayName: cleanDisplayName,
             ...(target.phone ? { phone: target.phone } : {}),
             permissions: nextPermissions,
             role: nextRole as StaffRole,
             status: target.status,
-            addedByEmail: user?.email?.toLowerCase() || PRIMARY_SUPER_ADMIN_EMAIL,
-            createdBy: user?.email?.toLowerCase() || PRIMARY_SUPER_ADMIN_EMAIL,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
+            addedByEmail: creatorEmail,
+            createdBy: creatorEmail,
+            createdAt: now,
+            updatedAt: now,
           },
           { merge: true }
         );
+
+        const adminRef = doc(firestore, 'admins', target.uid);
+        const adminSnap = await getDoc(adminRef);
+        if (adminSnap.exists()) {
+          batch.update(adminRef, {
+            role: nextRole as StaffRole,
+            permissions: nextPermissions,
+            active: isActive,
+            isActive,
+            status: target.status,
+            updated_at: now,
+          });
+        } else {
+          batch.set(adminRef, {
+            uid: target.uid,
+            email: cleanEmail,
+            username: '',
+            name: cleanDisplayName,
+            display_name: cleanDisplayName,
+            ...(target.phone ? { phone: target.phone } : {}),
+            permissions: nextPermissions,
+            role: nextRole as StaffRole,
+            active: isActive,
+            isActive,
+            status: target.status,
+            created_by: creatorEmail,
+            created_at: now,
+            updated_at: now,
+          });
+        }
       }
       await batch.commit();
+
+      if (user) {
+        try {
+          const idToken = await user.getIdToken();
+          await fetch('/api/admin/update-user-status', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${idToken}`,
+            },
+            body: JSON.stringify({
+              uid: target.uid,
+              email: cleanEmail,
+              role: nextRole,
+              disabled: !isActive,
+            }),
+          });
+        } catch {
+          // Non-fatal Auth claims sync
+        }
+      }
+
       await logAdminActivity(
         'change_user_role',
         'users',
@@ -2209,25 +2371,35 @@ export function AdminUserManagementPanel() {
     setFeedback(null);
     try {
       const firestore = requireDb();
+      const now = serverTimestamp();
       const batch = writeBatch(firestore);
       const isActive = nextStatus === 'active';
+      const cleanEmail = target.email.toLowerCase();
       batch.update(doc(firestore, 'users', target.uid), {
         status: nextStatus,
-        updatedAt: serverTimestamp(),
+        updatedAt: now,
       });
-      if (
-        isSuperAdminRole(target.role) ||
-        target.role === 'admin' ||
-        target.role === 'manager' ||
-        target.role === 'editor' ||
-        target.role === 'moderator' ||
-        target.role === 'support_agent'
-      ) {
-        batch.update(doc(firestore, 'rbac_roles', target.email), {
+
+      const rbacRef = doc(firestore, 'rbac_roles', cleanEmail);
+      const rbacSnap = await getDoc(rbacRef);
+      if (rbacSnap.exists()) {
+        batch.update(rbacRef, {
           status: nextStatus,
-          updatedAt: serverTimestamp(),
+          updatedAt: now,
         });
       }
+
+      const adminRef = doc(firestore, 'admins', target.uid);
+      const adminSnap = await getDoc(adminRef);
+      if (adminSnap.exists()) {
+        batch.update(adminRef, {
+          active: isActive,
+          isActive,
+          status: nextStatus,
+          updated_at: now,
+        });
+      }
+
       await batch.commit();
 
       if (user) {
@@ -2241,7 +2413,7 @@ export function AdminUserManagementPanel() {
             },
             body: JSON.stringify({
               uid: target.uid,
-              email: target.email,
+              email: cleanEmail,
               role: target.role,
               disabled: !isActive,
             }),
@@ -2270,15 +2442,32 @@ export function AdminUserManagementPanel() {
     setFeedback(null);
     try {
       const firestore = requireDb();
+      const now = serverTimestamp();
       const batch = writeBatch(firestore);
+      const cleanEmail = editingPermsUser.email.toLowerCase();
       batch.update(doc(firestore, 'users', editingPermsUser.uid), {
         permissions: editPerms,
-        updatedAt: serverTimestamp(),
+        updatedAt: now,
       });
-      batch.update(doc(firestore, 'rbac_roles', editingPermsUser.email), {
-        permissions: editPerms,
-        updatedAt: serverTimestamp(),
-      });
+
+      const rbacRef = doc(firestore, 'rbac_roles', cleanEmail);
+      const rbacSnap = await getDoc(rbacRef);
+      if (rbacSnap.exists()) {
+        batch.update(rbacRef, {
+          permissions: editPerms,
+          updatedAt: now,
+        });
+      }
+
+      const adminRef = doc(firestore, 'admins', editingPermsUser.uid);
+      const adminSnap = await getDoc(adminRef);
+      if (adminSnap.exists()) {
+        batch.update(adminRef, {
+          permissions: editPerms,
+          updated_at: now,
+        });
+      }
+
       await batch.commit();
       setFeedback({
         type: 'ok',
