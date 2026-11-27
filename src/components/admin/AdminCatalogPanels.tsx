@@ -361,6 +361,24 @@ async function ensureVerifiedAdminWriteSession(params: {
     rbacRole = adminData.role || null;
 
     if (
+      typeof adminData.uid === 'string' &&
+      adminData.uid.trim() &&
+      adminData.uid.trim() !== refreshedUser.uid
+    ) {
+      throw new CatalogAuthError(
+        'rbac/account-mismatch',
+        'অ্যাডমিন ডকুমেন্টের UID বর্তমান লগইন UID-এর সাথে মিলছে না।'
+      );
+    }
+
+    if (adminData.email !== undefined && adminData.email !== null && typeof adminData.email !== 'string') {
+      throw new CatalogAuthError(
+        'rbac/account-mismatch',
+        'অ্যাডমিন ডকুমেন্টের ইমেইল ফিল্ডের ধরন সঠিক নয়।'
+      );
+    }
+
+    if (
       typeof adminData.email === 'string' &&
       adminData.email.trim() &&
       adminData.email.trim().toLowerCase() !== emailLower
@@ -371,15 +389,19 @@ async function ensureVerifiedAdminWriteSession(params: {
       );
     }
 
+    const rawStatus =
+      typeof adminData.status === 'string' ? adminData.status.trim().toLowerCase() : '';
     const hasActiveTrue =
       adminData.active === true ||
       adminData.isActive === true ||
-      adminData.status === 'active';
+      rawStatus === 'active';
     const hasExplicitInactive =
       adminData.active === false ||
       adminData.isActive === false ||
-      adminData.status === 'disabled' ||
-      adminData.status === 'suspended';
+      rawStatus === 'disabled' ||
+      rawStatus === 'suspended' ||
+      rawStatus === 'inactive' ||
+      rawStatus === 'revoked';
     const isAdminRecordActive = hasActiveTrue && !hasExplicitInactive;
     rbacStatus = isAdminRecordActive
       ? adminData.status || 'active'
@@ -1181,14 +1203,19 @@ export function AdminProductsPanel() {
   const canEdit = hasPermission('products_edit');
   const canDelete = hasPermission('products_delete');
   const [editing, setEditing] = useState<Product | null>(null);
+  const [editingOriginal, setEditingOriginal] = useState<{
+    product: Product;
+    ingredientsText: string;
+    sizesText: string;
+  } | null>(null);
+  const [formMode, setFormMode] = useState<'create' | 'edit'>('create');
   const [editorImageSlots, setEditorImageSlots] = useState<EditorImageSlot[]>([]);
   const [primaryImageUrlInput, setPrimaryImageUrlInput] = useState('');
   const [imageUrlCopied, setImageUrlCopied] = useState(false);
   const [imagePreviewFailed, setImagePreviewFailed] = useState(false);
   const sessionUploadedR2KeysRef = useRef<Set<string>>(new Set());
   const copyTimerRef = useRef<number | null>(null);
-  const [originalSnapshot, setOriginalSnapshot] = useState<string>('');
-  const [isNew, setIsNew] = useState(false);
+  const isNew = formMode === 'create';
   const [search, setSearch] = useState('');
   const [filterMode, setFilterMode] = useState<'active' | 'hidden' | 'archived' | 'all'>('active');
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string>('all');
@@ -1225,45 +1252,6 @@ export function AdminProductsPanel() {
       void cleanupUncommittedSessionUploads();
     };
   }, []);
-
-  const serializeNonImageState = (
-    p: Product,
-    ingText: string,
-    szText: string
-  ): string =>
-    JSON.stringify({
-      name: p.name.trim(),
-      nameBn: (p.nameBn ?? p.name).trim(),
-      nameEn: p.nameEn.trim(),
-      slug: p.slug.trim(),
-      category: p.category,
-      categoryName: p.categoryName,
-      productType: p.productType.trim(),
-      price: Number(p.price) || 0,
-      old_price: p.old_price ?? null,
-      discount: (p.discount ?? '').trim(),
-      price_label: (p.price_label ?? '').trim(),
-      priceUnit: p.priceUnit.trim(),
-      unit: (p.unit ?? p.priceUnit).trim(),
-      shortDescription: p.shortDescription.trim(),
-      shortDescriptionEn: (p.shortDescriptionEn ?? '').trim(),
-      description: p.description.trim(),
-      descriptionEn: (p.descriptionEn ?? '').trim(),
-      ingredients: ingText.trim(),
-      sizes: szText.trim(),
-      weight: p.weight.trim(),
-      occasions: p.occasions,
-      showrooms: p.showrooms,
-      availability: p.availability,
-      sku: (p.sku ?? '').trim(),
-      stock: p.stock ?? null,
-      importantNotes: p.importantNotes.trim(),
-      featured: Boolean(p.featured),
-      popular: Boolean(p.popular),
-      visible: p.visible !== false,
-      deleted: Boolean(p.deleted),
-      display_order: Number(p.display_order) || 1,
-    });
 
   const emptyProduct = (): Product => ({
     id: `prod-${Date.now()}`,
@@ -1325,6 +1313,8 @@ export function AdminProductsPanel() {
     setImageUrlCopied(false);
     setImagePreviewFailed(false);
     setEditing(null);
+    setEditingOriginal(null);
+    setFormMode('create');
     setEditorUploadProgress(null);
     setEditorUploadLabel('');
     setEditorUploadPreviewUrl(null);
@@ -1373,7 +1363,12 @@ export function AdminProductsPanel() {
         categoryName: prod.categoryName || t.categoryNameBn,
         categoryNameEn: prod.categoryNameEn || t.categoryNameEn,
       };
-      setIsNew(false);
+      setFormMode('edit');
+      setEditingOriginal({
+        product: prepared,
+        ingredientsText: ing,
+        sizesText: sz,
+      });
       setEditing(prepared);
       setEditorImageSlots(
         normalizedImages.slice(0, 6).map((url, idx) => ({
@@ -1387,16 +1382,15 @@ export function AdminProductsPanel() {
       setPrimaryImageUrlInput(primaryImg);
       setIngredientsText(ing);
       setSizesText(sz);
-      setOriginalSnapshot(serializeNonImageState(prepared, ing, sz));
     } else {
       const fresh = emptyProduct();
-      setIsNew(true);
+      setFormMode('create');
+      setEditingOriginal(null);
       setEditing(fresh);
       setEditorImageSlots([]);
       setPrimaryImageUrlInput('');
       setIngredientsText('');
       setSizesText('Regular');
-      setOriginalSnapshot('');
     }
     setImageUrlCopied(false);
     setImagePreviewFailed(false);
@@ -1460,7 +1454,8 @@ export function AdminProductsPanel() {
       display_order: allProducts.length + 1,
     };
 
-    setIsNew(true);
+    setFormMode('create');
+    setEditingOriginal(null);
     setEditing(cloned);
     setEditorImageSlots(
       normalizedImages.map((url, idx) => ({
@@ -1472,7 +1467,6 @@ export function AdminProductsPanel() {
     setPrimaryImageUrlInput(primaryImg);
     setIngredientsText(ing);
     setSizesText(sz);
-    setOriginalSnapshot('');
     setImageUrlCopied(false);
     setImagePreviewFailed(false);
     setEditorUploadProgress(null);
@@ -1799,14 +1793,15 @@ export function AdminProductsPanel() {
       payload.masterKey = String(source.masterKey).slice(0, 240);
     }
 
-    const preserveCategorySlug =
+    const categorySlugValue = resolvedCategorySlug || (
       typeof source.categorySlug === 'string' && source.categorySlug.trim()
         ? source.categorySlug.trim().slice(0, 160)
         : typeof existingData?.categorySlug === 'string' && existingData.categorySlug.trim()
         ? existingData.categorySlug.trim().slice(0, 160)
-        : '';
-    if (preserveCategorySlug) {
-      payload.categorySlug = preserveCategorySlug;
+        : ''
+    );
+    if (categorySlugValue) {
+      payload.categorySlug = categorySlugValue;
     }
 
     const preserveIngredientsBn =
@@ -1952,59 +1947,67 @@ export function AdminProductsPanel() {
     return payload;
   };
 
-  const writeExistingProductWithCleanup = async (params: {
-    productRef: ReturnType<typeof doc>;
-    existingData: Record<string, unknown> | undefined;
-    source: Product;
+  const fetchProductServerSnap = async (productRef: ReturnType<typeof doc>) => {
+    try {
+      return await getDocFromServer(productRef);
+    } catch (err) {
+      const code =
+        err && typeof err === 'object' && 'code' in err
+          ? String((err as { code?: unknown }).code || '').toLowerCase()
+          : '';
+      if (code === 'unavailable' || code.endsWith('/unavailable') || code.includes('failed-precondition')) {
+        return await getDoc(productRef);
+      }
+      throw err;
+    }
+  };
+
+  const logProductSaveDebug = (params: {
+    mode: 'CREATE' | 'UPDATE';
+    documentId: string;
+    method: 'setDoc' | 'updateDoc';
+    authSession?: VerifiedWriteSession | null;
+    editingExistingDocument: boolean;
+    existingDocument: boolean;
+    payload: Record<string, unknown>;
+  }) => {
+    const uid = params.authSession?.uid ?? auth?.currentUser?.uid ?? null;
+    const role = params.authSession?.rbacRole ?? staffRole ?? null;
+    const fields = Object.keys(params.payload);
+    console.info('[PRODUCT_SAVE_DEBUG]', {
+      mode: params.mode,
+      collection: 'products',
+      documentId: params.documentId,
+      method: params.method,
+      uid,
+      adminRole: role,
+      editingExistingDocument: params.editingExistingDocument,
+      documentIdExists: Boolean(params.documentId),
+      existingDocument: params.existingDocument,
+      fields,
+    });
+  };
+
+  const buildPartialProductUpdatePayload = (params: {
+    draft: Product;
+    original: Product | null;
+    existingData: Record<string, unknown>;
     ingredientsList: string[];
     sizesList: string[];
     cleanImages: string[];
-    actorUid?: string;
-    preflightIssuesOut?: string[];
-  }) => {
+    actorUid: string;
+  }): Record<string, unknown> => {
     const {
-      productRef,
+      draft,
+      original,
       existingData,
-      source,
       ingredientsList,
       sizesList,
       cleanImages,
       actorUid,
-      preflightIssuesOut,
     } = params;
-    const unknownKeys = existingData ? getUnknownKeys(existingData, ALLOWED_PRODUCT_KEYS) : [];
-    const hasValidCreated = hasValidTimestamp(existingData?.createdAt);
-
-    if (unknownKeys.length > 0) {
-      const fullPayload = buildNormalizedProductPayload({
-        source,
-        ingredientsList,
-        sizesList,
-        cleanImages,
-        existingData,
-        forFullSet: true,
-        actorUid,
-      });
-      const replacePayload = {
-        ...fullPayload,
-        createdAt: hasValidCreated ? existingData!.createdAt : serverTimestamp(),
-      };
-      assertValidProductWritePreflight(
-        {
-          docId: productRef.id,
-          payload: replacePayload,
-          existingData,
-          isCreate: false,
-          isFullReplace: true,
-        },
-        preflightIssuesOut
-      );
-      await setDoc(productRef, replacePayload);
-      return;
-    }
-
-    const updatePayload = buildNormalizedProductPayload({
-      source,
+    const fullNormalized = buildNormalizedProductPayload({
+      source: draft,
       ingredientsList,
       sizesList,
       cleanImages,
@@ -2012,20 +2015,360 @@ export function AdminProductsPanel() {
       forFullSet: false,
       actorUid,
     });
-    const finalUpdatePayload = hasValidCreated
-      ? updatePayload
-      : { ...updatePayload, createdAt: serverTimestamp() };
+
+    const updatePayload: Record<string, unknown> = {
+      updatedBy: actorUid.slice(0, 254),
+      updatedAt: serverTimestamp(),
+    };
+
+    const trimStr = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+    const sameList = (a: unknown, b: unknown) => {
+      const listA = Array.isArray(a) ? a.map((x) => String(x).trim()).filter(Boolean) : [];
+      const listB = Array.isArray(b) ? b.map((x) => String(x).trim()).filter(Boolean) : [];
+      return listA.length === listB.length && listA.every((item, idx) => item === listB[idx]);
+    };
+
+    if (!original) {
+      Object.assign(updatePayload, fullNormalized);
+      delete updatePayload.id;
+      delete updatePayload.createdBy;
+      delete updatePayload.createdAt;
+    } else {
+      if (trimStr(draft.name) !== trimStr(original.name)) {
+        updatePayload.name = fullNormalized.name;
+        updatePayload.nameBn = fullNormalized.nameBn;
+        updatePayload.name_bn = fullNormalized.name_bn;
+      }
+      if (trimStr(draft.nameEn) !== trimStr(original.nameEn)) {
+        updatePayload.nameEn = fullNormalized.nameEn;
+        updatePayload.name_en = fullNormalized.name_en;
+      }
+      if (trimStr(draft.slug) !== trimStr(original.slug)) {
+        updatePayload.slug = fullNormalized.slug;
+      }
+      if (trimStr(draft.category) !== trimStr(original.category)) {
+        updatePayload.category = fullNormalized.category;
+        updatePayload.categorySlug = fullNormalized.categorySlug ?? fullNormalized.category;
+        updatePayload.categoryName = fullNormalized.categoryName;
+        updatePayload.categoryNameEn = fullNormalized.categoryNameEn;
+      } else {
+        if (trimStr(draft.categoryName) !== trimStr(original.categoryName)) {
+          updatePayload.categoryName = fullNormalized.categoryName;
+        }
+        if (trimStr(draft.categoryNameEn) !== trimStr(original.categoryNameEn)) {
+          updatePayload.categoryNameEn = fullNormalized.categoryNameEn;
+        }
+      }
+      if (trimStr(draft.productType) !== trimStr(original.productType)) {
+        updatePayload.productType = fullNormalized.productType;
+      }
+      const origPrice = Number(original.price) || 0;
+      const draftPrice = Number(draft.price) || 0;
+      if (draftPrice !== origPrice) {
+        updatePayload.price = fullNormalized.price;
+      }
+      const origOldPrice =
+        typeof original.old_price === 'number' && Number.isFinite(original.old_price) && original.old_price > 0
+          ? original.old_price
+          : undefined;
+      const draftOldPrice =
+        typeof draft.old_price === 'number' && Number.isFinite(draft.old_price) && draft.old_price > 0
+          ? draft.old_price
+          : undefined;
+      if (draftOldPrice !== origOldPrice) {
+        updatePayload.old_price = draftOldPrice !== undefined ? fullNormalized.old_price : deleteField();
+      }
+      if (trimStr(draft.discount) !== trimStr(original.discount)) {
+        updatePayload.discount = trimStr(draft.discount).slice(0, 60);
+      }
+      if (trimStr(draft.price_label) !== trimStr(original.price_label)) {
+        updatePayload.price_label = trimStr(draft.price_label).slice(0, 80);
+      }
+      const origUnit = trimStr(original.unit ?? original.priceUnit);
+      const draftUnit = trimStr(draft.unit ?? draft.priceUnit);
+      if (draftUnit !== origUnit) {
+        updatePayload.priceUnit = fullNormalized.priceUnit;
+        updatePayload.unit = fullNormalized.unit;
+      }
+      if (trimStr(draft.shortDescription) !== trimStr(original.shortDescription)) {
+        updatePayload.shortDescription = fullNormalized.shortDescription;
+        updatePayload.short_description_bn = fullNormalized.short_description_bn;
+      }
+      if (trimStr(draft.shortDescriptionEn) !== trimStr(original.shortDescriptionEn)) {
+        updatePayload.shortDescriptionEn = fullNormalized.shortDescriptionEn;
+        updatePayload.short_description_en = fullNormalized.short_description_en;
+      }
+      if (trimStr(draft.description) !== trimStr(original.description)) {
+        updatePayload.description = fullNormalized.description;
+        updatePayload.description_bn = fullNormalized.description_bn;
+      }
+      if (trimStr(draft.descriptionEn) !== trimStr(original.descriptionEn)) {
+        updatePayload.descriptionEn = fullNormalized.descriptionEn;
+        updatePayload.description_en = fullNormalized.description_en;
+      }
+      const origCleanImages = sanitizeStoredImageUrls(
+        Array.isArray(original.images) && original.images.length > 0
+          ? original.images
+          : original.imageUrl || original.image
+          ? [original.imageUrl || original.image]
+          : []
+      );
+      if (
+        !sameList(cleanImages, origCleanImages) ||
+        trimStr(draft.image) !== trimStr(original.image) ||
+        trimStr(draft.imageUrl) !== trimStr(original.imageUrl) ||
+        trimStr(draft.imageKey) !== trimStr(original.imageKey)
+      ) {
+        updatePayload.image = fullNormalized.image;
+        updatePayload.imageUrl = fullNormalized.imageUrl;
+        updatePayload.imageKey = fullNormalized.imageKey;
+        updatePayload.images = fullNormalized.images;
+      }
+      const origIngredients = Array.isArray(original.ingredients) ? original.ingredients : [];
+      if (!sameList(ingredientsList, origIngredients)) {
+        updatePayload.ingredients = fullNormalized.ingredients;
+      }
+      const origSizes = Array.isArray(original.sizes) ? original.sizes : [];
+      if (!sameList(sizesList, origSizes)) {
+        updatePayload.sizes = fullNormalized.sizes;
+      }
+      if (trimStr(draft.weight) !== trimStr(original.weight)) {
+        updatePayload.weight = fullNormalized.weight;
+      }
+      if (!sameList(draft.occasions, original.occasions)) {
+        updatePayload.occasions = fullNormalized.occasions;
+      }
+      if (!sameList(draft.showrooms, original.showrooms)) {
+        updatePayload.showrooms = fullNormalized.showrooms;
+      }
+      if (draft.availability !== original.availability) {
+        updatePayload.availability = fullNormalized.availability;
+      }
+      if (trimStr(draft.sku) !== trimStr(original.sku)) {
+        updatePayload.sku = trimStr(draft.sku) ? fullNormalized.sku : deleteField();
+      }
+      const origStock = typeof original.stock === 'number' && Number.isInteger(original.stock) ? original.stock : undefined;
+      const draftStock = typeof draft.stock === 'number' && Number.isInteger(draft.stock) ? draft.stock : undefined;
+      if (draftStock !== origStock) {
+        updatePayload.stock = draftStock !== undefined ? fullNormalized.stock : deleteField();
+      }
+      if (trimStr(draft.importantNotes) !== trimStr(original.importantNotes)) {
+        updatePayload.importantNotes = fullNormalized.importantNotes;
+      }
+      if (Boolean(draft.featured) !== Boolean(original.featured)) {
+        updatePayload.featured = fullNormalized.featured;
+      }
+      if (Boolean(draft.popular) !== Boolean(original.popular)) {
+        updatePayload.popular = fullNormalized.popular;
+      }
+      if ((draft.visible !== false) !== (original.visible !== false)) {
+        updatePayload.visible = fullNormalized.visible;
+        updatePayload.status = fullNormalized.status;
+      }
+      if (Boolean(draft.deleted) !== Boolean(original.deleted)) {
+        updatePayload.deleted = fullNormalized.deleted;
+        updatePayload.status = fullNormalized.status;
+      }
+      const origOrder = Math.min(10000, Math.max(0, Math.round(Number(original.display_order) || 1)));
+      const draftOrder = Math.min(10000, Math.max(0, Math.round(Number(draft.display_order) || 1)));
+      if (draftOrder !== origOrder) {
+        updatePayload.display_order = fullNormalized.display_order;
+      }
+    }
+
+    // Backfill only missing or invalid fields on legacy documents without clobbering valid existing fields
+    const existingIssues = inspectExistingProductIssues(existingData);
+    if (existingIssues.length > 0) {
+      for (const reqKey of REQUIRED_PRODUCT_SCHEMA_KEYS) {
+        if (!(reqKey in existingData) || existingIssues.includes(`invalid_${reqKey}`)) {
+          if (reqKey in fullNormalized) {
+            updatePayload[reqKey] = fullNormalized[reqKey];
+          }
+        }
+      }
+      if (
+        !('id' in existingData) ||
+        typeof existingData.id !== 'string' ||
+        !/^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
+      ) {
+        updatePayload.id = fullNormalized.id;
+      }
+      for (const badKey of getInvalidOptionalProductFieldsToDelete(existingData)) {
+        if (!(badKey in updatePayload)) {
+          updatePayload[badKey] = badKey in fullNormalized ? fullNormalized[badKey] : deleteField();
+        }
+      }
+      if (
+        existingIssues.includes('invalid_images') ||
+        existingIssues.includes('forbidden_inline_images')
+      ) {
+        updatePayload.images = fullNormalized.images;
+      }
+      for (const arrKey of ['ingredients', 'sizes', 'occasions', 'showrooms'] as const) {
+        if (existingIssues.includes(`invalid_${arrKey}`)) {
+          updatePayload[arrKey] = fullNormalized[arrKey];
+        }
+      }
+      for (const unknownKey of getUnknownKeys(existingData, ALLOWED_PRODUCT_KEYS)) {
+        updatePayload[unknownKey] = deleteField();
+      }
+    }
+
+    if (!hasValidTimestamp(existingData.createdAt)) {
+      updatePayload.createdAt = serverTimestamp();
+    }
+
+    return updatePayload;
+  };
+
+  const createNewProductDoc = async (params: {
+    draft: Product;
+    ingredientsList: string[];
+    sizesList: string[];
+    cleanImages: string[];
+    authSession: VerifiedWriteSession;
+    preflightIssuesOut?: string[];
+    onOperation?: (op: 'CREATE' | 'UPDATE') => void;
+    onDocumentId?: (id: string) => void;
+  }) => {
+    const {
+      draft,
+      ingredientsList,
+      sizesList,
+      cleanImages,
+      authSession,
+      preflightIssuesOut,
+      onOperation,
+      onDocumentId,
+    } = params;
+    const firestore = requireDb();
+    let targetId = draft.id;
+    let productRef = doc(firestore, 'products', targetId);
+    let existingSnap = await fetchProductServerSnap(productRef);
+
+    if (existingSnap.exists()) {
+      const altId = `prod-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const altRef = doc(firestore, 'products', altId);
+      const altSnap = await fetchProductServerSnap(altRef);
+      if (altSnap.exists()) {
+        throw new CatalogAuthError(
+          'validation/duplicate-product-id',
+          `পণ্যের আইডি ("${targetId}") ইতিমধ্যে Firestore-এ রয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।`
+        );
+      }
+      targetId = altId;
+      productRef = altRef;
+      existingSnap = altSnap;
+    }
+
+    onDocumentId?.(targetId);
+    onOperation?.('CREATE');
+
+    const payload = buildNormalizedProductPayload({
+      source: { ...draft, id: targetId },
+      ingredientsList,
+      sizesList,
+      cleanImages,
+      forFullSet: true,
+      actorUid: authSession.uid,
+    });
+    const createPayload: Record<string, unknown> = {
+      ...payload,
+      createdAt: serverTimestamp(),
+    };
     assertValidProductWritePreflight(
       {
-        docId: productRef.id,
-        payload: finalUpdatePayload,
-        existingData,
-        isCreate: false,
-        isFullReplace: false,
+        docId: targetId,
+        payload: createPayload,
+        isCreate: true,
       },
       preflightIssuesOut
     );
-    await updateDoc(productRef, finalUpdatePayload);
+    logProductSaveDebug({
+      mode: 'CREATE',
+      documentId: targetId,
+      method: 'setDoc',
+      authSession,
+      editingExistingDocument: false,
+      existingDocument: existingSnap.exists(),
+      payload: createPayload,
+    });
+    await setDoc(productRef, createPayload);
+    return { id: targetId, productRef, existingSnap };
+  };
+
+  const updateExistingProductDoc = async (params: {
+    draft: Product;
+    original: Product | null;
+    ingredientsList: string[];
+    sizesList: string[];
+    cleanImages: string[];
+    authSession: VerifiedWriteSession;
+    preflightIssuesOut?: string[];
+    existingIssuesOut?: string[];
+    onOperation?: (op: 'CREATE' | 'UPDATE') => void;
+  }) => {
+    const {
+      draft,
+      original,
+      ingredientsList,
+      sizesList,
+      cleanImages,
+      authSession,
+      preflightIssuesOut,
+      existingIssuesOut,
+      onOperation,
+    } = params;
+    const firestore = requireDb();
+    const targetId = draft.id;
+    const productRef = doc(firestore, 'products', targetId);
+    const existingSnap = await fetchProductServerSnap(productRef);
+
+    onOperation?.('UPDATE');
+
+    if (!existingSnap.exists()) {
+      throw new CatalogAuthError(
+        'not-found',
+        'The product no longer exists. Refresh the page and try again.'
+      );
+    }
+
+    const existingData = existingSnap.data() as Record<string, unknown>;
+    if (existingIssuesOut) {
+      const issues = inspectExistingProductIssues(existingData);
+      existingIssuesOut.splice(0, existingIssuesOut.length, ...issues);
+    }
+
+    const updatePayload = buildPartialProductUpdatePayload({
+      draft,
+      original,
+      existingData,
+      ingredientsList,
+      sizesList,
+      cleanImages,
+      actorUid: authSession.uid,
+    });
+
+    assertValidProductWritePreflight(
+      {
+        docId: targetId,
+        payload: updatePayload,
+        existingData,
+        isCreate: false,
+      },
+      preflightIssuesOut
+    );
+    logProductSaveDebug({
+      mode: 'UPDATE',
+      documentId: targetId,
+      method: 'updateDoc',
+      authSession,
+      editingExistingDocument: true,
+      existingDocument: true,
+      payload: updatePayload,
+    });
+    await updateDoc(productRef, updatePayload);
+    return { id: targetId, productRef, existingData };
   };
 
   const handleQuickRowImageUpload = async (
@@ -2050,7 +2393,6 @@ export function AdminProductsPanel() {
     let uploadedResult: { downloadUrl: string; storagePath: string } | null = null;
     let existingIssues: string[] = [];
     const preflightIssues: string[] = [];
-    let operationLabel = 'UPDATE';
 
     try {
       authSession = await ensureVerifiedAdminWriteSession({
@@ -2060,19 +2402,16 @@ export function AdminProductsPanel() {
 
       const firestore = requireDb();
       const productRef = doc(firestore, 'products', prod.id);
-      const existingSnap = await getDoc(productRef);
-      const existingData = existingSnap.exists()
-        ? (existingSnap.data() as Record<string, unknown>)
-        : undefined;
-      existingIssues = existingData ? inspectExistingProductIssues(existingData) : [];
-      operationLabel = existingSnap.exists() ? 'UPDATE' : 'CREATE';
-
+      const existingSnap = await fetchProductServerSnap(productRef);
       if (!existingSnap.exists()) {
-        authSession = await ensureVerifiedAdminWriteSession({
-          hasPermission,
-          requiredPermission: 'products_add',
-        });
+        throw new CatalogAuthError(
+          'not-found',
+          'The product no longer exists. Refresh the page and try again.'
+        );
       }
+
+      const existingData = existingSnap.data() as Record<string, unknown>;
+      existingIssues = inspectExistingProductIssues(existingData);
 
       const uploaded = await uploadCatalogImageToStorage({
         folder: 'products',
@@ -2090,7 +2429,7 @@ export function AdminProductsPanel() {
       };
 
       const existingImages = sanitizeStoredImageUrls(
-        Array.isArray(existingData?.images) ? existingData.images : prod.images
+        Array.isArray(existingData.images) ? existingData.images : prod.images
       );
       const previousR2Urls = collectProductR2ImageUrls(existingData);
       const nextImages = [
@@ -2098,76 +2437,64 @@ export function AdminProductsPanel() {
         ...existingImages.filter((u) => u !== uploadedResult!.downloadUrl),
       ].slice(0, 6);
 
-      if (existingSnap.exists() && isExistingProductDocRuleReady(existingData)) {
-        const fastUpdatePayload = {
-          image: uploadedResult.downloadUrl,
-          imageUrl: uploadedResult.downloadUrl,
-          imageKey: uploadedResult.storagePath.slice(0, 320),
-          images: nextImages,
-          updatedBy: authSession.uid,
-          updatedAt: serverTimestamp(),
-        };
-        assertValidProductWritePreflight(
-          {
-            docId: productRef.id,
-            payload: fastUpdatePayload,
-            existingData,
-            isCreate: false,
-          },
-          preflightIssues
-        );
-        await updateDoc(productRef, fastUpdatePayload);
-      } else {
-        const mergedSource: Product = {
-          ...prod,
-          ...(existingData ? (existingData as Partial<Product>) : {}),
-          id: prod.id,
-          image: uploadedResult.downloadUrl,
-          imageUrl: uploadedResult.downloadUrl,
-          imageKey: uploadedResult.storagePath.slice(0, 320),
-          images: nextImages,
-        };
-        const ingList = Array.isArray(mergedSource.ingredients) ? mergedSource.ingredients : [];
-        const szList = Array.isArray(mergedSource.sizes) ? mergedSource.sizes : [];
+      const ingList = Array.isArray(existingData.ingredients)
+        ? (existingData.ingredients as string[])
+        : Array.isArray(prod.ingredients)
+        ? prod.ingredients
+        : [];
+      const szList = Array.isArray(existingData.sizes)
+        ? (existingData.sizes as string[])
+        : Array.isArray(prod.sizes)
+        ? prod.sizes
+        : [];
 
-        if (!existingSnap.exists()) {
-          const fullPayload = buildNormalizedProductPayload({
-            source: mergedSource,
-            ingredientsList: ingList,
-            sizesList: szList,
-            cleanImages: nextImages,
-            forFullSet: true,
-            actorUid: authSession.uid,
-          });
-          const createPayload = {
-            ...fullPayload,
-            createdAt: serverTimestamp(),
-          };
-          assertValidProductWritePreflight(
-            {
-              docId: productRef.id,
-              payload: createPayload,
-              isCreate: true,
+      const updatePayload = isExistingProductDocRuleReady(existingData)
+        ? {
+            image: uploadedResult.downloadUrl,
+            imageUrl: uploadedResult.downloadUrl,
+            imageKey: uploadedResult.storagePath.slice(0, 320),
+            images: nextImages,
+            updatedBy: authSession.uid.slice(0, 254),
+            updatedAt: serverTimestamp(),
+          }
+        : buildPartialProductUpdatePayload({
+            draft: {
+              ...prod,
+              image: uploadedResult.downloadUrl,
+              imageUrl: uploadedResult.downloadUrl,
+              imageKey: uploadedResult.storagePath.slice(0, 320),
+              images: nextImages,
             },
-            preflightIssues
-          );
-          await setDoc(productRef, createPayload);
-        } else {
-          await writeExistingProductWithCleanup({
-            productRef,
+            original: prod,
             existingData,
-            source: mergedSource,
             ingredientsList: ingList,
             sizesList: szList,
             cleanImages: nextImages,
             actorUid: authSession.uid,
-            preflightIssuesOut: preflightIssues,
           });
-        }
-      }
+
+      assertValidProductWritePreflight(
+        {
+          docId: productRef.id,
+          payload: updatePayload,
+          existingData,
+          isCreate: false,
+        },
+        preflightIssues
+      );
+      logProductSaveDebug({
+        mode: 'UPDATE',
+        documentId: productRef.id,
+        method: 'updateDoc',
+        authSession,
+        editingExistingDocument: true,
+        existingDocument: true,
+        payload: updatePayload,
+      });
+      await updateDoc(productRef, updatePayload);
 
       // Verify Firestore server state before marking upload committed & cleaning replaced R2 files
-      const verifiedSnap = await getDocFromServer(productRef).catch(() => getDoc(productRef));
+      const verifiedSnap = await fetchProductServerSnap(productRef);
       if (!verifiedSnap.exists()) {
         throw new Error('Firestore-এ ছবির তথ্য সংরক্ষণ যাচাই করা যায়নি।');
       }
@@ -2211,8 +2538,10 @@ export function AdminProductsPanel() {
       setFeedback({
         type: 'error',
         message: mapCatalogSaveError(err, 'quick_image_save', {
+          collection: 'products',
+          documentId: prod.id,
           path: `products/${prod.id}`,
-          operation: operationLabel,
+          operation: 'UPDATE',
           staffRole,
           existingIssues,
           preflightIssues,
@@ -2346,38 +2675,32 @@ export function AdminProductsPanel() {
       return;
     }
 
+    const isCreateMode = formMode === 'create';
+    const editTargetId = (editingOriginal?.product.id || editing.id || '').trim();
+    if (!isCreateMode && !/^[a-zA-Z0-9_-]{1,128}$/.test(editTargetId)) {
+      setFeedback({
+        type: 'error',
+        message: 'Invalid product document ID. Refresh the page and try again.',
+      });
+      return;
+    }
+    let resolvedTargetId = isCreateMode ? editing.id : editTargetId;
+
     setSaving(true);
     setFeedback(null);
     setEditorUploadError(null);
 
     let authSession: VerifiedWriteSession | null = null;
-    let existingIssues: string[] = [];
+    const existingIssues: string[] = [];
     const preflightIssues: string[] = [];
-    let operationLabel = isNew ? 'CREATE' : 'UPDATE';
+    let operationLabel: 'CREATE' | 'UPDATE' = isCreateMode ? 'CREATE' : 'UPDATE';
 
     try {
       // 2. Firebase Auth + Admin authorization verification
       authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
-        requiredPermission: isNew ? 'products_add' : 'products_edit',
+        requiredPermission: isCreateMode ? 'products_add' : 'products_edit',
       });
-
-      const firestore = requireDb();
-      const productRef = doc(firestore, 'products', editing.id);
-      const existingSnap = await getDoc(productRef);
-      const existingData = existingSnap.exists()
-        ? (existingSnap.data() as Record<string, unknown>)
-        : undefined;
-      existingIssues = existingData ? inspectExistingProductIssues(existingData) : [];
-      operationLabel = existingSnap.exists() ? 'UPDATE' : 'CREATE';
-      const previousR2Urls = collectProductR2ImageUrls(existingData);
-
-      if (!existingSnap.exists()) {
-        authSession = await ensureVerifiedAdminWriteSession({
-          hasPermission,
-          requiredPermission: 'products_add',
-        });
-      }
 
       // 3. Build final image list (prioritizing validated primary Image URL input + gallery slots)
       const slotUrls = editorImageSlots
@@ -2394,12 +2717,12 @@ export function AdminProductsPanel() {
       const primaryImage = nextImages[0] ?? '';
       const hasDefaultCatalogPhoto =
         getCatalogStudioPhotos({
-          id: editing.id,
+          id: resolvedTargetId,
           slug: editing.slug,
           nameEn: editing.nameEn,
         }).length > 0 ||
         SEED_PRODUCTS.some(
-          (s) => s.id === editing.id || (editing.slug && s.slug === editing.slug)
+          (s) => s.id === resolvedTargetId || (editing.slug && s.slug === editing.slug)
         );
       const primaryImageKey = primaryImage
         ? validatedManualKey || extractR2ImageKey(primaryImage) || ''
@@ -2407,92 +2730,63 @@ export function AdminProductsPanel() {
         ? 'no-photo'
         : '';
 
-      // 4. Firestore Product create/update
-      if (
-        !isNew &&
-        existingSnap.exists() &&
-        originalSnapshot &&
-        serializeNonImageState(editing, ingredientsText, sizesText) === originalSnapshot &&
-        isExistingProductDocRuleReady(existingData)
-      ) {
-        const fastUpdatePayload = {
-          image: primaryImage,
-          imageUrl: primaryImage,
-          imageKey: primaryImageKey,
-          images: nextImages,
-          updatedBy: authSession.uid,
-          updatedAt: serverTimestamp(),
-        };
-        assertValidProductWritePreflight(
-          {
-            docId: productRef.id,
-            payload: fastUpdatePayload,
-            existingData,
-            isCreate: false,
-          },
-          preflightIssues
-        );
-        await updateDoc(productRef, fastUpdatePayload);
-      } else {
-        const ingredients = ingredientsText
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean);
-        const sizes = sizesText
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean);
+      const ingredients = ingredientsText
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const sizes = sizesText
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
 
-        if (!existingSnap.exists()) {
-          const payload = buildNormalizedProductPayload({
-            source: {
-              ...editing,
-              image: primaryImage,
-              imageUrl: primaryImage,
-              imageKey: primaryImageKey,
-              images: nextImages,
-            },
-            ingredientsList: ingredients,
-            sizesList: sizes,
-            cleanImages: nextImages,
-            forFullSet: true,
-            actorUid: authSession.uid,
-          });
-          const createPayload = {
-            ...payload,
-            createdAt: serverTimestamp(),
-          };
-          assertValidProductWritePreflight(
-            {
-              docId: productRef.id,
-              payload: createPayload,
-              isCreate: true,
-            },
-            preflightIssues
-          );
-          await setDoc(productRef, createPayload);
-        } else {
-          await writeExistingProductWithCleanup({
-            productRef,
-            existingData,
-            source: {
-              ...editing,
-              image: primaryImage,
-              imageUrl: primaryImage,
-              imageKey: primaryImageKey,
-              images: nextImages,
-            },
-            ingredientsList: ingredients,
-            sizesList: sizes,
-            cleanImages: nextImages,
-            actorUid: authSession.uid,
-            preflightIssuesOut: preflightIssues,
-          });
-        }
+      const draftProduct: Product = {
+        ...editing,
+        id: resolvedTargetId,
+        image: primaryImage,
+        imageUrl: primaryImage,
+        imageKey: primaryImageKey,
+        images: nextImages,
+      };
+
+      // 4. Explicit Product Create vs Update (never silently fall back from Edit to Create)
+      let previousR2Urls: string[] = [];
+      let committedRef: ReturnType<typeof doc>;
+      if (isCreateMode) {
+        const created = await createNewProductDoc({
+          draft: draftProduct,
+          ingredientsList: ingredients,
+          sizesList: sizes,
+          cleanImages: nextImages,
+          authSession,
+          preflightIssuesOut: preflightIssues,
+          onOperation: (op) => {
+            operationLabel = op;
+          },
+          onDocumentId: (id) => {
+            resolvedTargetId = id;
+          },
+        });
+        committedRef = created.productRef;
+      } else {
+        const updated = await updateExistingProductDoc({
+          draft: draftProduct,
+          original: editingOriginal?.product ?? null,
+          ingredientsList: ingredients,
+          sizesList: sizes,
+          cleanImages: nextImages,
+          authSession,
+          preflightIssuesOut: preflightIssues,
+          existingIssuesOut: existingIssues,
+          onOperation: (op) => {
+            operationLabel = op;
+          },
+        });
+        committedRef = updated.productRef;
+        previousR2Urls = collectProductR2ImageUrls(updated.existingData);
       }
 
       // 5. Verify Firestore write persisted before cleaning replaced R2 files
-      const verifiedSnap = await getDocFromServer(productRef).catch(() => getDoc(productRef));
+      const verifiedSnap = await fetchProductServerSnap(committedRef);
       if (!verifiedSnap.exists()) {
         throw new Error('Firestore-এ পণ্য সংরক্ষণ যাচাই করা যায়নি।');
       }
@@ -2520,12 +2814,12 @@ export function AdminProductsPanel() {
         ]);
       }
 
-      const committedOperation = !existingSnap.exists() ? 'create' : 'update';
+      const committedOperation = isCreateMode ? 'create' : 'update';
       try {
         await logAdminActivity(
           committedOperation,
           'products',
-          editing.id,
+          resolvedTargetId,
           nameEn,
           `${committedOperation === 'create' ? 'Created' : 'Updated'} product ${nameBn}`
         );
@@ -2538,7 +2832,9 @@ export function AdminProductsPanel() {
       setFeedback({ type: 'success', message: 'পণ্য সফলভাবে সংরক্ষণ হয়েছে।' });
     } catch (err) {
       const mappedMessage = mapCatalogSaveError(err, 'product_save', {
-        path: `products/${editing.id}`,
+        collection: 'products',
+        documentId: resolvedTargetId,
+        path: `products/${resolvedTargetId}`,
         operation: operationLabel,
         staffRole,
         existingIssues,
@@ -2552,7 +2848,7 @@ export function AdminProductsPanel() {
       });
       if (import.meta.env.DEV) {
         try {
-          handleFirestoreError(err, OperationType.WRITE, `products/${editing.id}`);
+          handleFirestoreError(err, OperationType.WRITE, `products/${resolvedTargetId}`);
         } catch {
           // Logged for console diagnostics
         }
@@ -2573,57 +2869,71 @@ export function AdminProductsPanel() {
       });
       const firestore = requireDb();
       const productRef = doc(firestore, 'products', prod.id);
-      const existingSnap = await getDoc(productRef);
-      const existingData = existingSnap.exists()
-        ? (existingSnap.data() as Record<string, unknown>)
-        : undefined;
-      existingIssues = existingData ? inspectExistingProductIssues(existingData) : [];
-      const nextVis = prod.visible === false;
-      if (existingSnap.exists() && isExistingProductDocRuleReady(existingData)) {
-        await updateDoc(productRef, {
-          visible: nextVis,
-          status: nextVis ? 'published' : 'draft',
-          updatedBy: authSession.uid,
-          updatedAt: serverTimestamp(),
-        });
-      } else {
-        const cleanImages = sanitizeStoredImageUrls(
-          Array.isArray(prod.images) && prod.images.length > 0
-            ? prod.images
-            : prod.image
-            ? [prod.image]
-            : []
+      const existingSnap = await fetchProductServerSnap(productRef);
+      if (!existingSnap.exists()) {
+        throw new CatalogAuthError(
+          'not-found',
+          'The product no longer exists. Refresh the page and try again.'
         );
-        const ingList = Array.isArray(prod.ingredients) ? prod.ingredients : [];
-        const szList = Array.isArray(prod.sizes) ? prod.sizes : [];
-        if (!existingSnap.exists()) {
-          const payload = buildNormalizedProductPayload({
-            source: { ...prod, visible: nextVis },
-            ingredientsList: ingList,
-            sizesList: szList,
-            cleanImages,
-            forFullSet: true,
-            actorUid: authSession.uid,
-          });
-          const createPayload = { ...payload, createdAt: serverTimestamp() };
-          assertValidProductWritePreflight(
-            { docId: productRef.id, payload: createPayload, isCreate: true },
-            preflightIssues
-          );
-          await setDoc(productRef, createPayload);
-        } else {
-          await writeExistingProductWithCleanup({
-            productRef,
-            existingData,
-            source: { ...prod, visible: nextVis },
-            ingredientsList: ingList,
-            sizesList: szList,
-            cleanImages,
-            actorUid: authSession.uid,
-            preflightIssuesOut: preflightIssues,
-          });
-        }
       }
+      const existingData = existingSnap.data() as Record<string, unknown>;
+      existingIssues = inspectExistingProductIssues(existingData);
+      const nextVis = prod.visible === false;
+      const cleanImages = sanitizeStoredImageUrls(
+        Array.isArray(existingData.images) && existingData.images.length > 0
+          ? existingData.images
+          : Array.isArray(prod.images) && prod.images.length > 0
+          ? prod.images
+          : prod.image
+          ? [prod.image]
+          : []
+      );
+      const ingList = Array.isArray(existingData.ingredients)
+        ? (existingData.ingredients as string[])
+        : Array.isArray(prod.ingredients)
+        ? prod.ingredients
+        : [];
+      const szList = Array.isArray(existingData.sizes)
+        ? (existingData.sizes as string[])
+        : Array.isArray(prod.sizes)
+        ? prod.sizes
+        : [];
+
+      const updatePayload = isExistingProductDocRuleReady(existingData)
+        ? {
+            visible: nextVis,
+            status: nextVis ? 'published' : 'draft',
+            updatedBy: authSession.uid.slice(0, 254),
+            updatedAt: serverTimestamp(),
+          }
+        : buildPartialProductUpdatePayload({
+            draft: { ...prod, visible: nextVis },
+            original: prod,
+            existingData,
+            ingredientsList: ingList,
+            sizesList: szList,
+            cleanImages,
+            actorUid: authSession.uid,
+          });
+      assertValidProductWritePreflight(
+        {
+          docId: productRef.id,
+          payload: updatePayload,
+          existingData,
+          isCreate: false,
+        },
+        preflightIssues
+      );
+      logProductSaveDebug({
+        mode: 'UPDATE',
+        documentId: productRef.id,
+        method: 'updateDoc',
+        authSession,
+        editingExistingDocument: true,
+        existingDocument: true,
+        payload: updatePayload,
+      });
+      await updateDoc(productRef, updatePayload);
       await logAdminActivity(
         nextVis ? 'show' : 'hide',
         'products',
@@ -2634,6 +2944,8 @@ export function AdminProductsPanel() {
       setFeedback({
         type: 'error',
         message: mapCatalogSaveError(err, 'product_visibility', {
+          collection: 'products',
+          documentId: prod.id,
           path: `products/${prod.id}`,
           operation: 'UPDATE',
           staffRole,
@@ -2656,57 +2968,71 @@ export function AdminProductsPanel() {
       });
       const firestore = requireDb();
       const productRef = doc(firestore, 'products', prod.id);
-      const existingSnap = await getDoc(productRef);
-      const existingData = existingSnap.exists()
-        ? (existingSnap.data() as Record<string, unknown>)
-        : undefined;
-      existingIssues = existingData ? inspectExistingProductIssues(existingData) : [];
-      const nextDeleted = !prod.deleted;
-      if (existingSnap.exists() && isExistingProductDocRuleReady(existingData)) {
-        await updateDoc(productRef, {
-          deleted: nextDeleted,
-          status: nextDeleted ? 'archived' : 'published',
-          updatedBy: authSession.uid,
-          updatedAt: serverTimestamp(),
-        });
-      } else {
-        const cleanImages = sanitizeStoredImageUrls(
-          Array.isArray(prod.images) && prod.images.length > 0
-            ? prod.images
-            : prod.image
-            ? [prod.image]
-            : []
+      const existingSnap = await fetchProductServerSnap(productRef);
+      if (!existingSnap.exists()) {
+        throw new CatalogAuthError(
+          'not-found',
+          'The product no longer exists. Refresh the page and try again.'
         );
-        const ingList = Array.isArray(prod.ingredients) ? prod.ingredients : [];
-        const szList = Array.isArray(prod.sizes) ? prod.sizes : [];
-        if (!existingSnap.exists()) {
-          const payload = buildNormalizedProductPayload({
-            source: { ...prod, deleted: nextDeleted },
-            ingredientsList: ingList,
-            sizesList: szList,
-            cleanImages,
-            forFullSet: true,
-            actorUid: authSession.uid,
-          });
-          const createPayload = { ...payload, createdAt: serverTimestamp() };
-          assertValidProductWritePreflight(
-            { docId: productRef.id, payload: createPayload, isCreate: true },
-            preflightIssues
-          );
-          await setDoc(productRef, createPayload);
-        } else {
-          await writeExistingProductWithCleanup({
-            productRef,
-            existingData,
-            source: { ...prod, deleted: nextDeleted },
-            ingredientsList: ingList,
-            sizesList: szList,
-            cleanImages,
-            actorUid: authSession.uid,
-            preflightIssuesOut: preflightIssues,
-          });
-        }
       }
+      const existingData = existingSnap.data() as Record<string, unknown>;
+      existingIssues = inspectExistingProductIssues(existingData);
+      const nextDeleted = !prod.deleted;
+      const cleanImages = sanitizeStoredImageUrls(
+        Array.isArray(existingData.images) && existingData.images.length > 0
+          ? existingData.images
+          : Array.isArray(prod.images) && prod.images.length > 0
+          ? prod.images
+          : prod.image
+          ? [prod.image]
+          : []
+      );
+      const ingList = Array.isArray(existingData.ingredients)
+        ? (existingData.ingredients as string[])
+        : Array.isArray(prod.ingredients)
+        ? prod.ingredients
+        : [];
+      const szList = Array.isArray(existingData.sizes)
+        ? (existingData.sizes as string[])
+        : Array.isArray(prod.sizes)
+        ? prod.sizes
+        : [];
+
+      const updatePayload = isExistingProductDocRuleReady(existingData)
+        ? {
+            deleted: nextDeleted,
+            status: nextDeleted ? 'archived' : 'published',
+            updatedBy: authSession.uid.slice(0, 254),
+            updatedAt: serverTimestamp(),
+          }
+        : buildPartialProductUpdatePayload({
+            draft: { ...prod, deleted: nextDeleted },
+            original: prod,
+            existingData,
+            ingredientsList: ingList,
+            sizesList: szList,
+            cleanImages,
+            actorUid: authSession.uid,
+          });
+      assertValidProductWritePreflight(
+        {
+          docId: productRef.id,
+          payload: updatePayload,
+          existingData,
+          isCreate: false,
+        },
+        preflightIssues
+      );
+      logProductSaveDebug({
+        mode: 'UPDATE',
+        documentId: productRef.id,
+        method: 'updateDoc',
+        authSession,
+        editingExistingDocument: true,
+        existingDocument: true,
+        payload: updatePayload,
+      });
+      await updateDoc(productRef, updatePayload);
       await logAdminActivity(
         nextDeleted ? 'archive' : 'restore',
         'products',
@@ -2721,6 +3047,8 @@ export function AdminProductsPanel() {
       setFeedback({
         type: 'error',
         message: mapCatalogSaveError(err, 'product_archive', {
+          collection: 'products',
+          documentId: prod.id,
           path: `products/${prod.id}`,
           operation: 'UPDATE',
           staffRole,
@@ -2744,7 +3072,7 @@ export function AdminProductsPanel() {
       });
       const firestore = requireDb();
       const productRef = doc(firestore, 'products', target.id);
-      const existingSnap = await getDoc(productRef).catch(() => null);
+      const existingSnap = await fetchProductServerSnap(productRef).catch(() => null);
       const r2UrlsToDelete = Array.from(
         new Set([
           ...collectProductR2ImageUrls(target),
@@ -2774,6 +3102,8 @@ export function AdminProductsPanel() {
       setFeedback({
         type: 'error',
         message: mapCatalogSaveError(err, 'product_delete', {
+          collection: 'products',
+          documentId: target.id,
           path: `products/${target.id}`,
           operation: 'DELETE',
           staffRole,
@@ -2801,60 +3131,76 @@ export function AdminProductsPanel() {
       });
       const firestore = requireDb();
       const productRef = doc(firestore, 'products', prod.id);
-      const existingSnap = await getDoc(productRef);
-      const existingData = existingSnap.exists()
-        ? (existingSnap.data() as Record<string, unknown>)
-        : undefined;
-      existingIssues = existingData ? inspectExistingProductIssues(existingData) : [];
-      const nextFeatured = !prod.featured;
-      if (existingSnap.exists() && isExistingProductDocRuleReady(existingData)) {
-        await updateDoc(productRef, {
-          featured: nextFeatured,
-          updatedBy: authSession.uid,
-          updatedAt: serverTimestamp(),
-        });
-      } else {
-        const cleanImages = sanitizeStoredImageUrls(
-          Array.isArray(prod.images) && prod.images.length > 0
-            ? prod.images
-            : prod.image
-            ? [prod.image]
-            : []
+      const existingSnap = await fetchProductServerSnap(productRef);
+      if (!existingSnap.exists()) {
+        throw new CatalogAuthError(
+          'not-found',
+          'The product no longer exists. Refresh the page and try again.'
         );
-        const ingList = Array.isArray(prod.ingredients) ? prod.ingredients : [];
-        const szList = Array.isArray(prod.sizes) ? prod.sizes : [];
-        if (!existingSnap.exists()) {
-          const payload = buildNormalizedProductPayload({
-            source: { ...prod, featured: nextFeatured },
-            ingredientsList: ingList,
-            sizesList: szList,
-            cleanImages,
-            forFullSet: true,
-            actorUid: authSession.uid,
-          });
-          const createPayload = { ...payload, createdAt: serverTimestamp() };
-          assertValidProductWritePreflight(
-            { docId: productRef.id, payload: createPayload, isCreate: true },
-            preflightIssues
-          );
-          await setDoc(productRef, createPayload);
-        } else {
-          await writeExistingProductWithCleanup({
-            productRef,
-            existingData,
-            source: { ...prod, featured: nextFeatured },
-            ingredientsList: ingList,
-            sizesList: szList,
-            cleanImages,
-            actorUid: authSession.uid,
-            preflightIssuesOut: preflightIssues,
-          });
-        }
       }
+      const existingData = existingSnap.data() as Record<string, unknown>;
+      existingIssues = inspectExistingProductIssues(existingData);
+      const nextFeatured = !prod.featured;
+      const cleanImages = sanitizeStoredImageUrls(
+        Array.isArray(existingData.images) && existingData.images.length > 0
+          ? existingData.images
+          : Array.isArray(prod.images) && prod.images.length > 0
+          ? prod.images
+          : prod.image
+          ? [prod.image]
+          : []
+      );
+      const ingList = Array.isArray(existingData.ingredients)
+        ? (existingData.ingredients as string[])
+        : Array.isArray(prod.ingredients)
+        ? prod.ingredients
+        : [];
+      const szList = Array.isArray(existingData.sizes)
+        ? (existingData.sizes as string[])
+        : Array.isArray(prod.sizes)
+        ? prod.sizes
+        : [];
+
+      const updatePayload = isExistingProductDocRuleReady(existingData)
+        ? {
+            featured: nextFeatured,
+            updatedBy: authSession.uid.slice(0, 254),
+            updatedAt: serverTimestamp(),
+          }
+        : buildPartialProductUpdatePayload({
+            draft: { ...prod, featured: nextFeatured },
+            original: prod,
+            existingData,
+            ingredientsList: ingList,
+            sizesList: szList,
+            cleanImages,
+            actorUid: authSession.uid,
+          });
+      assertValidProductWritePreflight(
+        {
+          docId: productRef.id,
+          payload: updatePayload,
+          existingData,
+          isCreate: false,
+        },
+        preflightIssues
+      );
+      logProductSaveDebug({
+        mode: 'UPDATE',
+        documentId: productRef.id,
+        method: 'updateDoc',
+        authSession,
+        editingExistingDocument: true,
+        existingDocument: true,
+        payload: updatePayload,
+      });
+      await updateDoc(productRef, updatePayload);
     } catch (err) {
       setFeedback({
         type: 'error',
         message: mapCatalogSaveError(err, 'product_featured', {
+          collection: 'products',
+          documentId: prod.id,
           path: `products/${prod.id}`,
           operation: 'UPDATE',
           staffRole,
@@ -3133,6 +3479,7 @@ export function AdminProductsPanel() {
                   setEditing({
                     ...editing,
                     category: e.target.value,
+                    categorySlug: e.target.value,
                     categoryName: ct?.nameBn || editing.categoryName,
                     categoryNameEn: ct?.nameEn || editing.categoryNameEn,
                   });

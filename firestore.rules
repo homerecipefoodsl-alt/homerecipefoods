@@ -64,8 +64,8 @@ service cloud.firestore {
     }
 
     function isAdminRecordActive(d) {
-      return (!('uid' in d) || (d.uid is string && d.uid == request.auth.uid))
-        && (!('email' in d) || (d.email is string && d.email.trim().lower() == authEmail()))
+      return (!('uid' in d) || d.uid == null || (d.uid is string && (d.uid == '' || d.uid == request.auth.uid)))
+        && (!('email' in d) || d.email == null || (d.email is string && (d.email.trim() == '' || d.email.trim().lower() == authEmail())))
         && (('active' in d && d.active == true)
           || ('isActive' in d && d.isActive == true)
           || ('status' in d && d.status == 'active'))
@@ -77,7 +77,7 @@ service cloud.firestore {
     }
 
     function isRbacRecordActive(d) {
-      return (!('email' in d) || (d.email is string && d.email.trim().lower() == authEmail()))
+      return (!('email' in d) || d.email == null || (d.email is string && (d.email.trim() == '' || d.email.trim().lower() == authEmail())))
         && ('status' in d)
         && d.status == 'active'
         && ('role' in d)
@@ -158,26 +158,25 @@ service cloud.firestore {
       );
     }
 
+    function isCatalogAdminDocAuthorized(d, perm) {
+      return isAdminRecordActive(d)
+        && (d.role in ['primary_super_admin', 'super_admin']
+          || hasRolePermission(d, perm));
+    }
+
+    function isCatalogRbacDocAuthorized(d, perm) {
+      return isRbacRecordActive(d)
+        && (d.role in ['primary_super_admin', 'super_admin']
+          || hasRolePermission(d, perm));
+    }
+
     function hasCatalogWritePerm(perm) {
       return hasVerifiedEmail() && (
         (exists(/databases/$(database)/documents/admins/$(request.auth.uid))
-          && ('role' in adminDoc())
-          && (adminDoc().get('active', false) == true
-            || adminDoc().get('isActive', false) == true
-            || adminDoc().get('status', '') == 'active')
-          && adminDoc().get('active', true) != false
-          && adminDoc().get('isActive', true) != false
-          && !(adminDoc().get('status', '') in ['disabled', 'suspended', 'inactive', 'revoked'])
-          && (!('email' in adminDoc()) || (adminDoc().email is string && adminDoc().email.trim().lower() == authEmail()))
-          && (adminDoc().role in ['primary_super_admin', 'super_admin']
-            || hasRolePermission(adminDoc(), perm)))
+          && isCatalogAdminDocAuthorized(adminDoc(), perm))
         || (!exists(/databases/$(database)/documents/admins/$(request.auth.uid))
           && exists(/databases/$(database)/documents/rbac_roles/$(authEmail()))
-          && ('role' in rbacDoc())
-          && rbacDoc().get('status', '') == 'active'
-          && (!('email' in rbacDoc()) || (rbacDoc().email is string && rbacDoc().email.trim().lower() == authEmail()))
-          && (rbacDoc().role in ['primary_super_admin', 'super_admin']
-            || hasRolePermission(rbacDoc(), perm)))
+          && isCatalogRbacDocAuthorized(rbacDoc(), perm))
       );
     }
 
@@ -344,7 +343,7 @@ service cloud.firestore {
         && (!('name_bn' in data) || (data.name_bn is string && data.name_bn.size() <= 120))
         && (!('name_en' in data) || (data.name_en is string && data.name_en.size() <= 120))
         && isValidSlug(data.slug)
-        && data.icon is string && data.icon.size() >= 1 && data.icon.size() <= 32
+        && data.icon is string && data.icon.size() <= 40
         && data.description is string && data.description.size() >= 1 && data.description.size() <= 600
         && (!('descriptionEn' in data) || (data.descriptionEn is string && data.descriptionEn.size() <= 600))
         && (!('description_bn' in data) || (data.description_bn is string && data.description_bn.size() <= 600))
@@ -1841,11 +1840,16 @@ service cloud.firestore {
       allow create: if isValidId(statusId)
         && isValidJobApplicationStatus(incoming())
         && incoming().id == statusId
-        && incoming().status == 'Submitted'
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
-        && exists(/databases/$(database)/documents/jobPostings/$(incoming().jobId))
-        && get(/databases/$(database)/documents/jobPostings/$(incoming().jobId)).data.status == 'Published';
+        && (
+          isRecruitmentStaff()
+          || (
+            incoming().status == 'Submitted'
+            && exists(/databases/$(database)/documents/jobPostings/$(incoming().jobId))
+            && get(/databases/$(database)/documents/jobPostings/$(incoming().jobId)).data.status == 'Published'
+          )
+        );
       allow update: if isRecruitmentStaff()
         && isValidId(statusId)
         && isValidJobApplicationStatus(incoming())
