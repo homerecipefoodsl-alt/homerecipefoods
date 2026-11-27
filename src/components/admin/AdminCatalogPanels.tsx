@@ -165,6 +165,56 @@ const REQUIRED_CATEGORY_SCHEMA_KEYS = [
   'order',
 ] as const;
 
+const REQUIRED_SHOWROOM_SCHEMA_KEYS = [
+  'id',
+  'name',
+  'area',
+  'address',
+  'phone',
+  'openingHours',
+  'mapUrl',
+  'lat',
+  'lng',
+  'isMain',
+] as const;
+
+const ALLOWED_SHOWROOM_KEYS = new Set<string>([
+  'id', 'name', 'nameEn', 'name_bn', 'name_en',
+  'area', 'areaEn', 'address', 'addressEn', 'address_bn', 'address_en',
+  'description', 'descriptionEn', 'description_bn', 'description_en',
+  'phone', 'alternate_phone', 'email',
+  'openingHours', 'openingHoursEn', 'opening_time', 'closing_time', 'weekly_holiday',
+  'region', 'orderLineEn', 'orderLineBn',
+  'mapUrl', 'lat', 'lng', 'images', 'available_categories', 'available_products',
+  'isMain', 'visible', 'deleted', 'display_order', 'archivedAt', 'seoTitle', 'seoDescription',
+  'createdAt', 'updatedAt',
+]);
+
+const SHOWROOM_OPTIONAL_STRING_BOUNDS: ReadonlyArray<[string, number]> = [
+  ['nameEn', 140],
+  ['name_bn', 140],
+  ['name_en', 140],
+  ['areaEn', 100],
+  ['addressEn', 400],
+  ['address_bn', 400],
+  ['address_en', 400],
+  ['description', 600],
+  ['descriptionEn', 600],
+  ['description_bn', 600],
+  ['description_en', 600],
+  ['alternate_phone', 40],
+  ['email', 254],
+  ['openingHoursEn', 160],
+  ['opening_time', 40],
+  ['closing_time', 40],
+  ['weekly_holiday', 80],
+  ['region', 100],
+  ['orderLineEn', 160],
+  ['orderLineBn', 160],
+  ['seoTitle', 200],
+  ['seoDescription', 400],
+];
+
 const VALID_AVAILABILITIES: ReadonlySet<ProductAvailability> = new Set([
   'In Showroom',
   'Pre-Order at Showroom',
@@ -703,6 +753,163 @@ function isExistingCategoryDocRuleReady(data: Record<string, unknown> | undefine
   return true;
 }
 
+function inspectExistingShowroomIssues(
+  data: Record<string, unknown> | undefined
+): string[] {
+  if (!data) return ['missing_doc'];
+  const issues: string[] = [];
+
+  const unknownKeys = getUnknownKeys(data, ALLOWED_SHOWROOM_KEYS);
+  if (unknownKeys.length > 0) {
+    issues.push(`unknown_keys:${unknownKeys.join(',')}`);
+  }
+  if (!hasCompleteSchema(data, REQUIRED_SHOWROOM_SCHEMA_KEYS)) {
+    const missing = REQUIRED_SHOWROOM_SCHEMA_KEYS.filter((k) => !(k in data));
+    issues.push(`missing_required:${missing.join(',')}`);
+  }
+  if (!hasValidTimestamp(data.createdAt)) issues.push('invalid_createdAt');
+  if (typeof data.id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(data.id)) {
+    issues.push('invalid_id');
+  }
+  if (!isNonEmptyString(data.name, 140)) issues.push('invalid_name');
+  if (!isNonEmptyString(data.area, 100)) issues.push('invalid_area');
+  if (!isNonEmptyString(data.address, 400)) issues.push('invalid_address');
+  if (typeof data.phone !== 'string' || data.phone.length < 5 || data.phone.length > 40) {
+    issues.push('invalid_phone');
+  }
+  if (!isNonEmptyString(data.openingHours, 160)) issues.push('invalid_openingHours');
+  if (!isNonEmptyString(data.mapUrl, 1000)) issues.push('invalid_mapUrl');
+  if (typeof data.lat !== 'number' || !Number.isFinite(data.lat) || data.lat < -90 || data.lat > 90) {
+    issues.push('invalid_lat');
+  }
+  if (typeof data.lng !== 'number' || !Number.isFinite(data.lng) || data.lng < -180 || data.lng > 180) {
+    issues.push('invalid_lng');
+  }
+  if (typeof data.isMain !== 'boolean') issues.push('invalid_isMain');
+
+  for (const [key, maxLen] of SHOWROOM_OPTIONAL_STRING_BOUNDS) {
+    if (key in data && (typeof data[key] !== 'string' || (data[key] as string).length > maxLen)) {
+      issues.push(`invalid_${key}`);
+    }
+  }
+  if ('images' in data) {
+    if (!isBoundedStringArray(data.images, 6, 400000)) {
+      issues.push('invalid_images');
+    } else if ((data.images as string[]).some((u) => isForbiddenInlineImageUrl(u))) {
+      issues.push('forbidden_inline_images');
+    }
+  }
+  if (
+    'available_categories' in data &&
+    !isBoundedStringArray(data.available_categories, 30, 80)
+  ) {
+    issues.push('invalid_available_categories');
+  }
+  if (
+    'available_products' in data &&
+    !isBoundedStringArray(data.available_products, 200, 128)
+  ) {
+    issues.push('invalid_available_products');
+  }
+  if ('visible' in data && typeof data.visible !== 'boolean') issues.push('invalid_visible');
+  if ('deleted' in data && typeof data.deleted !== 'boolean') issues.push('invalid_deleted');
+  if (
+    'display_order' in data &&
+    (typeof data.display_order !== 'number' ||
+      !Number.isInteger(data.display_order) ||
+      data.display_order < 0 ||
+      data.display_order > 1000)
+  ) {
+    issues.push('invalid_display_order');
+  }
+  if ('archivedAt' in data) {
+    const val = data.archivedAt;
+    if (!hasValidTimestamp(val) && (typeof val !== 'string' || val.length > 80)) {
+      issues.push('invalid_archivedAt');
+    }
+  }
+
+  return issues;
+}
+
+function isExistingShowroomDocRuleReady(data: Record<string, unknown> | undefined): boolean {
+  return inspectExistingShowroomIssues(data).length === 0;
+}
+
+function validateShowroomWriteForRules(params: {
+  docId: string;
+  payload: Record<string, unknown>;
+  existingData?: Record<string, unknown>;
+  isCreate: boolean;
+  isFullReplace?: boolean;
+}): string[] {
+  const { docId, payload, existingData, isCreate, isFullReplace } = params;
+  const issues: string[] = [];
+
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(docId)) {
+    issues.push(`invalid_doc_id(${docId})`);
+  }
+
+  const merged: Record<string, unknown> =
+    isCreate || isFullReplace
+      ? { ...payload }
+      : { ...(existingData || {}), ...payload };
+
+  for (const key of Object.keys(payload)) {
+    if (isFirestoreSentinel(payload[key])) {
+      if (key === 'updatedAt' || key === 'createdAt') {
+        merged[key] = { toMillis: () => Date.now() };
+      } else {
+        delete merged[key];
+      }
+    }
+  }
+
+  if (isCreate && !('createdAt' in merged)) {
+    issues.push('missing_createdAt');
+  }
+  if (!('updatedAt' in merged)) {
+    issues.push('missing_updatedAt');
+  }
+
+  if (!isCreate && existingData) {
+    const existingValidId =
+      typeof existingData.id === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
+        ? existingData.id
+        : docId;
+    if (merged.id !== existingValidId) {
+      issues.push(`id_mismatch(expected=${existingValidId},got=${String(merged.id)})`);
+    }
+  } else if (merged.id !== docId) {
+    issues.push(`create_id_mismatch(docId=${docId},id=${String(merged.id)})`);
+  }
+
+  issues.push(...inspectExistingShowroomIssues(merged));
+  return issues;
+}
+
+function assertValidShowroomWritePreflight(
+  params: {
+    docId: string;
+    payload: Record<string, unknown>;
+    existingData?: Record<string, unknown>;
+    isCreate: boolean;
+    isFullReplace?: boolean;
+  },
+  preflightIssuesOut?: string[]
+): void {
+  const issues = validateShowroomWriteForRules(params);
+  if (issues.length > 0) {
+    if (preflightIssuesOut) {
+      preflightIssuesOut.splice(0, preflightIssuesOut.length, ...issues);
+    }
+    throw new CatalogAuthError(
+      'validation/preflight-failed',
+      `আউটলেটের কিছু ফিল্ড Firestore Security Rules-এর সাথে মিলছে না (${issues.slice(0, 4).join(', ')})। অনুগ্রহ করে ঘরগুলো যাচাই করে আবার চেষ্টা করুন।`
+    );
+  }
+}
+
 function isFirestoreSentinel(val: unknown): boolean {
   return Boolean(
     val &&
@@ -882,10 +1089,10 @@ function mapCatalogSaveError(
   if (rawCode === 'rbac/missing-permission') {
     return 'আপনার অ্যাকাউন্টে এই ক্যাটালগ পরিবর্তনের অনুমতি নেই (rbac/missing-permission)। অনুগ্রহ করে সুপার অ্যাডমিনের সাথে যোগাযোগ করুন।';
   }
-  if (rawCode === 'validation/preflight-failed') {
+  if (rawCode === 'validation/preflight-failed' || rawCode.startsWith('validation/')) {
     return err instanceof Error && err.message
       ? err.message
-      : 'পণ্যের কিছু আবশ্যকীয় তথ্য Firestore নিয়মের সাথে মিলছে না। অনুগ্রহ করে ঘরগুলো যাচাই করুন।';
+      : 'আবশ্যকীয় তথ্য Firestore নিয়মের সাথে মিলছে না। অনুগ্রহ করে ঘরগুলো যাচাই করুন।';
   }
   if (
     rawCode === 'permission-denied' ||
@@ -5200,6 +5407,7 @@ export function AdminOccasionsPanel() {
 export function AdminShowroomsPanel() {
   const {
     allShowrooms,
+    allProducts,
     firestoreShowrooms,
     legacyDemoShowrooms,
     staffRole,
@@ -5208,6 +5416,7 @@ export function AdminShowroomsPanel() {
   } = useStore();
   const [editing, setEditing] = useState<Showroom | null>(null);
   const [isNew, setIsNew] = useState(false);
+  const [isCreatingBrandNew, setIsCreatingBrandNew] = useState(false);
   const [purgingDemoDocs, setPurgingDemoDocs] = useState(false);
   const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [search, setSearch] = useState('');
@@ -5224,6 +5433,13 @@ export function AdminShowroomsPanel() {
     () => new Set(CANONICAL_OUTLET_SHOWROOMS.map((s) => s.id)),
     []
   );
+
+  const linkedProductsCount = useMemo(() => {
+    if (!confirmDeleteTarget) return 0;
+    return allProducts.filter(
+      (p) => !p.deleted && Array.isArray(p.showrooms) && p.showrooms.includes(confirmDeleteTarget.id)
+    ).length;
+  }, [allProducts, confirmDeleteTarget]);
 
   const managedShowrooms = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -5252,38 +5468,67 @@ export function AdminShowroomsPanel() {
       });
   }, [allShowrooms, search, regionFilter]);
 
-  const buildShowroomFirestorePayload = (sr: Showroom): Record<string, unknown> => {
+  const generateUniqueShowroomSlugId = (nameEn: string, fallbackId: string): string => {
+    const existingIds = new Set(allShowrooms.map((s) => s.id));
+    const cleanAscii = nameEn
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 100)
+      .replace(/-+$/g, '');
+    const base = cleanAscii || fallbackId;
+    if (/^[a-zA-Z0-9_-]{1,128}$/.test(base) && !existingIds.has(base)) {
+      return base;
+    }
+    for (let idx = 2; idx <= 25; idx += 1) {
+      const candidate = `${base.slice(0, 118)}-${idx}`;
+      if (!existingIds.has(candidate)) {
+        return candidate;
+      }
+    }
+    return `${base.slice(0, 110)}-${Date.now().toString(36)}`;
+  };
+
+  const buildShowroomFirestorePayload = (
+    sr: Showroom,
+    existingData?: Record<string, unknown>
+  ): Record<string, unknown> => {
     const st = getShowroomText(sr);
-    const nameEn = (sr.nameEn ?? st.nameEn ?? sr.name ?? '').trim();
-    const nameBn = (sr.name ?? st.nameBn ?? nameEn).trim();
-    const areaEn = (sr.areaEn ?? st.areaEn ?? '').trim();
-    const areaBn = (sr.area ?? st.areaBn ?? areaEn ?? nameBn).trim();
-    const addressEn = (sr.addressEn ?? st.addressEn ?? '').trim();
-    const addressBn = (sr.address ?? st.addressBn ?? addressEn ?? areaBn).trim();
-    const descEn = (sr.descriptionEn ?? st.descriptionEn ?? '').trim();
-    const descBn = (sr.description ?? st.descriptionBn ?? descEn).trim();
-    const hoursEn = (sr.openingHoursEn ?? st.openingHoursEn ?? '').trim();
+    const nameEn = (sr.nameEn || '').trim() || (st.nameEn || '').trim() || (sr.name || '').trim();
+    const nameBn = (sr.name || '').trim() || (st.nameBn || '').trim() || nameEn;
+    const areaEn = (sr.areaEn || '').trim() || (st.areaEn || '').trim() || (sr.area || '').trim();
+    const areaBn = (sr.area || '').trim() || (st.areaBn || '').trim() || areaEn || nameBn;
+    const addressEn =
+      (sr.addressEn || '').trim() || (st.addressEn || '').trim() || (sr.address || '').trim();
+    const addressBn =
+      (sr.address || '').trim() || (st.addressBn || '').trim() || addressEn || areaBn;
+    const descEn = (sr.descriptionEn || '').trim() || (st.descriptionEn || '').trim();
+    const descBn = (sr.description || '').trim() || (st.descriptionBn || '').trim() || descEn;
+    const hoursEn = (sr.openingHoursEn || '').trim() || (st.openingHoursEn || '').trim();
     const hoursBn =
-      (sr.openingHours ?? st.openingHoursBn ?? hoursEn).trim() ||
+      (sr.openingHours || '').trim() ||
+      (st.openingHoursBn || '').trim() ||
+      hoursEn ||
       'শুক্র–শনিবার · সকাল ৮:০০টা – রাত ১০:০০টা';
     const rawLat = Number(sr.lat);
     const rawLng = Number(sr.lng);
-    const hasCoords =
-      Number.isFinite(rawLat) && Number.isFinite(rawLng) && (rawLat !== 0 || rawLng !== 0);
+    const safeLat = Number.isFinite(rawLat) && rawLat >= -90 && rawLat <= 90 ? rawLat : 0;
+    const safeLng = Number.isFinite(rawLng) && rawLng >= -180 && rawLng <= 180 ? rawLng : 0;
+    const hasCoords = safeLat !== 0 || safeLng !== 0;
     const safeMapUrl =
       (sr.mapUrl || '').trim() ||
       (hasCoords
-        ? `https://maps.google.com/?q=${rawLat},${rawLng}`
-        : `https://maps.google.com/?q=${encodeURIComponent(addressEn || addressBn || nameEn)}`);
+        ? `https://maps.google.com/?q=${safeLat},${safeLng}`
+        : `https://maps.google.com/?q=${encodeURIComponent(addressEn || addressBn || nameEn || sr.id)}`);
 
-    const validImages = Array.isArray(sr.images)
-      ? sr.images
-          .map((u) => (typeof u === 'string' ? u.trim() : ''))
-          .filter((u) => u && u.length <= 400000)
-          .slice(0, 6)
-      : [];
+    const validImages = sanitizeStoredImageUrls(
+      sr.images !== undefined ? sr.images : existingData?.images
+    );
 
-    return {
+    const payload: Record<string, unknown> = {
       id: sr.id,
       name: nameBn.slice(0, 140),
       nameEn: nameEn.slice(0, 140),
@@ -5300,19 +5545,19 @@ export function AdminShowroomsPanel() {
       description_bn: descBn.slice(0, 600),
       description_en: descEn.slice(0, 600),
       phone: (sr.phone || '').trim().slice(0, 40),
-      alternate_phone: (sr.alternate_phone ?? '').trim().slice(0, 40),
-      email: (sr.email ?? '').trim().slice(0, 254),
+      alternate_phone: (sr.alternate_phone || '').trim().slice(0, 40),
+      email: (sr.email || '').trim().slice(0, 254),
       openingHours: hoursBn.slice(0, 160),
       openingHoursEn: hoursEn.slice(0, 160),
-      opening_time: (sr.opening_time ?? '').trim().slice(0, 40),
-      closing_time: (sr.closing_time ?? '').trim().slice(0, 40),
-      weekly_holiday: (sr.weekly_holiday ?? '').trim().slice(0, 80),
-      region: (sr.region ?? '').trim().slice(0, 100),
-      orderLineEn: (sr.orderLineEn ?? '').trim().slice(0, 160),
-      orderLineBn: (sr.orderLineBn ?? '').trim().slice(0, 160),
-      mapUrl: safeMapUrl.slice(0, 600),
-      lat: Number.isFinite(rawLat) ? rawLat : 0,
-      lng: Number.isFinite(rawLng) ? rawLng : 0,
+      opening_time: (sr.opening_time || '').trim().slice(0, 40),
+      closing_time: (sr.closing_time || '').trim().slice(0, 40),
+      weekly_holiday: (sr.weekly_holiday || '').trim().slice(0, 80),
+      region: (sr.region || '').trim().slice(0, 100),
+      orderLineEn: (sr.orderLineEn || '').trim().slice(0, 160),
+      orderLineBn: (sr.orderLineBn || '').trim().slice(0, 160),
+      mapUrl: safeMapUrl.slice(0, 1000),
+      lat: safeLat,
+      lng: safeLng,
       images: validImages,
       isMain: Boolean(sr.isMain),
       visible: sr.visible !== false,
@@ -5323,48 +5568,152 @@ export function AdminShowroomsPanel() {
       ),
       updatedAt: serverTimestamp(),
     };
+
+    const availCats = sr.available_categories ?? existingData?.available_categories;
+    if (isBoundedStringArray(availCats, 30, 80)) {
+      payload.available_categories = availCats;
+    }
+    const availProds = sr.available_products ?? existingData?.available_products;
+    if (isBoundedStringArray(availProds, 200, 128)) {
+      payload.available_products = availProds;
+    }
+    const seoTitle = sr.seoTitle ?? (typeof existingData?.seoTitle === 'string' ? existingData.seoTitle : undefined);
+    if (typeof seoTitle === 'string' && seoTitle.trim().length > 0 && seoTitle.length <= 200) {
+      payload.seoTitle = seoTitle.trim();
+    }
+    const seoDesc =
+      sr.seoDescription ??
+      (typeof existingData?.seoDescription === 'string' ? existingData.seoDescription : undefined);
+    if (typeof seoDesc === 'string' && seoDesc.trim().length > 0 && seoDesc.length <= 400) {
+      payload.seoDescription = seoDesc.trim();
+    }
+    const archivedAt = sr.archivedAt ?? existingData?.archivedAt;
+    if (
+      hasValidTimestamp(archivedAt) ||
+      (typeof archivedAt === 'string' && archivedAt.trim().length > 0 && archivedAt.length <= 80)
+    ) {
+      payload.archivedAt = archivedAt;
+    }
+
+    return payload;
   };
 
-  const persistShowroomDoc = async (sr: Showroom, actionLabel: 'create' | 'update') => {
+  const persistShowroomDoc = async (
+    sr: Showroom,
+    actionLabel: 'create' | 'update',
+    opts?: {
+      rejectIfAlreadyExists?: boolean;
+      preflightIssuesOut?: string[];
+      existingIssuesOut?: string[];
+    }
+  ) => {
     const firestore = requireDb();
-    const showroomRef = doc(firestore, 'showrooms', sr.id);
-    const existingSnap = await getDoc(showroomRef);
+    let targetId = sr.id;
+    let showroomRef = doc(firestore, 'showrooms', targetId);
+    let existingSnap = await getDoc(showroomRef);
+
+    if (opts?.rejectIfAlreadyExists && existingSnap.exists()) {
+      const altId = `${targetId.slice(0, 110)}-${Date.now().toString(36)}`;
+      const altRef = doc(firestore, 'showrooms', altId);
+      const altSnap = await getDoc(altRef);
+      if (altSnap.exists()) {
+        throw new CatalogAuthError(
+          'validation/duplicate-showroom-id',
+          `আউটলেট আইডি ("${targetId}") ইতিমধ্যে Firestore-এ রয়েছে। অনুগ্রহ করে ভিন্ন নাম দিয়ে আবার চেষ্টা করুন।`
+        );
+      }
+      targetId = altId;
+      showroomRef = altRef;
+      existingSnap = altSnap;
+    }
+
     const existingData = existingSnap.exists()
       ? (existingSnap.data() as Record<string, unknown>)
       : undefined;
+    if (existingData && opts?.existingIssuesOut) {
+      const foundIssues = inspectExistingShowroomIssues(existingData);
+      opts.existingIssuesOut.splice(0, opts.existingIssuesOut.length, ...foundIssues);
+    }
+
     const preservedValidId =
       existingData &&
       typeof existingData.id === 'string' &&
       /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
         ? existingData.id
-        : sr.id;
+        : targetId;
 
-    const payload = buildShowroomFirestorePayload({ ...sr, id: preservedValidId });
-    const titleLabel = String(payload.nameEn || payload.name || sr.id);
+    const payload = buildShowroomFirestorePayload(
+      { ...sr, id: preservedValidId },
+      existingData
+    );
+    const titleLabel = String(payload.nameEn || payload.name || targetId);
 
     if (!existingSnap.exists()) {
-      await setDoc(showroomRef, {
+      const createPayload = {
         ...payload,
         createdAt: serverTimestamp(),
-      });
-      await logAdminActivity(actionLabel === 'create' ? 'create' : 'update', 'showrooms', sr.id, titleLabel);
-    } else {
-      await updateDoc(
-        showroomRef,
-        hasValidTimestamp(existingData?.createdAt)
-          ? payload
-          : { ...payload, createdAt: serverTimestamp() }
+      };
+      assertValidShowroomWritePreflight(
+        {
+          docId: targetId,
+          payload: createPayload,
+          isCreate: true,
+        },
+        opts?.preflightIssuesOut
       );
-      await logAdminActivity('update', 'showrooms', sr.id, titleLabel);
+      await setDoc(showroomRef, createPayload);
+      await logAdminActivity(
+        actionLabel === 'create' ? 'create' : 'update',
+        'showrooms',
+        targetId,
+        titleLabel
+      );
+    } else if (getUnknownKeys(existingData!, ALLOWED_SHOWROOM_KEYS).length > 0) {
+      const replacePayload = {
+        ...payload,
+        createdAt: hasValidTimestamp(existingData?.createdAt)
+          ? existingData!.createdAt
+          : serverTimestamp(),
+      };
+      assertValidShowroomWritePreflight(
+        {
+          docId: targetId,
+          payload: replacePayload,
+          existingData,
+          isCreate: false,
+          isFullReplace: true,
+        },
+        opts?.preflightIssuesOut
+      );
+      await setDoc(showroomRef, replacePayload);
+      await logAdminActivity('update', 'showrooms', targetId, titleLabel);
+    } else {
+      const updatePayload = hasValidTimestamp(existingData?.createdAt)
+        ? payload
+        : { ...payload, createdAt: serverTimestamp() };
+      assertValidShowroomWritePreflight(
+        {
+          docId: targetId,
+          payload: updatePayload,
+          existingData,
+          isCreate: false,
+        },
+        opts?.preflightIssuesOut
+      );
+      await updateDoc(showroomRef, updatePayload);
+      await logAdminActivity('update', 'showrooms', targetId, titleLabel);
     }
+    return targetId;
   };
 
   const purgeConfirmedDemoShowrooms = async () => {
     if (legacyDemoShowrooms.length === 0) return;
     setPurgingDemoDocs(true);
     setMsg(null);
+    let authSession: VerifiedWriteSession | null = null;
+    let activeDemoId = legacyDemoShowrooms[0]?.id || 'demo';
     try {
-      await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'showrooms_manage',
       });
@@ -5374,6 +5723,7 @@ export function AdminShowroomsPanel() {
         if (!CONFIRMED_DEMO_SHOWROOM_IDS.has(demoDoc.id) && !isDemoOrDummyShowroom(demoDoc)) {
           continue;
         }
+        activeDemoId = demoDoc.id;
         await deleteDoc(doc(firestore, 'showrooms', demoDoc.id));
         await logAdminActivity(
           'delete',
@@ -5395,8 +5745,12 @@ export function AdminShowroomsPanel() {
       setMsg({
         type: 'err',
         text: mapCatalogSaveError(err, 'showroom_purge', {
+          collection: 'showrooms',
+          documentId: activeDemoId,
+          path: `showrooms/${activeDemoId}`,
           operation: 'DELETE',
           staffRole,
+          authSession,
         }),
       });
     } finally {
@@ -5413,14 +5767,15 @@ export function AdminShowroomsPanel() {
     }
     setUploadingPhoto(true);
     setMsg(null);
+    let authSession: VerifiedWriteSession | null = null;
     try {
-      await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'showrooms_manage',
       });
       const res = await uploadCatalogImageToStorage({
         folder: 'showrooms',
-        entityId: editing.id,
+        entityId: editing.id || `showroom-${Date.now()}`,
         file,
       });
       setEditing((prev) => (prev ? { ...prev, images: [res.downloadUrl] } : null));
@@ -5428,7 +5783,14 @@ export function AdminShowroomsPanel() {
     } catch (err) {
       setMsg({
         type: 'err',
-        text: err instanceof Error ? err.message : 'Unable to upload outlet photo.',
+        text: mapCatalogSaveError(err, 'showroom_photo_upload', {
+          collection: 'showrooms',
+          documentId: editing.id,
+          path: `showrooms/${editing.id}`,
+          operation: 'UPLOAD',
+          staffRole,
+          authSession,
+        }),
       });
     } finally {
       setUploadingPhoto(false);
@@ -5465,28 +5827,81 @@ export function AdminShowroomsPanel() {
     }
 
     const phone = editing.phone.trim();
-    if (phone.length < 5) {
-      setMsg({ type: 'err', text: 'Please enter a valid contact phone number (at least 5 characters).' });
+    if (phone.length < 5 || phone.length > 40) {
+      setMsg({ type: 'err', text: 'Please enter a valid contact phone number (5 to 40 characters).' });
       return;
     }
+
+    const rawLat = Number(editing.lat);
+    const rawLng = Number(editing.lng);
+    if (!Number.isFinite(rawLat) || rawLat < -90 || rawLat > 90) {
+      setMsg({ type: 'err', text: 'Latitude must be a valid number between -90 and 90.' });
+      return;
+    }
+    if (!Number.isFinite(rawLng) || rawLng < -180 || rawLng > 180) {
+      setMsg({ type: 'err', text: 'Longitude must be a valid number between -180 and 180.' });
+      return;
+    }
+
+    const mapUrlTrimmed = (editing.mapUrl || '').trim();
+    if (mapUrlTrimmed.length > 1000) {
+      setMsg({ type: 'err', text: 'Google Maps URL must be 1000 characters or fewer.' });
+      return;
+    }
+    if (mapUrlTrimmed && !/^https?:\/\/\S+$/i.test(mapUrlTrimmed)) {
+      setMsg({ type: 'err', text: 'Google Maps URL must start with http:// or https://.' });
+      return;
+    }
+
+    const rawImageUrl = editing.images?.[0]?.trim() || '';
+    let validatedImages = editing.images;
+    if (rawImageUrl) {
+      const imageCheck = validateProductImageUrl(rawImageUrl);
+      if (!imageCheck.valid) {
+        setMsg({ type: 'err', text: imageCheck.message });
+        return;
+      }
+      validatedImages = [imageCheck.normalizedUrl];
+    }
+
+    const targetId = isCreatingBrandNew
+      ? generateUniqueShowroomSlugId(nameEn, editing.id || `showroom-${Date.now()}`)
+      : editing.id;
+    const preflightIssues: string[] = [];
+    const existingIssues: string[] = [];
+    let authSession: VerifiedWriteSession | null = null;
 
     try {
       setBusyShowroomId(editing.id);
       setMsg(null);
-      await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'showrooms_manage',
       });
-      await persistShowroomDoc(editing, isNew ? 'create' : 'update');
+      const savedId = await persistShowroomDoc(
+        { ...editing, id: targetId, images: validatedImages },
+        isNew ? 'create' : 'update',
+        {
+          rejectIfAlreadyExists: isCreatingBrandNew,
+          preflightIssuesOut: preflightIssues,
+          existingIssuesOut: existingIssues,
+        }
+      );
       setEditing(null);
-      setMsg({ type: 'ok', text: `Saved outlet "${nameEn}" to Firestore.` });
+      setIsCreatingBrandNew(false);
+      setMsg({ type: 'ok', text: `Saved outlet "${nameEn}" (${savedId}) to Firestore.` });
     } catch (err) {
       setMsg({
         type: 'err',
         text: mapCatalogSaveError(err, 'showroom_save', {
-          path: `showrooms/${editing.id}`,
+          collection: 'showrooms',
+          documentId: targetId,
+          path: `showrooms/${targetId}`,
           operation: isNew ? 'CREATE' : 'UPDATE',
           staffRole,
+          authSession,
+          preflightIssues,
+          existingIssues,
         }),
       });
     } finally {
@@ -5497,13 +5912,55 @@ export function AdminShowroomsPanel() {
   const toggleShowroomVisibility = async (sr: Showroom) => {
     setBusyShowroomId(sr.id);
     setMsg(null);
+    let authSession: VerifiedWriteSession | null = null;
+    const preflightIssues: string[] = [];
+    const existingIssues: string[] = [];
     try {
-      await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'showrooms_manage',
       });
+      const firestore = requireDb();
+      const showroomRef = doc(firestore, 'showrooms', sr.id);
+      const existingSnap = await getDoc(showroomRef);
+      const existingData = existingSnap.exists()
+        ? (existingSnap.data() as Record<string, unknown>)
+        : undefined;
+      if (existingData) {
+        existingIssues.push(...inspectExistingShowroomIssues(existingData));
+      }
       const nextVisible = sr.visible === false;
-      await persistShowroomDoc({ ...sr, visible: nextVisible }, 'update');
+      if (existingSnap.exists() && isExistingShowroomDocRuleReady(existingData)) {
+        const minimalUpdate = {
+          visible: nextVisible,
+          updatedAt: serverTimestamp(),
+        };
+        assertValidShowroomWritePreflight(
+          {
+            docId: sr.id,
+            payload: minimalUpdate,
+            existingData,
+            isCreate: false,
+          },
+          preflightIssues
+        );
+        await updateDoc(showroomRef, minimalUpdate);
+        await logAdminActivity(
+          nextVisible ? 'show' : 'hide',
+          'showrooms',
+          sr.id,
+          sr.nameEn || sr.name
+        );
+      } else {
+        await persistShowroomDoc(
+          { ...sr, visible: nextVisible },
+          existingSnap.exists() ? 'update' : 'create',
+          {
+            preflightIssuesOut: preflightIssues,
+            existingIssuesOut: existingIssues,
+          }
+        );
+      }
       setMsg({
         type: 'ok',
         text: `"${sr.nameEn || sr.name}" is now ${nextVisible ? 'visible' : 'hidden'} on the website.`,
@@ -5512,9 +5969,14 @@ export function AdminShowroomsPanel() {
       setMsg({
         type: 'err',
         text: mapCatalogSaveError(err, 'showroom_visibility', {
+          collection: 'showrooms',
+          documentId: sr.id,
           path: `showrooms/${sr.id}`,
           operation: 'UPDATE',
           staffRole,
+          authSession,
+          preflightIssues,
+          existingIssues,
         }),
       });
     } finally {
@@ -5523,15 +5985,52 @@ export function AdminShowroomsPanel() {
   };
 
   const nudgeShowroomOrder = async (sr: Showroom, delta: number) => {
-    const nextOrder = Math.min(1000, Math.max(1, (sr.display_order ?? 1) + delta));
+    const nextOrder = Math.min(1000, Math.max(1, Math.round(Number(sr.display_order ?? 1)) + delta));
     setBusyShowroomId(sr.id);
     setMsg(null);
+    let authSession: VerifiedWriteSession | null = null;
+    const preflightIssues: string[] = [];
+    const existingIssues: string[] = [];
     try {
-      await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'showrooms_manage',
       });
-      await persistShowroomDoc({ ...sr, display_order: nextOrder }, 'update');
+      const firestore = requireDb();
+      const showroomRef = doc(firestore, 'showrooms', sr.id);
+      const existingSnap = await getDoc(showroomRef);
+      const existingData = existingSnap.exists()
+        ? (existingSnap.data() as Record<string, unknown>)
+        : undefined;
+      if (existingData) {
+        existingIssues.push(...inspectExistingShowroomIssues(existingData));
+      }
+      if (existingSnap.exists() && isExistingShowroomDocRuleReady(existingData)) {
+        const orderUpdate = {
+          display_order: nextOrder,
+          updatedAt: serverTimestamp(),
+        };
+        assertValidShowroomWritePreflight(
+          {
+            docId: sr.id,
+            payload: orderUpdate,
+            existingData,
+            isCreate: false,
+          },
+          preflightIssues
+        );
+        await updateDoc(showroomRef, orderUpdate);
+        await logAdminActivity('update', 'showrooms', sr.id, sr.nameEn || sr.name);
+      } else {
+        await persistShowroomDoc(
+          { ...sr, display_order: nextOrder },
+          existingSnap.exists() ? 'update' : 'create',
+          {
+            preflightIssuesOut: preflightIssues,
+            existingIssuesOut: existingIssues,
+          }
+        );
+      }
       setMsg({
         type: 'ok',
         text: `Updated display order for "${sr.nameEn || sr.name}" to #${nextOrder}.`,
@@ -5540,9 +6039,14 @@ export function AdminShowroomsPanel() {
       setMsg({
         type: 'err',
         text: mapCatalogSaveError(err, 'showroom_order', {
+          collection: 'showrooms',
+          documentId: sr.id,
           path: `showrooms/${sr.id}`,
           operation: 'UPDATE',
           staffRole,
+          authSession,
+          preflightIssues,
+          existingIssues,
         }),
       });
     } finally {
@@ -5555,8 +6059,9 @@ export function AdminShowroomsPanel() {
     const target = confirmDeleteTarget;
     setBusyShowroomId(target.id);
     setMsg(null);
+    let authSession: VerifiedWriteSession | null = null;
     try {
-      await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'showrooms_manage',
       });
@@ -5580,9 +6085,12 @@ export function AdminShowroomsPanel() {
       setMsg({
         type: 'err',
         text: mapCatalogSaveError(err, 'showroom_delete', {
+          collection: 'showrooms',
+          documentId: target.id,
           path: `showrooms/${target.id}`,
           operation: 'DELETE',
           staffRole,
+          authSession,
         }),
       });
     } finally {
@@ -5605,6 +6113,7 @@ export function AdminShowroomsPanel() {
           type="button"
           onClick={() => {
             setIsNew(true);
+            setIsCreatingBrandNew(true);
             setMsg(null);
             setEditing({
               id: `showroom-${Date.now()}`,
@@ -5639,7 +6148,7 @@ export function AdminShowroomsPanel() {
               images: [],
               isMain: false,
               visible: true,
-              display_order: allShowrooms.length + 1,
+              display_order: Math.min(1000, allShowrooms.length + 1),
             });
           }}
           className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-4 py-2 text-xs font-semibold text-white hover:bg-[#DC1F26]"
@@ -5710,13 +6219,23 @@ export function AdminShowroomsPanel() {
           <div className="flex items-center justify-between border-b border-[#F5F4F0] pb-3 sm:col-span-2">
             <div>
               <h3 className="font-display text-lg font-bold text-[#1C1917]">
-                {isNew ? 'Add New Outlet' : `Edit Outlet · ${editing.nameEn || editing.name}`}
+                {isCreatingBrandNew
+                  ? 'Add New Outlet'
+                  : `Edit Outlet · ${editing.nameEn || editing.name}`}
               </h3>
-              <p className="font-mono text-[11px] text-[#78716C]">ID: {editing.id}</p>
+              <p className="font-mono text-[11px] text-[#78716C]">
+                ID:{' '}
+                {isCreatingBrandNew
+                  ? generateUniqueShowroomSlugId(editing.nameEn || '', editing.id)
+                  : editing.id}
+              </p>
             </div>
             <button
               type="button"
-              onClick={() => setEditing(null)}
+              onClick={() => {
+                setEditing(null);
+                setIsCreatingBrandNew(false);
+              }}
               className="cursor-pointer rounded-lg p-1.5 text-[#78716C] hover:bg-[#F5F4F0]"
             >
               <X className="h-4 w-4" />
@@ -5759,7 +6278,9 @@ export function AdminShowroomsPanel() {
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs font-semibold">Area (বাংলা) *</label>
+            <label className="mb-1 block text-xs font-semibold">
+              Area (বাংলা) <span className="font-normal text-[#78716C]">(optional · defaults from English)</span>
+            </label>
             <input
               type="text"
               value={editing.area}
@@ -5808,7 +6329,9 @@ export function AdminShowroomsPanel() {
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs font-semibold">Alternate Phone / Email</label>
+            <label className="mb-1 block text-xs font-semibold">
+              Alternate Phone / Email <span className="font-normal text-[#78716C]">(optional)</span>
+            </label>
             <div className="grid grid-cols-2 gap-2">
               <input
                 type="text"
@@ -5840,7 +6363,9 @@ export function AdminShowroomsPanel() {
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs font-semibold">Full Address (বাংলা) *</label>
+            <label className="mb-1 block text-xs font-semibold">
+              Full Address (বাংলা) <span className="font-normal text-[#78716C]">(optional · defaults from English)</span>
+            </label>
             <input
               type="text"
               value={editing.address}
@@ -5852,7 +6377,9 @@ export function AdminShowroomsPanel() {
           </div>
 
           <div>
-            <label className="mb-1 block text-xs font-semibold">Counter Hours (English)</label>
+            <label className="mb-1 block text-xs font-semibold">
+              Counter Hours (English) <span className="font-normal text-[#78716C]">(optional)</span>
+            </label>
             <input
               type="text"
               value={editing.openingHoursEn ?? ''}
@@ -5862,7 +6389,9 @@ export function AdminShowroomsPanel() {
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs font-semibold">Counter Hours (বাংলা) *</label>
+            <label className="mb-1 block text-xs font-semibold">
+              Counter Hours (বাংলা) <span className="font-normal text-[#78716C]">(optional · defaults automatically)</span>
+            </label>
             <input
               type="text"
               value={editing.openingHours}
@@ -5893,7 +6422,9 @@ export function AdminShowroomsPanel() {
           </div>
 
           <div>
-            <label className="mb-1 block text-xs font-semibold">Google Maps URL</label>
+            <label className="mb-1 block text-xs font-semibold">
+              Google Maps URL <span className="font-normal text-[#78716C]">(optional · auto-generated if empty)</span>
+            </label>
             <input
               type="url"
               value={editing.mapUrl}
@@ -5931,7 +6462,9 @@ export function AdminShowroomsPanel() {
           </div>
 
           <div>
-            <label className="mb-1 block text-xs font-semibold">Latitude</label>
+            <label className="mb-1 block text-xs font-semibold">
+              Latitude <span className="font-normal text-[#78716C]">(optional · -90 to 90)</span>
+            </label>
             <input
               type="number"
               step="any"
@@ -5941,7 +6474,9 @@ export function AdminShowroomsPanel() {
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs font-semibold">Longitude</label>
+            <label className="mb-1 block text-xs font-semibold">
+              Longitude <span className="font-normal text-[#78716C]">(optional · -180 to 180)</span>
+            </label>
             <input
               type="number"
               step="any"
@@ -6037,7 +6572,10 @@ export function AdminShowroomsPanel() {
           <div className="flex justify-end gap-2 sm:col-span-2">
             <button
               type="button"
-              onClick={() => setEditing(null)}
+              onClick={() => {
+                setEditing(null);
+                setIsCreatingBrandNew(false);
+              }}
               className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold"
             >
               Cancel
@@ -6193,6 +6731,7 @@ export function AdminShowroomsPanel() {
                     disabled={isBusy}
                     onClick={() => {
                       setIsNew(!hasOverride);
+                      setIsCreatingBrandNew(false);
                       setMsg(null);
                       setEditing({
                         ...sr,
@@ -6262,6 +6801,12 @@ export function AdminShowroomsPanel() {
                 ? `This removes custom Firestore overrides for "${confirmDeleteTarget.nameEn || confirmDeleteTarget.name}" and restores the official baseline configuration.`
                 : `This permanently deletes custom outlet "${confirmDeleteTarget.nameEn || confirmDeleteTarget.name}" from Firestore.`}
             </p>
+            {!canonicalIds.has(confirmDeleteTarget.id) && linkedProductsCount > 0 && (
+              <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-2.5 text-[11px] text-amber-950">
+                <span className="font-bold">Impact Notice:</span>{' '}
+                <span className="tabular-nums font-semibold">{linkedProductsCount}</span> active product(s) currently reference outlet ID <code className="font-mono">{confirmDeleteTarget.id}</code>. Those products will not be deleted, and their outlet tags will remain unchanged unless updated in Products.
+              </div>
+            )}
             <div className="mt-5 flex justify-end gap-2">
               <button
                 type="button"

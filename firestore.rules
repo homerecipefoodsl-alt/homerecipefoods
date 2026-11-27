@@ -161,20 +161,23 @@ service cloud.firestore {
     function hasCatalogWritePerm(perm) {
       return hasVerifiedEmail() && (
         (exists(/databases/$(database)/documents/admins/$(request.auth.uid))
-          && adminDoc().get('active', false) == true
+          && ('role' in adminDoc())
+          && (adminDoc().get('active', false) == true
+            || adminDoc().get('isActive', false) == true
+            || adminDoc().get('status', '') == 'active')
+          && adminDoc().get('active', true) != false
           && adminDoc().get('isActive', true) != false
           && !(adminDoc().get('status', '') in ['disabled', 'suspended', 'inactive', 'revoked'])
           && adminDoc().get('email', authEmail()).trim().lower() == authEmail()
           && (adminDoc().role in ['primary_super_admin', 'super_admin']
-            || (adminDoc().role in ['admin', 'manager', 'editor']
-              && perm in adminDoc().get('permissions', ['products_add', 'products_edit', 'categories_manage']))))
+            || hasRolePermission(adminDoc(), perm)))
         || (!exists(/databases/$(database)/documents/admins/$(request.auth.uid))
           && exists(/databases/$(database)/documents/rbac_roles/$(authEmail()))
+          && ('role' in rbacDoc())
           && rbacDoc().get('status', '') == 'active'
           && rbacDoc().get('email', authEmail()).trim().lower() == authEmail()
           && (rbacDoc().role in ['primary_super_admin', 'super_admin']
-            || (rbacDoc().role in ['admin', 'manager', 'editor']
-              && perm in rbacDoc().get('permissions', ['products_add', 'products_edit', 'categories_manage']))))
+            || hasRolePermission(rbacDoc(), perm)))
       );
     }
 
@@ -484,7 +487,7 @@ service cloud.firestore {
         && (!('region' in data) || (data.region is string && data.region.size() <= 100))
         && (!('orderLineEn' in data) || (data.orderLineEn is string && data.orderLineEn.size() <= 160))
         && (!('orderLineBn' in data) || (data.orderLineBn is string && data.orderLineBn.size() <= 160))
-        && data.mapUrl is string && data.mapUrl.size() >= 1 && data.mapUrl.size() <= 600
+        && data.mapUrl is string && data.mapUrl.size() >= 1 && data.mapUrl.size() <= 1000
         && data.lat is number && data.lat >= -90 && data.lat <= 90
         && data.lng is number && data.lng >= -180 && data.lng <= 180
         && (!('images' in data) || isBoundedStringList(data.images, 6, 400000))
@@ -494,6 +497,7 @@ service cloud.firestore {
         && (!('visible' in data) || data.visible is bool)
         && (!('deleted' in data) || data.deleted is bool)
         && (!('display_order' in data) || (data.display_order is int && data.display_order >= 0 && data.display_order <= 1000))
+        && (!('archivedAt' in data) || data.archivedAt is timestamp || (data.archivedAt is string && data.archivedAt.size() <= 80))
         && (!('seoTitle' in data) || (data.seoTitle is string && data.seoTitle.size() <= 200))
         && (!('seoDescription' in data) || (data.seoDescription is string && data.seoDescription.size() <= 400))
         && data.createdAt is timestamp
@@ -1384,13 +1388,13 @@ service cloud.firestore {
     match /showrooms/{showroomId} {
       allow get: if isValidId(showroomId);
       allow list: if true;
-      allow create: if hasPermission('showrooms_manage')
+      allow create: if hasCatalogWritePerm('showrooms_manage')
         && isValidId(showroomId)
         && isValidShowroom(incoming())
         && incoming().id == showroomId
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if hasPermission('showrooms_manage')
+      allow update: if hasCatalogWritePerm('showrooms_manage')
         && isValidId(showroomId)
         && isValidShowroom(incoming())
         && (
@@ -1450,7 +1454,7 @@ service cloud.firestore {
               'createdAt', 'updatedAt'
             ]))
         );
-      allow delete: if hasPermission('showrooms_manage') && isValidId(showroomId);
+      allow delete: if hasCatalogWritePerm('showrooms_manage') && isValidId(showroomId);
     }
 
     match /greetings/{greetingId} {

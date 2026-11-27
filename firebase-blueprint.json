@@ -201,7 +201,7 @@
         "region": { "type": "string", "minLength": 0, "maxLength": 100 },
         "orderLineEn": { "type": "string", "minLength": 0, "maxLength": 160 },
         "orderLineBn": { "type": "string", "minLength": 0, "maxLength": 160 },
-        "mapUrl": { "type": "string", "minLength": 1, "maxLength": 600 },
+        "mapUrl": { "type": "string", "minLength": 1, "maxLength": 1000 },
         "lat": { "type": "number" },
         "lng": { "type": "number" },
         "isMain": { "type": "boolean" },
