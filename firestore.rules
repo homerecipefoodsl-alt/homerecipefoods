@@ -168,14 +168,14 @@ service cloud.firestore {
           && adminDoc().get('active', true) != false
           && adminDoc().get('isActive', true) != false
           && !(adminDoc().get('status', '') in ['disabled', 'suspended', 'inactive', 'revoked'])
-          && adminDoc().get('email', authEmail()).trim().lower() == authEmail()
+          && (!('email' in adminDoc()) || (adminDoc().email is string && adminDoc().email.trim().lower() == authEmail()))
           && (adminDoc().role in ['primary_super_admin', 'super_admin']
             || hasRolePermission(adminDoc(), perm)))
         || (!exists(/databases/$(database)/documents/admins/$(request.auth.uid))
           && exists(/databases/$(database)/documents/rbac_roles/$(authEmail()))
           && ('role' in rbacDoc())
           && rbacDoc().get('status', '') == 'active'
-          && rbacDoc().get('email', authEmail()).trim().lower() == authEmail()
+          && (!('email' in rbacDoc()) || (rbacDoc().email is string && rbacDoc().email.trim().lower() == authEmail()))
           && (rbacDoc().role in ['primary_super_admin', 'super_admin']
             || hasRolePermission(rbacDoc(), perm)))
       );

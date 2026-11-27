@@ -1125,7 +1125,9 @@ function mapCatalogSaveError(
     return 'প্রদত্ত তথ্যের ফরম্যাট বা ধরন সঠিক নয় (invalid-argument)। অনুগ্রহ করে ঘরগুলো যাচাই করে আবার চেষ্টা করুন।';
   }
   if (rawCode === 'not-found' || rawCode.endsWith('/not-found')) {
-    return 'সংশ্লিষ্ট ডকুমেন্টটি Firestore-এ পাওয়া যায়নি (not-found)। পৃষ্ঠা রিলোড করে আবার চেষ্টা করুন।';
+    return err instanceof CatalogAuthError && err.message
+      ? err.message
+      : 'সংশ্লিষ্ট ডকুমেন্টটি Firestore-এ পাওয়া যায়নি (not-found)। পৃষ্ঠা রিলোড করে আবার চেষ্টা করুন।';
   }
   if (rawCode === 'aborted' || rawCode.endsWith('/aborted')) {
     return 'ডাটাবেস আপডেট কনফ্লিক্টের কারণে বাতিল হয়েছে (aborted)। অনুগ্রহ করে আবার চেষ্টা করুন।';
@@ -5771,9 +5773,36 @@ export function AdminShowroomsPanel() {
     return updatePayload;
   };
 
+  const logShowroomSaveDebug = (params: {
+    mode: 'CREATE' | 'UPDATE';
+    documentId: string;
+    method: 'setDoc' | 'updateDoc';
+    authSession?: VerifiedWriteSession | null;
+    editingExistingDocument: boolean;
+    existingDocument: boolean;
+    payload: Record<string, unknown>;
+  }) => {
+    const uid = params.authSession?.uid ?? auth?.currentUser?.uid ?? null;
+    const role = params.authSession?.rbacRole ?? staffRole ?? null;
+    const fields = Object.keys(params.payload);
+    console.info('[SHOWROOM_SAVE_DEBUG]', {
+      mode: params.mode,
+      collection: 'showrooms',
+      documentId: params.documentId,
+      method: params.method,
+      uid,
+      adminRole: role,
+      editingExistingDocument: params.editingExistingDocument,
+      documentIdExists: Boolean(params.documentId),
+      existingDocument: params.existingDocument,
+      fields,
+    });
+  };
+
   const createNewShowroomDoc = async (
     sr: Showroom,
     opts?: {
+      authSession?: VerifiedWriteSession | null;
       preflightIssuesOut?: string[];
       onOperation?: (op: 'CREATE' | 'UPDATE') => void;
     }
@@ -5812,6 +5841,15 @@ export function AdminShowroomsPanel() {
       },
       opts?.preflightIssuesOut
     );
+    logShowroomSaveDebug({
+      mode: 'CREATE',
+      documentId: targetId,
+      method: 'setDoc',
+      authSession: opts?.authSession,
+      editingExistingDocument: false,
+      existingDocument: existingSnap.exists(),
+      payload: createPayload,
+    });
     await setDoc(showroomRef, createPayload);
     const titleLabel = String(createPayload.nameEn || createPayload.name || targetId);
     await logAdminActivity('create', 'showrooms', targetId, titleLabel);
@@ -5822,6 +5860,8 @@ export function AdminShowroomsPanel() {
     sr: Showroom,
     original: Showroom | null,
     opts?: {
+      authSession?: VerifiedWriteSession | null;
+      hadFirestoreDoc?: boolean;
       preflightIssuesOut?: string[];
       existingIssuesOut?: string[];
       onOperation?: (op: 'CREATE' | 'UPDATE') => void;
@@ -5849,6 +5889,15 @@ export function AdminShowroomsPanel() {
         },
         opts?.preflightIssuesOut
       );
+      logShowroomSaveDebug({
+        mode: 'UPDATE',
+        documentId: targetId,
+        method: 'updateDoc',
+        authSession: opts?.authSession,
+        editingExistingDocument: true,
+        existingDocument: true,
+        payload: updatePayload,
+      });
       await updateDoc(showroomRef, updatePayload);
       const titleLabel = String(
         updatePayload.nameEn || existingData.nameEn || sr.nameEn || sr.name || targetId
@@ -5857,7 +5906,15 @@ export function AdminShowroomsPanel() {
       return { id: targetId, operation: 'UPDATE' as const };
     }
 
-    // Canonical baseline outlet has no Firestore document yet: create its initial record at its canonical ID
+    if (opts?.hadFirestoreDoc || !canonicalIds.has(targetId)) {
+      opts?.onOperation?.('UPDATE');
+      throw new CatalogAuthError(
+        'not-found',
+        'The showroom no longer exists. Refresh the page and try again.'
+      );
+    }
+
+    // Unseeded canonical baseline outlet from outletsData.ts: create its initial Firestore document at its exact canonical ID
     opts?.onOperation?.('CREATE');
     const payload = buildShowroomFirestorePayload({ ...sr, id: targetId });
     const createPayload: Record<string, unknown> = {
@@ -5872,6 +5929,15 @@ export function AdminShowroomsPanel() {
       },
       opts?.preflightIssuesOut
     );
+    logShowroomSaveDebug({
+      mode: 'CREATE',
+      documentId: targetId,
+      method: 'setDoc',
+      authSession: opts?.authSession,
+      editingExistingDocument: true,
+      existingDocument: false,
+      payload: createPayload,
+    });
     await setDoc(showroomRef, createPayload);
     const titleLabel = String(createPayload.nameEn || createPayload.name || targetId);
     await logAdminActivity('create', 'showrooms', targetId, titleLabel);
@@ -6037,16 +6103,22 @@ export function AdminShowroomsPanel() {
     }
 
     const isCreateMode = formMode === 'create';
+    const editTargetId = (editingOriginal?.id || editing.id || '').trim();
+    if (!isCreateMode && !/^[a-zA-Z0-9_-]{1,128}$/.test(editTargetId)) {
+      setMsg({ type: 'err', text: 'Invalid outlet document ID. Refresh the page and try again.' });
+      return;
+    }
     const targetId = isCreateMode
       ? generateUniqueShowroomSlugId(nameEn, editing.id || `showroom-${Date.now()}`)
-      : editing.id;
+      : editTargetId;
+    const hadFirestoreDoc = !isCreateMode && firestoreOverrideIds.has(targetId);
     const preflightIssues: string[] = [];
     const existingIssues: string[] = [];
     let authSession: VerifiedWriteSession | null = null;
     let executedOperation: 'CREATE' | 'UPDATE' = isCreateMode ? 'CREATE' : 'UPDATE';
 
     try {
-      setBusyShowroomId(editing.id);
+      setBusyShowroomId(targetId);
       setMsg(null);
       authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
@@ -6055,6 +6127,7 @@ export function AdminShowroomsPanel() {
       const draft: Showroom = { ...editing, id: targetId, images: validatedImages };
       const savedId = isCreateMode
         ? await createNewShowroomDoc(draft, {
+            authSession,
             preflightIssuesOut: preflightIssues,
             onOperation: (op) => {
               executedOperation = op;
@@ -6062,6 +6135,8 @@ export function AdminShowroomsPanel() {
           })
         : (
             await updateExistingShowroomDoc(draft, editingOriginal, {
+              authSession,
+              hadFirestoreDoc,
               preflightIssuesOut: preflightIssues,
               existingIssuesOut: existingIssues,
               onOperation: (op) => {
@@ -6134,6 +6209,15 @@ export function AdminShowroomsPanel() {
           },
           preflightIssues
         );
+        logShowroomSaveDebug({
+          mode: 'UPDATE',
+          documentId: sr.id,
+          method: 'updateDoc',
+          authSession,
+          editingExistingDocument: true,
+          existingDocument: true,
+          payload: minimalUpdate,
+        });
         await updateDoc(showroomRef, minimalUpdate);
         await logAdminActivity(
           nextVisible ? 'show' : 'hide',
@@ -6142,8 +6226,9 @@ export function AdminShowroomsPanel() {
           sr.nameEn || sr.name
         );
       } else {
-        executedOperation = 'CREATE';
         await updateExistingShowroomDoc({ ...sr, visible: nextVisible }, sr, {
+          authSession,
+          hadFirestoreDoc: firestoreOverrideIds.has(sr.id),
           preflightIssuesOut: preflightIssues,
           existingIssuesOut: existingIssues,
           onOperation: (op) => {
@@ -6210,11 +6295,21 @@ export function AdminShowroomsPanel() {
           },
           preflightIssues
         );
+        logShowroomSaveDebug({
+          mode: 'UPDATE',
+          documentId: sr.id,
+          method: 'updateDoc',
+          authSession,
+          editingExistingDocument: true,
+          existingDocument: true,
+          payload: orderUpdate,
+        });
         await updateDoc(showroomRef, orderUpdate);
         await logAdminActivity('update', 'showrooms', sr.id, sr.nameEn || sr.name);
       } else {
-        executedOperation = 'CREATE';
         await updateExistingShowroomDoc({ ...sr, display_order: nextOrder }, sr, {
+          authSession,
+          hadFirestoreDoc: firestoreOverrideIds.has(sr.id),
           preflightIssuesOut: preflightIssues,
           existingIssuesOut: existingIssues,
           onOperation: (op) => {
