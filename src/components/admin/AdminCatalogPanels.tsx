@@ -26,8 +26,6 @@ import {
   deleteDoc,
   deleteField,
   doc,
-  getDoc,
-  getDocFromServer,
   serverTimestamp,
   setDoc,
   updateDoc,
@@ -54,7 +52,6 @@ import {
 import {
   OperationType,
   auth,
-  firebasePublicInfo,
   handleFirestoreError,
   requireDb,
 } from '../../lib/firebase';
@@ -67,20 +64,21 @@ import {
   validateCatalogImageFile,
   validateProductImageUrl,
 } from '../../lib/productStorage';
-import { fetchDocFromServer, safeDeleteUnreferencedR2Urls } from '../../lib/adminDb';
-import { formatBdtPrice, toSlug } from '../../lib/utils';
 import {
-  DEFAULT_ROLE_PERMISSIONS,
-  isSuperAdminRole,
-  type AdminRecord,
-  type Category,
-  type Occasion,
-  type PermissionKey,
-  type Product,
-  type ProductAvailability,
-  type RbacRoleEntry,
-  type Showroom,
-  type StaffRole,
+  AdminAuthError,
+  ensureVerifiedAdminWriteSession,
+  fetchDocFromServer,
+  formatAdminFirestoreError,
+  safeDeleteUnreferencedR2Urls,
+  type VerifiedWriteSession,
+} from '../../lib/adminDb';
+import { formatBdtPrice, toSlug } from '../../lib/utils';
+import type {
+  Category,
+  Occasion,
+  Product,
+  ProductAvailability,
+  Showroom,
 } from '../../types';
 
 const REQUIRED_PRODUCT_SCHEMA_KEYS = [
@@ -224,273 +222,6 @@ const VALID_AVAILABILITIES: ReadonlySet<ProductAvailability> = new Set([
 ]);
 
 const VALID_PRODUCT_STATUSES = new Set(['draft', 'published', 'archived']);
-
-class CatalogAuthError extends Error {
-  code: string;
-  constructor(code: string, message: string) {
-    super(message);
-    this.code = code;
-    this.name = 'CatalogAuthError';
-  }
-}
-
-interface VerifiedWriteSession {
-  uid: string;
-  email: string;
-  emailVerified: boolean;
-  tokenEmailVerified: boolean;
-  tokenEmail: string;
-  claimsRole: string | null;
-  hrfStaffClaim: boolean;
-  rbacSource: 'admins' | 'rbac_roles';
-  rbacRole: string | null;
-  rbacStatus: string | null;
-}
-
-function hasRolePermissionFallback(role: string | undefined, perm: PermissionKey): boolean {
-  if (isSuperAdminRole(role)) return true;
-  if (
-    role === 'admin' ||
-    role === 'manager' ||
-    role === 'editor' ||
-    role === 'moderator' ||
-    role === 'support_agent'
-  ) {
-    return (DEFAULT_ROLE_PERMISSIONS[role as StaffRole] ?? []).includes(perm);
-  }
-  return false;
-}
-
-async function ensureVerifiedAdminWriteSession(params: {
-  hasPermission: (perm: PermissionKey) => boolean;
-  requiredPermission: PermissionKey;
-}): Promise<VerifiedWriteSession> {
-  const currentUser = auth?.currentUser;
-  if (!currentUser || !currentUser.email) {
-    throw new CatalogAuthError(
-      'auth/unauthenticated',
-      'আপনার লগইন সেশন পাওয়া যায়নি বা শেষ হয়ে গেছে। অনুগ্রহ করে পুনরায় লগইন করুন।'
-    );
-  }
-
-  if (
-    currentUser.providerData.length > 0 &&
-    !currentUser.providerData.some((p) => p.providerId === 'password')
-  ) {
-    throw new CatalogAuthError(
-      'auth/unauthenticated',
-      'অ্যাডমিন পরিবর্তনের জন্য ইমেইল ও পাসওয়ার্ড দিয়ে লগইন থাকা প্রয়োজন।'
-    );
-  }
-
-  if (!currentUser.emailVerified) {
-    try {
-      await currentUser.reload();
-    } catch {
-      // Proceed to re-check current flag
-    }
-  }
-
-  const refreshedUser = auth?.currentUser || currentUser;
-  if (!refreshedUser.emailVerified) {
-    throw new CatalogAuthError(
-      'auth/email-unverified',
-      'আপনার অ্যাডমিন ইমেইল এখনো ভেরিফাইড নয়। অনুগ্রহ করে ইমেইল ভেরিফাই করে আবার চেষ্টা করুন।'
-    );
-  }
-
-  const emailLower = (refreshedUser.email || currentUser.email).trim().toLowerCase();
-  let claimsRole: string | null = null;
-  let hrfStaffClaim = false;
-  let tokenEmailVerified = false;
-  let tokenEmail = '';
-
-  try {
-    let tokenResult = await refreshedUser.getIdTokenResult();
-    if (tokenResult.claims.email_verified !== true) {
-      await refreshedUser.getIdToken(true);
-      tokenResult = await refreshedUser.getIdTokenResult();
-    }
-    tokenEmailVerified = tokenResult.claims.email_verified === true;
-    tokenEmail =
-      typeof tokenResult.claims.email === 'string'
-        ? tokenResult.claims.email.trim().toLowerCase()
-        : '';
-    claimsRole = typeof tokenResult.claims.role === 'string' ? tokenResult.claims.role : null;
-    hrfStaffClaim = tokenResult.claims.hrf_staff === true;
-  } catch {
-    throw new CatalogAuthError(
-      'auth/token-refresh-failed',
-      'আপনার লগইন টোকেন যাচাই/রিফ্রেশ করা যায়নি। অনুগ্রহ করে সাইন আউট করে পুনরায় লগইন করুন।'
-    );
-  }
-
-  if (!tokenEmailVerified) {
-    throw new CatalogAuthError(
-      'auth/email-unverified',
-      'Firebase Auth টোকেনে ইমেইল ভেরিফিকেশন এখনো আপডেট হয়নি (email_verified=false)। অনুগ্রহ করে সাইন আউট করে পুনরায় লগইন করুন।'
-    );
-  }
-
-  if (!tokenEmail || tokenEmail !== emailLower) {
-    throw new CatalogAuthError(
-      'auth/token-claim-mismatch',
-      'অ্যাডমিন টোকেনের ইমেইল ও বর্তমান সেশনের ইমেইল মেলেনি। অনুগ্রহ করে পুনরায় লগইন করুন।'
-    );
-  }
-
-  const firestore = requireDb();
-  let rbacSource: VerifiedWriteSession['rbacSource'] = 'admins';
-  let rbacRole: string | null = null;
-  let rbacStatus: string | null = null;
-  let serverRecordVerified = false;
-
-  // Primary Authority: /admins/{uid}
-  let adminSnap;
-  try {
-    adminSnap = await getDoc(doc(firestore, 'admins', refreshedUser.uid));
-  } catch {
-    throw new CatalogAuthError(
-      'rbac/read-failed',
-      `Firestore থেকে অ্যাডমিন অথরিটি ডকুমেন্ট (admins/${refreshedUser.uid}) যাচাই করা যায়নি।`
-    );
-  }
-
-  if (adminSnap.exists()) {
-    const adminData = adminSnap.data() as AdminRecord & { isActive?: boolean };
-    rbacSource = 'admins';
-    rbacRole = adminData.role || null;
-
-    if (
-      typeof adminData.uid === 'string' &&
-      adminData.uid.trim() &&
-      adminData.uid.trim() !== refreshedUser.uid
-    ) {
-      throw new CatalogAuthError(
-        'rbac/account-mismatch',
-        'অ্যাডমিন ডকুমেন্টের UID বর্তমান লগইন UID-এর সাথে মিলছে না।'
-      );
-    }
-
-    if (adminData.email !== undefined && adminData.email !== null && typeof adminData.email !== 'string') {
-      throw new CatalogAuthError(
-        'rbac/account-mismatch',
-        'অ্যাডমিন ডকুমেন্টের ইমেইল ফিল্ডের ধরন সঠিক নয়।'
-      );
-    }
-
-    if (
-      typeof adminData.email === 'string' &&
-      adminData.email.trim() &&
-      adminData.email.trim().toLowerCase() !== emailLower
-    ) {
-      throw new CatalogAuthError(
-        'rbac/account-mismatch',
-        'অ্যাডমিন ডকুমেন্টের ইমেইলের সাথে বর্তমান লগইন ইমেইল মিলছে না।'
-      );
-    }
-
-    const rawStatus =
-      typeof adminData.status === 'string' ? adminData.status.trim().toLowerCase() : '';
-    const hasActiveTrue =
-      adminData.active === true ||
-      adminData.isActive === true ||
-      rawStatus === 'active';
-    const hasExplicitInactive =
-      adminData.active === false ||
-      adminData.isActive === false ||
-      rawStatus === 'disabled' ||
-      rawStatus === 'suspended' ||
-      rawStatus === 'inactive' ||
-      rawStatus === 'revoked';
-    const isAdminRecordActive = hasActiveTrue && !hasExplicitInactive;
-    rbacStatus = isAdminRecordActive
-      ? adminData.status || 'active'
-      : adminData.status || 'disabled';
-
-    if (!isAdminRecordActive) {
-      throw new CatalogAuthError(
-        'rbac/account-inactive',
-        'আপনার অ্যাডমিন অ্যাকাউন্টটি নিষ্ক্রিয় বা সাসপেন্ড অবস্থায় রয়েছে।'
-      );
-    }
-
-    const allowedByAdmin =
-      isSuperAdminRole(adminData.role) ||
-      (Array.isArray(adminData.permissions)
-        ? adminData.permissions.includes(params.requiredPermission)
-        : hasRolePermissionFallback(adminData.role, params.requiredPermission));
-
-    if (!allowedByAdmin) {
-      throw new CatalogAuthError(
-        'rbac/missing-permission',
-        `আপনার "${adminData.role}" অ্যাকাউন্টে "${params.requiredPermission}" অনুমতি নেই।`
-      );
-    }
-    serverRecordVerified = true;
-  } else {
-    // Fallback Authority ONLY when /admins/{uid} does not exist: /rbac_roles/{emailLower}
-    let rbacSnap;
-    try {
-      rbacSnap = await getDoc(doc(firestore, 'rbac_roles', emailLower));
-    } catch {
-      throw new CatalogAuthError(
-        'rbac/read-failed',
-        'Firestore থেকে অ্যাডমিন রোল ডকুমেন্ট যাচাই করা যায়নি। অনুগ্রহ করে পরে আবার চেষ্টা করুন।'
-      );
-    }
-
-    if (rbacSnap.exists()) {
-      const rbacData = rbacSnap.data() as RbacRoleEntry;
-      rbacSource = 'rbac_roles';
-      rbacRole = rbacData.role || null;
-      rbacStatus = rbacData.status || 'disabled';
-      if (rbacData.status !== 'active') {
-        throw new CatalogAuthError(
-          'rbac/account-inactive',
-          'আপনার অ্যাডমিন/স্টাফ অ্যাকাউন্টটি সক্রিয় নয় বা সাসপেন্ড করা হয়েছে।'
-        );
-      }
-      const allowedByRbac =
-        isSuperAdminRole(rbacData.role) ||
-        (Array.isArray(rbacData.permissions)
-          ? rbacData.permissions.includes(params.requiredPermission)
-          : hasRolePermissionFallback(rbacData.role, params.requiredPermission));
-      if (!allowedByRbac) {
-        throw new CatalogAuthError(
-          'rbac/missing-permission',
-          `আপনার "${rbacData.role}" রোলে "${params.requiredPermission}" অনুমতি নেই।`
-        );
-      }
-      serverRecordVerified = true;
-    } else {
-      throw new CatalogAuthError(
-        'rbac/admin-record-missing',
-        `Firestore-এ আপনার অ্যাডমিন অথরিটি ডকুমেন্ট (admins/${refreshedUser.uid}) পাওয়া যায়নি। অনুগ্রহ করে সক্রিয় Super Admin রেকর্ড নিশ্চিত করুন।`
-      );
-    }
-  }
-
-  if (!serverRecordVerified || !params.hasPermission(params.requiredPermission)) {
-    throw new CatalogAuthError(
-      'rbac/missing-permission',
-      `এই কাজের জন্য "${params.requiredPermission}" অ্যাডমিন অনুমতি প্রয়োজন। অনুগ্রহ করে সুপার অ্যাডমিনের সাথে যোগাযোগ করুন।`
-    );
-  }
-
-  return {
-    uid: refreshedUser.uid,
-    email: emailLower,
-    emailVerified: refreshedUser.emailVerified,
-    tokenEmailVerified,
-    tokenEmail,
-    claimsRole,
-    hrfStaffClaim,
-    rbacSource,
-    rbacRole,
-    rbacStatus,
-  };
-}
 
 function sanitizeStoredImageUrls(urls: unknown): string[] {
   if (!Array.isArray(urls)) return [];
@@ -926,7 +657,7 @@ function assertValidShowroomWritePreflight(
     if (preflightIssuesOut) {
       preflightIssuesOut.splice(0, preflightIssuesOut.length, ...issues);
     }
-    throw new CatalogAuthError(
+    throw new AdminAuthError(
       'validation/preflight-failed',
       `আউটলেটের কিছু ফিল্ড Firestore Security Rules-এর সাথে মিলছে না (${issues.slice(0, 4).join(', ')})। অনুগ্রহ করে ঘরগুলো যাচাই করে আবার চেষ্টা করুন।`
     );
@@ -1012,168 +743,545 @@ function assertValidProductWritePreflight(
     if (preflightIssuesOut) {
       preflightIssuesOut.splice(0, preflightIssuesOut.length, ...issues);
     }
-    throw new CatalogAuthError(
+    throw new AdminAuthError(
       'validation/preflight-failed',
       `পণ্যের কিছু ফিল্ড Firestore Security Rules-এর সাথে মিলছে না (${issues.slice(0, 4).join(', ')})। অনুগ্রহ করে ঘরগুলো যাচাই করে আবার চেষ্টা করুন।`
     );
   }
 }
 
-function mapCatalogSaveError(
-  err: unknown,
-  context: string,
-  diag?: {
-    collection?: string;
-    documentId?: string;
-    path?: string;
-    operation?: string;
-    staffRole?: string | null;
-    existingIssues?: string[];
-    preflightIssues?: string[];
-    authSession?: VerifiedWriteSession | null;
-  }
-): string {
-  const rawCode =
-    err && typeof err === 'object' && 'code' in err
-      ? String((err as { code?: unknown }).code || '').trim().toLowerCase()
-      : '';
-  const rawMessage = err instanceof Error ? err.message : String(err);
-  const lowerMessage = rawMessage.toLowerCase();
-  const activeUser = auth?.currentUser;
-  const resolvedCollection =
-    diag?.collection ?? (diag?.path ? diag.path.split('/')[0] : null);
-  const resolvedDocumentId =
-    diag?.documentId ??
-    (diag?.path && diag.path.includes('/') ? diag.path.split('/').slice(1).join('/') : null);
-  const resolvedAdminRole =
-    diag?.authSession?.rbacRole ?? diag?.staffRole ?? null;
-
-  const safeDiag = {
-    errorCode: rawCode || 'unknown',
-    message: rawMessage,
-    projectId: firebasePublicInfo.projectId,
-    collection: resolvedCollection,
-    documentId: resolvedDocumentId,
-    path: diag?.path ?? null,
-    operation: diag?.operation ?? null,
-    uid: diag?.authSession?.uid ?? activeUser?.uid ?? null,
-    email: diag?.authSession?.email ?? activeUser?.email ?? null,
-    emailVerified: diag?.authSession?.emailVerified ?? activeUser?.emailVerified ?? null,
-    tokenEmailVerified: diag?.authSession?.tokenEmailVerified ?? null,
-    adminRole: resolvedAdminRole,
-    rbacSource: diag?.authSession?.rbacSource ?? null,
-    rbacStatus: diag?.authSession?.rbacStatus ?? null,
-    existingIssues: diag?.existingIssues ?? [],
-    preflightIssues: diag?.preflightIssues ?? [],
-  };
-
-  console.error(`[CatalogSave:${context}]`, safeDiag);
-  const categoryPrefix = context.startsWith('category_')
-    ? 'Category could not be saved. '
+function buildNormalizedProductPayload(params: {
+  source: Product;
+  allCategories: Category[];
+  ingredientsList: string[];
+  sizesList: string[];
+  cleanImages: string[];
+  existingData?: Record<string, unknown>;
+  forFullSet?: boolean;
+  actorUid?: string;
+}): Record<string, unknown> {
+  const {
+    source,
+    allCategories,
+    ingredientsList,
+    sizesList,
+    cleanImages,
+    existingData,
+    forFullSet,
+    actorUid,
+  } = params;
+  const preservedValidId =
+    existingData &&
+    typeof existingData.id === 'string' &&
+    /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
+      ? existingData.id
+      : source.id;
+  const nameBn = String(source.name || source.nameBn || source.nameEn || 'পণ্য').trim().slice(0, 160) || 'পণ্য';
+  const nameEn = String(source.nameEn || source.name_en || nameBn).trim().slice(0, 160) || nameBn;
+  const resolvedCategorySlug = toSlug(
+    String(source.category || allCategories[0]?.slug || 'custom-cake').trim()
+  );
+  const catObj = allCategories.find((c) => c.slug === resolvedCategorySlug);
+  const catText = catObj ? getCategoryText(catObj) : null;
+  const slug = toSlug(String(source.slug || '').trim() || nameEn || nameBn);
+  const resolvedUnit = String((source.unit ?? source.priceUnit) || 'Piece').trim().slice(0, 60) || 'Piece';
+  const shortDescEn = String(source.shortDescriptionEn ?? source.short_description_en ?? '')
+    .trim()
+    .slice(0, 300);
+  const shortDescBn = (String(source.shortDescription || '').trim() || shortDescEn || nameBn).slice(0, 300);
+  const fullDescEn = String(source.descriptionEn ?? source.description_en ?? shortDescEn)
+    .trim()
+    .slice(0, 4000);
+  const fullDescBn = (
+    String(source.description || '').trim() ||
+    shortDescBn ||
+    fullDescEn ||
+    nameBn
+  ).slice(0, 4000);
+  const rawPrice = Number(source.price);
+  const numericPrice = Number.isFinite(rawPrice)
+    ? Math.min(1000000, Math.max(0, rawPrice))
+    : 0;
+  const rawDisplayOrder = Number(source.display_order);
+  const safeDisplayOrder = Number.isFinite(rawDisplayOrder)
+    ? Math.min(10000, Math.max(0, Math.round(rawDisplayOrder)))
+    : 1;
+  const safeAvailability: ProductAvailability = VALID_AVAILABILITIES.has(source.availability)
+    ? source.availability
+    : 'In Showroom';
+  const primaryImg = cleanImages[0] ?? '';
+  const resolvedImageKey = primaryImg
+    ? extractR2ImageKey(primaryImg) ||
+      (typeof source.imageKey === 'string' &&
+      source.imageKey.trim() &&
+      source.imageKey.trim() !== 'no-photo'
+        ? source.imageKey.trim().slice(0, 320)
+        : '')
+    : source.imageKey === 'no-photo'
+    ? 'no-photo'
     : '';
 
-  if (
-    rawCode === 'auth/unauthenticated' ||
-    rawCode === 'unauthenticated' ||
-    rawCode.endsWith('/unauthenticated') ||
-    lowerMessage.includes('unauthenticated')
-  ) {
-    return 'আপনার লগইন সেশন পাওয়া যায়নি বা শেষ হয়ে গেছে (unauthenticated)। অনুগ্রহ করে পুনরায় লগইন করুন।';
+  const payload: Record<string, unknown> = {
+    id: preservedValidId,
+    name: nameBn,
+    nameBn,
+    nameEn,
+    name_bn: nameBn,
+    name_en: nameEn,
+    slug,
+    category: resolvedCategorySlug,
+    categoryName: (
+      String(source.categoryName || '').trim() ||
+      catText?.nameBn ||
+      resolvedCategorySlug
+    )
+      .trim()
+      .slice(0, 120),
+    categoryNameEn: String(source.categoryNameEn || catText?.nameEn || '')
+      .trim()
+      .slice(0, 120),
+    productType: (String(source.productType || '').trim() || 'Bakery & Sweets').slice(0, 120),
+    price: numericPrice,
+    priceUnit: resolvedUnit,
+    unit: resolvedUnit,
+    shortDescription: shortDescBn,
+    shortDescriptionEn: shortDescEn,
+    short_description_bn: shortDescBn,
+    short_description_en: shortDescEn,
+    description: fullDescBn,
+    descriptionEn: fullDescEn,
+    description_bn: fullDescBn,
+    description_en: fullDescEn,
+    image: primaryImg,
+    imageUrl: primaryImg,
+    imageKey: resolvedImageKey,
+    images: cleanImages,
+    ingredients: ingredientsList
+      .map((s) => String(s).trim().slice(0, 120))
+      .filter(Boolean)
+      .slice(0, 25),
+    sizes: sizesList
+      .map((s) => String(s).trim().slice(0, 80))
+      .filter(Boolean)
+      .slice(0, 10),
+    weight: String(source.weight || '').trim().slice(0, 80),
+    occasions: (Array.isArray(source.occasions) ? source.occasions : [])
+      .map((o) => String(o).trim().slice(0, 80))
+      .filter(Boolean)
+      .slice(0, 15),
+    showrooms: (Array.isArray(source.showrooms) ? source.showrooms : [])
+      .map((sid) => String(sid).trim().slice(0, 128))
+      .filter((sid) => Boolean(sid) && !CONFIRMED_DEMO_SHOWROOM_IDS.has(sid))
+      .slice(0, 20),
+    availability: safeAvailability,
+    importantNotes: String(source.importantNotes || '').trim().slice(0, 800),
+    featured: Boolean(source.featured),
+    popular: Boolean(source.popular),
+    visible: source.visible !== false,
+    active: source.active !== false,
+    isActive: source.isActive !== false,
+    deleted: Boolean(source.deleted),
+    display_order: safeDisplayOrder,
+    status: source.deleted ? 'archived' : source.visible === false ? 'draft' : 'published',
+    updatedAt: serverTimestamp(),
+  };
+
+  if (source.masterKey) {
+    payload.masterKey = String(source.masterKey).slice(0, 240);
   }
-  if (rawCode === 'auth/email-unverified') {
-    return err instanceof Error && err.message
-      ? err.message
-      : 'আপনার অ্যাডমিন ইমেইল এখনো ভেরিফাইড নয় (auth/email-unverified)। ইমেইল ভেরিফাই করে পুনরায় চেষ্টা করুন।';
+
+  const categorySlugValue =
+    resolvedCategorySlug ||
+    (typeof source.categorySlug === 'string' && source.categorySlug.trim()
+      ? source.categorySlug.trim().slice(0, 160)
+      : typeof existingData?.categorySlug === 'string' && existingData.categorySlug.trim()
+      ? existingData.categorySlug.trim().slice(0, 160)
+      : '');
+  if (categorySlugValue) {
+    payload.categorySlug = categorySlugValue;
   }
-  if (rawCode === 'auth/token-claim-mismatch') {
-    return err instanceof Error && err.message
-      ? err.message
-      : 'অ্যাডমিন টোকেন ও সেশনের ইমেইল মেলেনি। অনুগ্রহ করে সাইন আউট করে পুনরায় লগইন করুন।';
+
+  const preserveIngredientsBn =
+    typeof source.ingredients_bn === 'string' && source.ingredients_bn.trim()
+      ? source.ingredients_bn.trim().slice(0, 600)
+      : typeof existingData?.ingredients_bn === 'string' && existingData.ingredients_bn.trim()
+      ? existingData.ingredients_bn.trim().slice(0, 600)
+      : '';
+  if (preserveIngredientsBn) {
+    payload.ingredients_bn = preserveIngredientsBn;
   }
-  if (rawCode === 'auth/token-refresh-failed') {
-    return 'লগইন টোকেন যাচাই করা যায়নি (auth/token-refresh-failed)। অনুগ্রহ করে সাইন আউট করে পুনরায় লগইন করুন।';
+
+  const preserveIngredientsEn =
+    typeof source.ingredients_en === 'string' && source.ingredients_en.trim()
+      ? source.ingredients_en.trim().slice(0, 600)
+      : typeof existingData?.ingredients_en === 'string' && existingData.ingredients_en.trim()
+      ? existingData.ingredients_en.trim().slice(0, 600)
+      : '';
+  if (preserveIngredientsEn) {
+    payload.ingredients_en = preserveIngredientsEn;
   }
-  if (rawCode === 'rbac/admin-record-missing') {
-    return err instanceof Error && err.message
-      ? `${err.message} (rbac/admin-record-missing)`
-      : 'Firestore-এ আপনার সক্রিয় অ্যাডমিন অথরিটি ডকুমেন্ট (admins/{uid}) পাওয়া যায়নি (rbac/admin-record-missing)।';
+
+  const rawRating =
+    typeof source.rating === 'number'
+      ? source.rating
+      : typeof existingData?.rating === 'number'
+      ? existingData.rating
+      : NaN;
+  if (Number.isFinite(rawRating) && rawRating >= 0 && rawRating <= 5) {
+    payload.rating = rawRating;
   }
-  if (rawCode === 'rbac/read-failed') {
-    return err instanceof Error && err.message
-      ? `${err.message} (rbac/read-failed)`
-      : 'Firestore থেকে অ্যাডমিন অথরিটি যাচাই করা যায়নি (rbac/read-failed)।';
+
+  if (typeof source.stock === 'number' && Number.isInteger(source.stock) && source.stock >= 0 && source.stock <= 1000000) {
+    payload.stock = source.stock;
+  } else if (source.stock === undefined && !forFullSet && existingData && 'stock' in existingData) {
+    payload.stock = deleteField();
+  } else if (forFullSet && typeof existingData?.stock === 'number' && Number.isInteger(existingData.stock) && existingData.stock >= 0 && existingData.stock <= 1000000) {
+    payload.stock = existingData.stock;
   }
-  if (rawCode === 'rbac/account-mismatch') {
-    return 'অ্যাডমিন রেকর্ডের ইমেইলের সাথে বর্তমান সেশনের ইমেইল মেলেনি (rbac/account-mismatch)।';
+
+  if (typeof source.sku === 'string') {
+    const trimmedSku = source.sku.trim().slice(0, 80);
+    if (trimmedSku) {
+      payload.sku = trimmedSku;
+    } else if (!forFullSet && existingData && 'sku' in existingData) {
+      payload.sku = deleteField();
+    }
+  } else if (typeof existingData?.sku === 'string' && existingData.sku.trim()) {
+    payload.sku = existingData.sku.trim().slice(0, 80);
   }
-  if (rawCode === 'rbac/account-inactive') {
-    return 'আপনার অ্যাডমিন অ্যাকাউন্টটি নিষ্ক্রিয় বা সাসপেন্ড অবস্থায় আছে (rbac/account-inactive)।';
+
+  const preserveSeoTitle =
+    typeof source.seoTitle === 'string' && source.seoTitle.trim()
+      ? source.seoTitle.trim().slice(0, 200)
+      : typeof existingData?.seoTitle === 'string' && existingData.seoTitle.trim()
+      ? existingData.seoTitle.trim().slice(0, 200)
+      : '';
+  if (preserveSeoTitle) {
+    payload.seoTitle = preserveSeoTitle;
   }
-  if (rawCode === 'rbac/missing-permission') {
-    return 'আপনার অ্যাকাউন্টে এই ক্যাটালগ পরিবর্তনের অনুমতি নেই (rbac/missing-permission)। অনুগ্রহ করে সুপার অ্যাডমিনের সাথে যোগাযোগ করুন।';
+
+  const preserveSeoDesc =
+    typeof source.seoDescription === 'string' && source.seoDescription.trim()
+      ? source.seoDescription.trim().slice(0, 400)
+      : typeof existingData?.seoDescription === 'string' && existingData.seoDescription.trim()
+      ? existingData.seoDescription.trim().slice(0, 400)
+      : '';
+  if (preserveSeoDesc) {
+    payload.seoDescription = preserveSeoDesc;
   }
-  if (rawCode === 'validation/preflight-failed' || rawCode.startsWith('validation/')) {
-    return err instanceof Error && err.message
-      ? err.message
-      : 'আবশ্যকীয় তথ্য Firestore নিয়মের সাথে মিলছে না। অনুগ্রহ করে ঘরগুলো যাচাই করুন।';
+
+  const candidateSeoImg =
+    typeof source.seoImage === 'string' &&
+    source.seoImage.trim() &&
+    !isForbiddenInlineImageUrl(source.seoImage)
+      ? source.seoImage.trim()
+      : typeof existingData?.seoImage === 'string' &&
+        existingData.seoImage.trim() &&
+        !isForbiddenInlineImageUrl(existingData.seoImage)
+      ? existingData.seoImage.trim()
+      : '';
+  if (candidateSeoImg && candidateSeoImg.length <= 400000) {
+    payload.seoImage = candidateSeoImg;
   }
-  if (
-    rawCode === 'permission-denied' ||
-    rawCode.endsWith('/permission-denied') ||
-    lowerMessage.includes('missing or insufficient permissions')
-  ) {
-    const diagParts = [
-      safeDiag.operation && safeDiag.path ? `${safeDiag.operation} ${safeDiag.path}` : null,
-      safeDiag.email ? `user:${safeDiag.email}` : null,
-      `verified:${String(safeDiag.emailVerified)}/${String(safeDiag.tokenEmailVerified)}`,
-      safeDiag.adminRole
-        ? `rbac:${safeDiag.adminRole}(${safeDiag.rbacSource || 'admins'})`
-        : safeDiag.rbacSource
-        ? `rbac:${safeDiag.rbacSource}`
-        : null,
-      safeDiag.preflightIssues.length > 0
-        ? `preflight:${safeDiag.preflightIssues.slice(0, 3).join(';')}`
-        : null,
-      safeDiag.existingIssues.length > 0
-        ? `docIssues:${safeDiag.existingIssues.slice(0, 3).join(';')}`
-        : null,
-    ].filter(Boolean);
-    const diagSuffix = diagParts.length > 0 ? ` [${diagParts.join(' · ')}]` : '';
-    return `${categoryPrefix}Firestore সংরক্ষণের অনুমতি দেয়নি (permission-denied)। অ্যাডমিন অ্যাকাউন্ট যাচাই, Firestore Security Rules অথবা আবশ্যকীয় ফিল্ড যাচাই করে আবার চেষ্টা করুন।${diagSuffix}`;
+
+  if (source.deleted && existingData && 'archivedAt' in existingData && existingData.archivedAt !== undefined) {
+    payload.archivedAt = existingData.archivedAt;
   }
-  if (rawCode === 'failed-precondition' || rawCode.endsWith('/failed-precondition')) {
-    return 'Firestore-এর পূর্বশর্ত পূরণ হয়নি (failed-precondition)। অনুগ্রহ করে ডাটাবেসের অবস্থা বা ইনডেক্স যাচাই করুন।';
+
+  const hasValidOldPrice =
+    typeof source.old_price === 'number' &&
+    Number.isFinite(source.old_price) &&
+    source.old_price > 0;
+  if (hasValidOldPrice) {
+    payload.old_price = Math.min(1000000, Math.max(0, Number(source.old_price)));
+  } else if (!forFullSet && existingData && 'old_price' in existingData) {
+    payload.old_price = deleteField();
   }
-  if (rawCode === 'invalid-argument' || rawCode.endsWith('/invalid-argument')) {
-    return 'প্রদত্ত তথ্যের ফরম্যাট বা ধরন সঠিক নয় (invalid-argument)। অনুগ্রহ করে ঘরগুলো যাচাই করে আবার চেষ্টা করুন।';
+
+  const trimmedDiscount = source.discount?.trim() ?? '';
+  if (trimmedDiscount) {
+    payload.discount = trimmedDiscount.slice(0, 60);
+  } else if (!forFullSet && existingData && 'discount' in existingData) {
+    payload.discount = '';
   }
-  if (rawCode === 'not-found' || rawCode.endsWith('/not-found')) {
-    return err instanceof CatalogAuthError && err.message
-      ? err.message
-      : 'সংশ্লিষ্ট ডকুমেন্টটি Firestore-এ পাওয়া যায়নি (not-found)। পৃষ্ঠা রিলোড করে আবার চেষ্টা করুন।';
+
+  const trimmedPriceLabel = source.price_label?.trim() ?? '';
+  if (trimmedPriceLabel) {
+    payload.price_label = trimmedPriceLabel.slice(0, 80);
+  } else if (!forFullSet && existingData && 'price_label' in existingData) {
+    payload.price_label = '';
   }
-  if (rawCode === 'aborted' || rawCode.endsWith('/aborted')) {
-    return 'ডাটাবেস আপডেট কনফ্লিক্টের কারণে বাতিল হয়েছে (aborted)। অনুগ্রহ করে আবার চেষ্টা করুন।';
+
+  const rawExistingCreatedBy = existingData?.createdBy;
+  const existingCreatedBy =
+    typeof rawExistingCreatedBy === 'string' &&
+    rawExistingCreatedBy.trim().length > 0 &&
+    rawExistingCreatedBy.length <= 254
+      ? rawExistingCreatedBy
+      : typeof source.createdBy === 'string' && source.createdBy.trim()
+      ? source.createdBy.trim().slice(0, 254)
+      : '';
+  if (existingCreatedBy) {
+    payload.createdBy = existingCreatedBy;
+  } else if (actorUid) {
+    payload.createdBy = actorUid.slice(0, 254);
   }
-  if (rawCode === 'resource-exhausted' || rawCode.endsWith('/resource-exhausted')) {
-    return 'Firestore কোটা বা অনুরোধ সীমা অতিক্রম করেছে (resource-exhausted)। কিছুক্ষণ পর আবার চেষ্টা করুন।';
+
+  if (actorUid) {
+    payload.updatedBy = actorUid.slice(0, 254);
+  } else if (typeof existingData?.updatedBy === 'string' && existingData.updatedBy.trim()) {
+    payload.updatedBy = existingData.updatedBy.trim().slice(0, 254);
   }
-  if (rawCode === 'deadline-exceeded' || rawCode.endsWith('/deadline-exceeded')) {
-    return 'সার্ভারে সংরক্ষণ করতে অতিরিক্ত সময় লেগেছে (deadline-exceeded)। অনুগ্রহ করে আবার চেষ্টা করুন।';
+
+  if (!forFullSet && existingData) {
+    for (const badKey of getInvalidOptionalProductFieldsToDelete(existingData)) {
+      if (!(badKey in payload)) {
+        payload[badKey] = deleteField();
+      }
+    }
   }
-  if (
-    rawCode === 'unavailable' ||
-    rawCode.endsWith('/unavailable') ||
-    rawCode.includes('network') ||
-    lowerMessage.includes('offline')
-  ) {
-    return 'ইন্টারনেট বা সার্ভার সংযোগের কারণে সংরক্ষণ করা যায়নি (unavailable)। অনুগ্রহ করে আবার চেষ্টা করুন।';
-  }
-  if (err instanceof Error && rawCode === '' && rawMessage) {
-    return `${categoryPrefix}${rawMessage}`;
-  }
-  return `${categoryPrefix}সংরক্ষণে ত্রুটি হয়েছে (${rawCode || 'unknown'})। অনুগ্রহ করে তথ্যগুলো যাচাই করে আবার চেষ্টা করুন।`;
+
+  return payload;
 }
+
+function buildPartialProductUpdatePayload(params: {
+  draft: Product;
+  original: Product | null;
+  allCategories: Category[];
+  existingData: Record<string, unknown>;
+  ingredientsList: string[];
+  sizesList: string[];
+  cleanImages: string[];
+  actorUid: string;
+}): Record<string, unknown> {
+  const {
+    draft,
+    original,
+    allCategories,
+    existingData,
+    ingredientsList,
+    sizesList,
+    cleanImages,
+    actorUid,
+  } = params;
+  const fullNormalized = buildNormalizedProductPayload({
+    source: draft,
+    allCategories,
+    ingredientsList,
+    sizesList,
+    cleanImages,
+    existingData,
+    forFullSet: false,
+    actorUid,
+  });
+
+  const updatePayload: Record<string, unknown> = {
+    updatedBy: actorUid.slice(0, 254),
+    updatedAt: serverTimestamp(),
+  };
+
+  const trimStr = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+  const sameList = (a: unknown, b: unknown) => {
+    const listA = Array.isArray(a) ? a.map((x) => String(x).trim()).filter(Boolean) : [];
+    const listB = Array.isArray(b) ? b.map((x) => String(x).trim()).filter(Boolean) : [];
+    return listA.length === listB.length && listA.every((item, idx) => item === listB[idx]);
+  };
+
+  if (!original) {
+    Object.assign(updatePayload, fullNormalized);
+    delete updatePayload.id;
+    delete updatePayload.createdBy;
+    delete updatePayload.createdAt;
+  } else {
+    if (trimStr(draft.name) !== trimStr(original.name)) {
+      updatePayload.name = fullNormalized.name;
+      updatePayload.nameBn = fullNormalized.nameBn;
+      updatePayload.name_bn = fullNormalized.name_bn;
+    }
+    if (trimStr(draft.nameEn) !== trimStr(original.nameEn)) {
+      updatePayload.nameEn = fullNormalized.nameEn;
+      updatePayload.name_en = fullNormalized.name_en;
+    }
+    if (trimStr(draft.slug) !== trimStr(original.slug)) {
+      updatePayload.slug = fullNormalized.slug;
+    }
+    if (trimStr(draft.category) !== trimStr(original.category)) {
+      updatePayload.category = fullNormalized.category;
+      updatePayload.categorySlug = fullNormalized.categorySlug ?? fullNormalized.category;
+      updatePayload.categoryName = fullNormalized.categoryName;
+      updatePayload.categoryNameEn = fullNormalized.categoryNameEn;
+    } else {
+      if (trimStr(draft.categoryName) !== trimStr(original.categoryName)) {
+        updatePayload.categoryName = fullNormalized.categoryName;
+      }
+      if (trimStr(draft.categoryNameEn) !== trimStr(original.categoryNameEn)) {
+        updatePayload.categoryNameEn = fullNormalized.categoryNameEn;
+      }
+    }
+    if (trimStr(draft.productType) !== trimStr(original.productType)) {
+      updatePayload.productType = fullNormalized.productType;
+    }
+    const origPrice = Number(original.price) || 0;
+    const draftPrice = Number(draft.price) || 0;
+    if (draftPrice !== origPrice) {
+      updatePayload.price = fullNormalized.price;
+    }
+    const origOldPrice =
+      typeof original.old_price === 'number' && Number.isFinite(original.old_price) && original.old_price > 0
+        ? original.old_price
+        : undefined;
+    const draftOldPrice =
+      typeof draft.old_price === 'number' && Number.isFinite(draft.old_price) && draft.old_price > 0
+        ? draft.old_price
+        : undefined;
+    if (draftOldPrice !== origOldPrice) {
+      updatePayload.old_price = draftOldPrice !== undefined ? fullNormalized.old_price : deleteField();
+    }
+    if (trimStr(draft.discount) !== trimStr(original.discount)) {
+      updatePayload.discount = trimStr(draft.discount).slice(0, 60);
+    }
+    if (trimStr(draft.price_label) !== trimStr(original.price_label)) {
+      updatePayload.price_label = trimStr(draft.price_label).slice(0, 80);
+    }
+    const origUnit = trimStr(original.unit ?? original.priceUnit);
+    const draftUnit = trimStr(draft.unit ?? draft.priceUnit);
+    if (draftUnit !== origUnit) {
+      updatePayload.priceUnit = fullNormalized.priceUnit;
+      updatePayload.unit = fullNormalized.unit;
+    }
+    if (trimStr(draft.shortDescription) !== trimStr(original.shortDescription)) {
+      updatePayload.shortDescription = fullNormalized.shortDescription;
+      updatePayload.short_description_bn = fullNormalized.short_description_bn;
+    }
+    if (trimStr(draft.shortDescriptionEn) !== trimStr(original.shortDescriptionEn)) {
+      updatePayload.shortDescriptionEn = fullNormalized.shortDescriptionEn;
+      updatePayload.short_description_en = fullNormalized.short_description_en;
+    }
+    if (trimStr(draft.description) !== trimStr(original.description)) {
+      updatePayload.description = fullNormalized.description;
+      updatePayload.description_bn = fullNormalized.description_bn;
+    }
+    if (trimStr(draft.descriptionEn) !== trimStr(original.descriptionEn)) {
+      updatePayload.descriptionEn = fullNormalized.descriptionEn;
+      updatePayload.description_en = fullNormalized.description_en;
+    }
+    const origCleanImages = sanitizeStoredImageUrls(
+      Array.isArray(original.images) && original.images.length > 0
+        ? original.images
+        : original.imageUrl || original.image
+        ? [original.imageUrl || original.image]
+        : []
+    );
+    if (
+      !sameList(cleanImages, origCleanImages) ||
+      trimStr(draft.image) !== trimStr(original.image) ||
+      trimStr(draft.imageUrl) !== trimStr(original.imageUrl) ||
+      trimStr(draft.imageKey) !== trimStr(original.imageKey)
+    ) {
+      updatePayload.image = fullNormalized.image;
+      updatePayload.imageUrl = fullNormalized.imageUrl;
+      updatePayload.imageKey = fullNormalized.imageKey;
+      updatePayload.images = fullNormalized.images;
+    }
+    const origIngredients = Array.isArray(original.ingredients) ? original.ingredients : [];
+    if (!sameList(ingredientsList, origIngredients)) {
+      updatePayload.ingredients = fullNormalized.ingredients;
+    }
+    const origSizes = Array.isArray(original.sizes) ? original.sizes : [];
+    if (!sameList(sizesList, origSizes)) {
+      updatePayload.sizes = fullNormalized.sizes;
+    }
+    if (trimStr(draft.weight) !== trimStr(original.weight)) {
+      updatePayload.weight = fullNormalized.weight;
+    }
+    if (!sameList(draft.occasions, original.occasions)) {
+      updatePayload.occasions = fullNormalized.occasions;
+    }
+    if (!sameList(draft.showrooms, original.showrooms)) {
+      updatePayload.showrooms = fullNormalized.showrooms;
+    }
+    if (draft.availability !== original.availability) {
+      updatePayload.availability = fullNormalized.availability;
+    }
+    if (trimStr(draft.sku) !== trimStr(original.sku)) {
+      updatePayload.sku = trimStr(draft.sku) ? fullNormalized.sku : deleteField();
+    }
+    const origStock = typeof original.stock === 'number' && Number.isInteger(original.stock) ? original.stock : undefined;
+    const draftStock = typeof draft.stock === 'number' && Number.isInteger(draft.stock) ? draft.stock : undefined;
+    if (draftStock !== origStock) {
+      updatePayload.stock = draftStock !== undefined ? fullNormalized.stock : deleteField();
+    }
+    if (trimStr(draft.importantNotes) !== trimStr(original.importantNotes)) {
+      updatePayload.importantNotes = fullNormalized.importantNotes;
+    }
+    if (Boolean(draft.featured) !== Boolean(original.featured)) {
+      updatePayload.featured = fullNormalized.featured;
+    }
+    if (Boolean(draft.popular) !== Boolean(original.popular)) {
+      updatePayload.popular = fullNormalized.popular;
+    }
+    if ((draft.visible !== false) !== (original.visible !== false)) {
+      updatePayload.visible = fullNormalized.visible;
+      updatePayload.status = fullNormalized.status;
+    }
+    if (Boolean(draft.deleted) !== Boolean(original.deleted)) {
+      updatePayload.deleted = fullNormalized.deleted;
+      updatePayload.status = fullNormalized.status;
+    }
+    const origOrder = Math.min(10000, Math.max(0, Math.round(Number(original.display_order) || 1)));
+    const draftOrder = Math.min(10000, Math.max(0, Math.round(Number(draft.display_order) || 1)));
+    if (draftOrder !== origOrder) {
+      updatePayload.display_order = fullNormalized.display_order;
+    }
+  }
+
+  // Backfill only missing or invalid fields on legacy documents without clobbering valid existing fields
+  const existingIssues = inspectExistingProductIssues(existingData);
+  if (existingIssues.length > 0) {
+    for (const reqKey of REQUIRED_PRODUCT_SCHEMA_KEYS) {
+      if (!(reqKey in existingData) || existingIssues.includes(`invalid_${reqKey}`)) {
+        if (reqKey in fullNormalized) {
+          updatePayload[reqKey] = fullNormalized[reqKey];
+        }
+      }
+    }
+    if (
+      !('id' in existingData) ||
+      typeof existingData.id !== 'string' ||
+      !/^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
+    ) {
+      updatePayload.id = fullNormalized.id;
+    }
+    for (const badKey of getInvalidOptionalProductFieldsToDelete(existingData)) {
+      if (!(badKey in updatePayload)) {
+        updatePayload[badKey] = badKey in fullNormalized ? fullNormalized[badKey] : deleteField();
+      }
+    }
+    if (
+      existingIssues.includes('invalid_images') ||
+      existingIssues.includes('forbidden_inline_images')
+    ) {
+      updatePayload.images = fullNormalized.images;
+    }
+    for (const arrKey of ['ingredients', 'sizes', 'occasions', 'showrooms'] as const) {
+      if (existingIssues.includes(`invalid_${arrKey}`)) {
+        updatePayload[arrKey] = fullNormalized[arrKey];
+      }
+    }
+    for (const unknownKey of getUnknownKeys(existingData, ALLOWED_PRODUCT_KEYS)) {
+      updatePayload[unknownKey] = deleteField();
+    }
+  }
+
+  if (!hasValidTimestamp(existingData.createdAt)) {
+    updatePayload.createdAt = serverTimestamp();
+  }
+
+  return updatePayload;
+}
+
+const CatalogAuthError = AdminAuthError;
+const mapCatalogSaveError = formatAdminFirestoreError;
 
 interface EditorImageSlot {
   id: string;
@@ -1237,6 +1345,7 @@ export function AdminProductsPanel() {
   const [editorUploadSuccess, setEditorUploadSuccess] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [busyProductId, setBusyProductId] = useState<string | null>(null);
   const [deletingProduct, setDeletingProduct] = useState(false);
   const [pendingDeleteProduct, setPendingDeleteProduct] = useState<Product | null>(null);
   const [feedback, setFeedback] = useState<{
@@ -1643,7 +1752,7 @@ export function AdminProductsPanel() {
       );
     } catch (err) {
       setEditorUploadError(
-        err instanceof CatalogAuthError
+        err instanceof AdminAuthError
           ? mapCatalogSaveError(err, 'editor_image_upload_auth', { staffRole })
           : err instanceof Error && err.message
           ? err.message
@@ -1660,313 +1769,6 @@ export function AdminProductsPanel() {
     const fileList = e.target.files ? Array.from(e.target.files) : [];
     e.target.value = '';
     void uploadProductImageFilesNow(fileList);
-  };
-
-  const buildNormalizedProductPayload = (params: {
-    source: Product;
-    ingredientsList: string[];
-    sizesList: string[];
-    cleanImages: string[];
-    existingData?: Record<string, unknown>;
-    forFullSet?: boolean;
-    actorUid?: string;
-  }): Record<string, unknown> => {
-    const {
-      source,
-      ingredientsList,
-      sizesList,
-      cleanImages,
-      existingData,
-      forFullSet,
-      actorUid,
-    } = params;
-    const preservedValidId =
-      existingData &&
-      typeof existingData.id === 'string' &&
-      /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
-        ? existingData.id
-        : source.id;
-    const nameBn = String(source.name || source.nameBn || source.nameEn || 'পণ্য').trim().slice(0, 160) || 'পণ্য';
-    const nameEn = String(source.nameEn || source.name_en || nameBn).trim().slice(0, 160) || nameBn;
-    const resolvedCategorySlug = toSlug(
-      String(source.category || allCategories[0]?.slug || 'custom-cake').trim()
-    );
-    const catObj = allCategories.find((c) => c.slug === resolvedCategorySlug);
-    const catText = catObj ? getCategoryText(catObj) : null;
-    const slug = toSlug(String(source.slug || '').trim() || nameEn || nameBn);
-    const resolvedUnit = String((source.unit ?? source.priceUnit) || 'Piece').trim().slice(0, 60) || 'Piece';
-    const shortDescEn = String(source.shortDescriptionEn ?? source.short_description_en ?? '')
-      .trim()
-      .slice(0, 300);
-    const shortDescBn = (String(source.shortDescription || '').trim() || shortDescEn || nameBn).slice(0, 300);
-    const fullDescEn = String(source.descriptionEn ?? source.description_en ?? shortDescEn)
-      .trim()
-      .slice(0, 4000);
-    const fullDescBn = (
-      String(source.description || '').trim() ||
-      shortDescBn ||
-      fullDescEn ||
-      nameBn
-    ).slice(0, 4000);
-    const rawPrice = Number(source.price);
-    const numericPrice = Number.isFinite(rawPrice)
-      ? Math.min(1000000, Math.max(0, rawPrice))
-      : 0;
-    const rawDisplayOrder = Number(source.display_order);
-    const safeDisplayOrder = Number.isFinite(rawDisplayOrder)
-      ? Math.min(10000, Math.max(0, Math.round(rawDisplayOrder)))
-      : 1;
-    const safeAvailability: ProductAvailability = VALID_AVAILABILITIES.has(source.availability)
-      ? source.availability
-      : 'In Showroom';
-    const primaryImg = cleanImages[0] ?? '';
-    const resolvedImageKey = primaryImg
-      ? extractR2ImageKey(primaryImg) ||
-        (typeof source.imageKey === 'string' &&
-        source.imageKey.trim() &&
-        source.imageKey.trim() !== 'no-photo'
-          ? source.imageKey.trim().slice(0, 320)
-          : '')
-      : source.imageKey === 'no-photo'
-      ? 'no-photo'
-      : '';
-
-    const payload: Record<string, unknown> = {
-      id: preservedValidId,
-      name: nameBn,
-      nameBn,
-      nameEn,
-      name_bn: nameBn,
-      name_en: nameEn,
-      slug,
-      category: resolvedCategorySlug,
-      categoryName: (
-        String(source.categoryName || '').trim() ||
-        catText?.nameBn ||
-        resolvedCategorySlug
-      )
-        .trim()
-        .slice(0, 120),
-      categoryNameEn: String(source.categoryNameEn || catText?.nameEn || '')
-        .trim()
-        .slice(0, 120),
-      productType: (String(source.productType || '').trim() || 'Bakery & Sweets').slice(0, 120),
-      price: numericPrice,
-      priceUnit: resolvedUnit,
-      unit: resolvedUnit,
-      shortDescription: shortDescBn,
-      shortDescriptionEn: shortDescEn,
-      short_description_bn: shortDescBn,
-      short_description_en: shortDescEn,
-      description: fullDescBn,
-      descriptionEn: fullDescEn,
-      description_bn: fullDescBn,
-      description_en: fullDescEn,
-      image: primaryImg,
-      imageUrl: primaryImg,
-      imageKey: resolvedImageKey,
-      images: cleanImages,
-      ingredients: ingredientsList
-        .map((s) => String(s).trim().slice(0, 120))
-        .filter(Boolean)
-        .slice(0, 25),
-      sizes: sizesList
-        .map((s) => String(s).trim().slice(0, 80))
-        .filter(Boolean)
-        .slice(0, 10),
-      weight: String(source.weight || '').trim().slice(0, 80),
-      occasions: (Array.isArray(source.occasions) ? source.occasions : [])
-        .map((o) => String(o).trim().slice(0, 80))
-        .filter(Boolean)
-        .slice(0, 15),
-      showrooms: (Array.isArray(source.showrooms) ? source.showrooms : [])
-        .map((sid) => String(sid).trim().slice(0, 128))
-        .filter((sid) => Boolean(sid) && !CONFIRMED_DEMO_SHOWROOM_IDS.has(sid))
-        .slice(0, 20),
-      availability: safeAvailability,
-      importantNotes: String(source.importantNotes || '').trim().slice(0, 800),
-      featured: Boolean(source.featured),
-      popular: Boolean(source.popular),
-      visible: source.visible !== false,
-      active: source.active !== false,
-      isActive: source.isActive !== false,
-      deleted: Boolean(source.deleted),
-      display_order: safeDisplayOrder,
-      status: source.deleted ? 'archived' : source.visible === false ? 'draft' : 'published',
-      updatedAt: serverTimestamp(),
-    };
-
-    if (source.masterKey) {
-      payload.masterKey = String(source.masterKey).slice(0, 240);
-    }
-
-    const categorySlugValue = resolvedCategorySlug || (
-      typeof source.categorySlug === 'string' && source.categorySlug.trim()
-        ? source.categorySlug.trim().slice(0, 160)
-        : typeof existingData?.categorySlug === 'string' && existingData.categorySlug.trim()
-        ? existingData.categorySlug.trim().slice(0, 160)
-        : ''
-    );
-    if (categorySlugValue) {
-      payload.categorySlug = categorySlugValue;
-    }
-
-    const preserveIngredientsBn =
-      typeof source.ingredients_bn === 'string' && source.ingredients_bn.trim()
-        ? source.ingredients_bn.trim().slice(0, 600)
-        : typeof existingData?.ingredients_bn === 'string' && existingData.ingredients_bn.trim()
-        ? existingData.ingredients_bn.trim().slice(0, 600)
-        : '';
-    if (preserveIngredientsBn) {
-      payload.ingredients_bn = preserveIngredientsBn;
-    }
-
-    const preserveIngredientsEn =
-      typeof source.ingredients_en === 'string' && source.ingredients_en.trim()
-        ? source.ingredients_en.trim().slice(0, 600)
-        : typeof existingData?.ingredients_en === 'string' && existingData.ingredients_en.trim()
-        ? existingData.ingredients_en.trim().slice(0, 600)
-        : '';
-    if (preserveIngredientsEn) {
-      payload.ingredients_en = preserveIngredientsEn;
-    }
-
-    const rawRating =
-      typeof source.rating === 'number'
-        ? source.rating
-        : typeof existingData?.rating === 'number'
-        ? existingData.rating
-        : NaN;
-    if (Number.isFinite(rawRating) && rawRating >= 0 && rawRating <= 5) {
-      payload.rating = rawRating;
-    }
-
-    if (typeof source.stock === 'number' && Number.isInteger(source.stock) && source.stock >= 0 && source.stock <= 1000000) {
-      payload.stock = source.stock;
-    } else if (source.stock === undefined && !forFullSet && existingData && 'stock' in existingData) {
-      payload.stock = deleteField();
-    } else if (forFullSet && typeof existingData?.stock === 'number' && Number.isInteger(existingData.stock) && existingData.stock >= 0 && existingData.stock <= 1000000) {
-      payload.stock = existingData.stock;
-    }
-
-    if (typeof source.sku === 'string') {
-      const trimmedSku = source.sku.trim().slice(0, 80);
-      if (trimmedSku) {
-        payload.sku = trimmedSku;
-      } else if (!forFullSet && existingData && 'sku' in existingData) {
-        payload.sku = deleteField();
-      }
-    } else if (typeof existingData?.sku === 'string' && existingData.sku.trim()) {
-      payload.sku = existingData.sku.trim().slice(0, 80);
-    }
-
-    const preserveSeoTitle =
-      typeof source.seoTitle === 'string' && source.seoTitle.trim()
-        ? source.seoTitle.trim().slice(0, 200)
-        : typeof existingData?.seoTitle === 'string' && existingData.seoTitle.trim()
-        ? existingData.seoTitle.trim().slice(0, 200)
-        : '';
-    if (preserveSeoTitle) {
-      payload.seoTitle = preserveSeoTitle;
-    }
-
-    const preserveSeoDesc =
-      typeof source.seoDescription === 'string' && source.seoDescription.trim()
-        ? source.seoDescription.trim().slice(0, 400)
-        : typeof existingData?.seoDescription === 'string' && existingData.seoDescription.trim()
-        ? existingData.seoDescription.trim().slice(0, 400)
-        : '';
-    if (preserveSeoDesc) {
-      payload.seoDescription = preserveSeoDesc;
-    }
-
-    const candidateSeoImg =
-      typeof source.seoImage === 'string' &&
-      source.seoImage.trim() &&
-      !isForbiddenInlineImageUrl(source.seoImage)
-        ? source.seoImage.trim()
-        : typeof existingData?.seoImage === 'string' &&
-          existingData.seoImage.trim() &&
-          !isForbiddenInlineImageUrl(existingData.seoImage)
-        ? existingData.seoImage.trim()
-        : '';
-    if (candidateSeoImg && candidateSeoImg.length <= 400000) {
-      payload.seoImage = candidateSeoImg;
-    }
-
-    if (source.deleted && existingData && 'archivedAt' in existingData && existingData.archivedAt !== undefined) {
-      payload.archivedAt = existingData.archivedAt;
-    }
-
-    const hasValidOldPrice =
-      typeof source.old_price === 'number' &&
-      Number.isFinite(source.old_price) &&
-      source.old_price > 0;
-    if (hasValidOldPrice) {
-      payload.old_price = Math.min(1000000, Math.max(0, Number(source.old_price)));
-    } else if (!forFullSet && existingData && 'old_price' in existingData) {
-      payload.old_price = deleteField();
-    }
-
-    const trimmedDiscount = source.discount?.trim() ?? '';
-    if (trimmedDiscount) {
-      payload.discount = trimmedDiscount.slice(0, 60);
-    } else if (!forFullSet && existingData && 'discount' in existingData) {
-      payload.discount = '';
-    }
-
-    const trimmedPriceLabel = source.price_label?.trim() ?? '';
-    if (trimmedPriceLabel) {
-      payload.price_label = trimmedPriceLabel.slice(0, 80);
-    } else if (!forFullSet && existingData && 'price_label' in existingData) {
-      payload.price_label = '';
-    }
-
-    const rawExistingCreatedBy = existingData?.createdBy;
-    const existingCreatedBy =
-      typeof rawExistingCreatedBy === 'string' &&
-      rawExistingCreatedBy.trim().length > 0 &&
-      rawExistingCreatedBy.length <= 254
-        ? rawExistingCreatedBy
-        : typeof source.createdBy === 'string' && source.createdBy.trim()
-        ? source.createdBy.trim().slice(0, 254)
-        : '';
-    if (existingCreatedBy) {
-      payload.createdBy = existingCreatedBy;
-    } else if (actorUid) {
-      payload.createdBy = actorUid.slice(0, 254);
-    }
-
-    if (actorUid) {
-      payload.updatedBy = actorUid.slice(0, 254);
-    } else if (typeof existingData?.updatedBy === 'string' && existingData.updatedBy.trim()) {
-      payload.updatedBy = existingData.updatedBy.trim().slice(0, 254);
-    }
-
-    if (!forFullSet && existingData) {
-      for (const badKey of getInvalidOptionalProductFieldsToDelete(existingData)) {
-        if (!(badKey in payload)) {
-          payload[badKey] = deleteField();
-        }
-      }
-    }
-
-    return payload;
-  };
-
-  const fetchProductServerSnap = async (productRef: ReturnType<typeof doc>) => {
-    try {
-      return await getDocFromServer(productRef);
-    } catch (err) {
-      const code =
-        err && typeof err === 'object' && 'code' in err
-          ? String((err as { code?: unknown }).code || '').toLowerCase()
-          : '';
-      if (code === 'unavailable' || code.endsWith('/unavailable') || code.includes('failed-precondition')) {
-        return await getDoc(productRef);
-      }
-      throw err;
-    }
   };
 
   const logProductSaveDebug = (params: {
@@ -1995,239 +1797,6 @@ export function AdminProductsPanel() {
     });
   };
 
-  const buildPartialProductUpdatePayload = (params: {
-    draft: Product;
-    original: Product | null;
-    existingData: Record<string, unknown>;
-    ingredientsList: string[];
-    sizesList: string[];
-    cleanImages: string[];
-    actorUid: string;
-  }): Record<string, unknown> => {
-    const {
-      draft,
-      original,
-      existingData,
-      ingredientsList,
-      sizesList,
-      cleanImages,
-      actorUid,
-    } = params;
-    const fullNormalized = buildNormalizedProductPayload({
-      source: draft,
-      ingredientsList,
-      sizesList,
-      cleanImages,
-      existingData,
-      forFullSet: false,
-      actorUid,
-    });
-
-    const updatePayload: Record<string, unknown> = {
-      updatedBy: actorUid.slice(0, 254),
-      updatedAt: serverTimestamp(),
-    };
-
-    const trimStr = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
-    const sameList = (a: unknown, b: unknown) => {
-      const listA = Array.isArray(a) ? a.map((x) => String(x).trim()).filter(Boolean) : [];
-      const listB = Array.isArray(b) ? b.map((x) => String(x).trim()).filter(Boolean) : [];
-      return listA.length === listB.length && listA.every((item, idx) => item === listB[idx]);
-    };
-
-    if (!original) {
-      Object.assign(updatePayload, fullNormalized);
-      delete updatePayload.id;
-      delete updatePayload.createdBy;
-      delete updatePayload.createdAt;
-    } else {
-      if (trimStr(draft.name) !== trimStr(original.name)) {
-        updatePayload.name = fullNormalized.name;
-        updatePayload.nameBn = fullNormalized.nameBn;
-        updatePayload.name_bn = fullNormalized.name_bn;
-      }
-      if (trimStr(draft.nameEn) !== trimStr(original.nameEn)) {
-        updatePayload.nameEn = fullNormalized.nameEn;
-        updatePayload.name_en = fullNormalized.name_en;
-      }
-      if (trimStr(draft.slug) !== trimStr(original.slug)) {
-        updatePayload.slug = fullNormalized.slug;
-      }
-      if (trimStr(draft.category) !== trimStr(original.category)) {
-        updatePayload.category = fullNormalized.category;
-        updatePayload.categorySlug = fullNormalized.categorySlug ?? fullNormalized.category;
-        updatePayload.categoryName = fullNormalized.categoryName;
-        updatePayload.categoryNameEn = fullNormalized.categoryNameEn;
-      } else {
-        if (trimStr(draft.categoryName) !== trimStr(original.categoryName)) {
-          updatePayload.categoryName = fullNormalized.categoryName;
-        }
-        if (trimStr(draft.categoryNameEn) !== trimStr(original.categoryNameEn)) {
-          updatePayload.categoryNameEn = fullNormalized.categoryNameEn;
-        }
-      }
-      if (trimStr(draft.productType) !== trimStr(original.productType)) {
-        updatePayload.productType = fullNormalized.productType;
-      }
-      const origPrice = Number(original.price) || 0;
-      const draftPrice = Number(draft.price) || 0;
-      if (draftPrice !== origPrice) {
-        updatePayload.price = fullNormalized.price;
-      }
-      const origOldPrice =
-        typeof original.old_price === 'number' && Number.isFinite(original.old_price) && original.old_price > 0
-          ? original.old_price
-          : undefined;
-      const draftOldPrice =
-        typeof draft.old_price === 'number' && Number.isFinite(draft.old_price) && draft.old_price > 0
-          ? draft.old_price
-          : undefined;
-      if (draftOldPrice !== origOldPrice) {
-        updatePayload.old_price = draftOldPrice !== undefined ? fullNormalized.old_price : deleteField();
-      }
-      if (trimStr(draft.discount) !== trimStr(original.discount)) {
-        updatePayload.discount = trimStr(draft.discount).slice(0, 60);
-      }
-      if (trimStr(draft.price_label) !== trimStr(original.price_label)) {
-        updatePayload.price_label = trimStr(draft.price_label).slice(0, 80);
-      }
-      const origUnit = trimStr(original.unit ?? original.priceUnit);
-      const draftUnit = trimStr(draft.unit ?? draft.priceUnit);
-      if (draftUnit !== origUnit) {
-        updatePayload.priceUnit = fullNormalized.priceUnit;
-        updatePayload.unit = fullNormalized.unit;
-      }
-      if (trimStr(draft.shortDescription) !== trimStr(original.shortDescription)) {
-        updatePayload.shortDescription = fullNormalized.shortDescription;
-        updatePayload.short_description_bn = fullNormalized.short_description_bn;
-      }
-      if (trimStr(draft.shortDescriptionEn) !== trimStr(original.shortDescriptionEn)) {
-        updatePayload.shortDescriptionEn = fullNormalized.shortDescriptionEn;
-        updatePayload.short_description_en = fullNormalized.short_description_en;
-      }
-      if (trimStr(draft.description) !== trimStr(original.description)) {
-        updatePayload.description = fullNormalized.description;
-        updatePayload.description_bn = fullNormalized.description_bn;
-      }
-      if (trimStr(draft.descriptionEn) !== trimStr(original.descriptionEn)) {
-        updatePayload.descriptionEn = fullNormalized.descriptionEn;
-        updatePayload.description_en = fullNormalized.description_en;
-      }
-      const origCleanImages = sanitizeStoredImageUrls(
-        Array.isArray(original.images) && original.images.length > 0
-          ? original.images
-          : original.imageUrl || original.image
-          ? [original.imageUrl || original.image]
-          : []
-      );
-      if (
-        !sameList(cleanImages, origCleanImages) ||
-        trimStr(draft.image) !== trimStr(original.image) ||
-        trimStr(draft.imageUrl) !== trimStr(original.imageUrl) ||
-        trimStr(draft.imageKey) !== trimStr(original.imageKey)
-      ) {
-        updatePayload.image = fullNormalized.image;
-        updatePayload.imageUrl = fullNormalized.imageUrl;
-        updatePayload.imageKey = fullNormalized.imageKey;
-        updatePayload.images = fullNormalized.images;
-      }
-      const origIngredients = Array.isArray(original.ingredients) ? original.ingredients : [];
-      if (!sameList(ingredientsList, origIngredients)) {
-        updatePayload.ingredients = fullNormalized.ingredients;
-      }
-      const origSizes = Array.isArray(original.sizes) ? original.sizes : [];
-      if (!sameList(sizesList, origSizes)) {
-        updatePayload.sizes = fullNormalized.sizes;
-      }
-      if (trimStr(draft.weight) !== trimStr(original.weight)) {
-        updatePayload.weight = fullNormalized.weight;
-      }
-      if (!sameList(draft.occasions, original.occasions)) {
-        updatePayload.occasions = fullNormalized.occasions;
-      }
-      if (!sameList(draft.showrooms, original.showrooms)) {
-        updatePayload.showrooms = fullNormalized.showrooms;
-      }
-      if (draft.availability !== original.availability) {
-        updatePayload.availability = fullNormalized.availability;
-      }
-      if (trimStr(draft.sku) !== trimStr(original.sku)) {
-        updatePayload.sku = trimStr(draft.sku) ? fullNormalized.sku : deleteField();
-      }
-      const origStock = typeof original.stock === 'number' && Number.isInteger(original.stock) ? original.stock : undefined;
-      const draftStock = typeof draft.stock === 'number' && Number.isInteger(draft.stock) ? draft.stock : undefined;
-      if (draftStock !== origStock) {
-        updatePayload.stock = draftStock !== undefined ? fullNormalized.stock : deleteField();
-      }
-      if (trimStr(draft.importantNotes) !== trimStr(original.importantNotes)) {
-        updatePayload.importantNotes = fullNormalized.importantNotes;
-      }
-      if (Boolean(draft.featured) !== Boolean(original.featured)) {
-        updatePayload.featured = fullNormalized.featured;
-      }
-      if (Boolean(draft.popular) !== Boolean(original.popular)) {
-        updatePayload.popular = fullNormalized.popular;
-      }
-      if ((draft.visible !== false) !== (original.visible !== false)) {
-        updatePayload.visible = fullNormalized.visible;
-        updatePayload.status = fullNormalized.status;
-      }
-      if (Boolean(draft.deleted) !== Boolean(original.deleted)) {
-        updatePayload.deleted = fullNormalized.deleted;
-        updatePayload.status = fullNormalized.status;
-      }
-      const origOrder = Math.min(10000, Math.max(0, Math.round(Number(original.display_order) || 1)));
-      const draftOrder = Math.min(10000, Math.max(0, Math.round(Number(draft.display_order) || 1)));
-      if (draftOrder !== origOrder) {
-        updatePayload.display_order = fullNormalized.display_order;
-      }
-    }
-
-    // Backfill only missing or invalid fields on legacy documents without clobbering valid existing fields
-    const existingIssues = inspectExistingProductIssues(existingData);
-    if (existingIssues.length > 0) {
-      for (const reqKey of REQUIRED_PRODUCT_SCHEMA_KEYS) {
-        if (!(reqKey in existingData) || existingIssues.includes(`invalid_${reqKey}`)) {
-          if (reqKey in fullNormalized) {
-            updatePayload[reqKey] = fullNormalized[reqKey];
-          }
-        }
-      }
-      if (
-        !('id' in existingData) ||
-        typeof existingData.id !== 'string' ||
-        !/^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
-      ) {
-        updatePayload.id = fullNormalized.id;
-      }
-      for (const badKey of getInvalidOptionalProductFieldsToDelete(existingData)) {
-        if (!(badKey in updatePayload)) {
-          updatePayload[badKey] = badKey in fullNormalized ? fullNormalized[badKey] : deleteField();
-        }
-      }
-      if (
-        existingIssues.includes('invalid_images') ||
-        existingIssues.includes('forbidden_inline_images')
-      ) {
-        updatePayload.images = fullNormalized.images;
-      }
-      for (const arrKey of ['ingredients', 'sizes', 'occasions', 'showrooms'] as const) {
-        if (existingIssues.includes(`invalid_${arrKey}`)) {
-          updatePayload[arrKey] = fullNormalized[arrKey];
-        }
-      }
-      for (const unknownKey of getUnknownKeys(existingData, ALLOWED_PRODUCT_KEYS)) {
-        updatePayload[unknownKey] = deleteField();
-      }
-    }
-
-    if (!hasValidTimestamp(existingData.createdAt)) {
-      updatePayload.createdAt = serverTimestamp();
-    }
-
-    return updatePayload;
-  };
-
   const createNewProductDoc = async (params: {
     draft: Product;
     ingredientsList: string[];
@@ -2251,14 +1820,14 @@ export function AdminProductsPanel() {
     const firestore = requireDb();
     let targetId = draft.id;
     let productRef = doc(firestore, 'products', targetId);
-    let existingSnap = await fetchProductServerSnap(productRef);
+    let existingSnap = await fetchDocFromServer(productRef);
 
     if (existingSnap.exists()) {
       const altId = `prod-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const altRef = doc(firestore, 'products', altId);
-      const altSnap = await fetchProductServerSnap(altRef);
+      const altSnap = await fetchDocFromServer(altRef);
       if (altSnap.exists()) {
-        throw new CatalogAuthError(
+        throw new AdminAuthError(
           'validation/duplicate-product-id',
           `পণ্যের আইডি ("${targetId}") ইতিমধ্যে Firestore-এ রয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।`
         );
@@ -2273,6 +1842,7 @@ export function AdminProductsPanel() {
 
     const payload = buildNormalizedProductPayload({
       source: { ...draft, id: targetId },
+      allCategories,
       ingredientsList,
       sizesList,
       cleanImages,
@@ -2329,12 +1899,12 @@ export function AdminProductsPanel() {
     const firestore = requireDb();
     const targetId = draft.id;
     const productRef = doc(firestore, 'products', targetId);
-    const existingSnap = await fetchProductServerSnap(productRef);
+    const existingSnap = await fetchDocFromServer(productRef);
 
     onOperation?.('UPDATE');
 
     if (!existingSnap.exists()) {
-      throw new CatalogAuthError(
+      throw new AdminAuthError(
         'not-found',
         'The product no longer exists. Refresh the page and try again.'
       );
@@ -2349,6 +1919,7 @@ export function AdminProductsPanel() {
     const updatePayload = buildPartialProductUpdatePayload({
       draft,
       original,
+      allCategories,
       existingData,
       ingredientsList,
       sizesList,
@@ -2409,9 +1980,9 @@ export function AdminProductsPanel() {
 
       const firestore = requireDb();
       const productRef = doc(firestore, 'products', prod.id);
-      const existingSnap = await fetchProductServerSnap(productRef);
+      const existingSnap = await fetchDocFromServer(productRef);
       if (!existingSnap.exists()) {
-        throw new CatalogAuthError(
+        throw new AdminAuthError(
           'not-found',
           'The product no longer exists. Refresh the page and try again.'
         );
@@ -2473,6 +2044,7 @@ export function AdminProductsPanel() {
               images: nextImages,
             },
             original: prod,
+            allCategories,
             existingData,
             ingredientsList: ingList,
             sizesList: szList,
@@ -2501,7 +2073,7 @@ export function AdminProductsPanel() {
       await updateDoc(productRef, updatePayload);
 
       // Verify Firestore server state before marking upload committed & cleaning replaced R2 files
-      const verifiedSnap = await fetchProductServerSnap(productRef);
+      const verifiedSnap = await fetchDocFromServer(productRef);
       if (!verifiedSnap.exists()) {
         throw new Error('Firestore-এ ছবির তথ্য সংরক্ষণ যাচাই করা যায়নি।');
       }
@@ -2804,7 +2376,7 @@ export function AdminProductsPanel() {
       }
 
       // 5. Verify Firestore write persisted before cleaning replaced R2 files
-      const verifiedSnap = await fetchProductServerSnap(committedRef);
+      const verifiedSnap = await fetchDocFromServer(committedRef);
       if (!verifiedSnap.exists()) {
         throw new Error('Firestore-এ পণ্য সংরক্ষণ যাচাই করা যায়নি।');
       }
@@ -2888,6 +2460,8 @@ export function AdminProductsPanel() {
   };
 
   const toggleVisibility = async (prod: Product) => {
+    if (busyProductId) return;
+    setBusyProductId(prod.id);
     let authSession: VerifiedWriteSession | null = null;
     let existingIssues: string[] = [];
     const preflightIssues: string[] = [];
@@ -2898,9 +2472,9 @@ export function AdminProductsPanel() {
       });
       const firestore = requireDb();
       const productRef = doc(firestore, 'products', prod.id);
-      const existingSnap = await fetchProductServerSnap(productRef);
+      const existingSnap = await fetchDocFromServer(productRef);
       if (!existingSnap.exists()) {
-        throw new CatalogAuthError(
+        throw new AdminAuthError(
           'not-found',
           'The product no longer exists. Refresh the page and try again.'
         );
@@ -2938,6 +2512,7 @@ export function AdminProductsPanel() {
         : buildPartialProductUpdatePayload({
             draft: { ...prod, visible: nextVis },
             original: prod,
+            allCategories,
             existingData,
             ingredientsList: ingList,
             sizesList: szList,
@@ -2983,10 +2558,14 @@ export function AdminProductsPanel() {
           authSession,
         }),
       });
+    } finally {
+      setBusyProductId(null);
     }
   };
 
   const toggleArchive = async (prod: Product) => {
+    if (busyProductId) return;
+    setBusyProductId(prod.id);
     let authSession: VerifiedWriteSession | null = null;
     let existingIssues: string[] = [];
     const preflightIssues: string[] = [];
@@ -2997,9 +2576,9 @@ export function AdminProductsPanel() {
       });
       const firestore = requireDb();
       const productRef = doc(firestore, 'products', prod.id);
-      const existingSnap = await fetchProductServerSnap(productRef);
+      const existingSnap = await fetchDocFromServer(productRef);
       if (!existingSnap.exists()) {
-        throw new CatalogAuthError(
+        throw new AdminAuthError(
           'not-found',
           'The product no longer exists. Refresh the page and try again.'
         );
@@ -3037,6 +2616,7 @@ export function AdminProductsPanel() {
         : buildPartialProductUpdatePayload({
             draft: { ...prod, deleted: nextDeleted },
             original: prod,
+            allCategories,
             existingData,
             ingredientsList: ingList,
             sizesList: szList,
@@ -3086,6 +2666,8 @@ export function AdminProductsPanel() {
           authSession,
         }),
       });
+    } finally {
+      setBusyProductId(null);
     }
   };
 
@@ -3101,7 +2683,7 @@ export function AdminProductsPanel() {
       });
       const firestore = requireDb();
       const productRef = doc(firestore, 'products', target.id);
-      const existingSnap = await fetchProductServerSnap(productRef).catch(() => null);
+      const existingSnap = await fetchDocFromServer(productRef).catch(() => null);
       const r2UrlsToDelete = Array.from(
         new Set([
           ...collectProductR2ImageUrls(target),
@@ -3160,6 +2742,8 @@ export function AdminProductsPanel() {
   };
 
   const toggleFeatured = async (prod: Product) => {
+    if (busyProductId) return;
+    setBusyProductId(prod.id);
     let authSession: VerifiedWriteSession | null = null;
     let existingIssues: string[] = [];
     const preflightIssues: string[] = [];
@@ -3170,9 +2754,9 @@ export function AdminProductsPanel() {
       });
       const firestore = requireDb();
       const productRef = doc(firestore, 'products', prod.id);
-      const existingSnap = await fetchProductServerSnap(productRef);
+      const existingSnap = await fetchDocFromServer(productRef);
       if (!existingSnap.exists()) {
-        throw new CatalogAuthError(
+        throw new AdminAuthError(
           'not-found',
           'The product no longer exists. Refresh the page and try again.'
         );
@@ -3209,6 +2793,7 @@ export function AdminProductsPanel() {
         : buildPartialProductUpdatePayload({
             draft: { ...prod, featured: nextFeatured },
             original: prod,
+            allCategories,
             existingData,
             ingredientsList: ingList,
             sizesList: szList,
@@ -3248,6 +2833,8 @@ export function AdminProductsPanel() {
           authSession,
         }),
       });
+    } finally {
+      setBusyProductId(null);
     }
   };
 
@@ -4429,10 +4016,10 @@ export function AdminProductsPanel() {
                       <td className="px-4 py-3">
                         <button
                           type="button"
-                          disabled={!canEdit}
+                          disabled={!canEdit || busyProductId === p.id}
                           onClick={() => canEdit && toggleVisibility(p)}
                           className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-semibold ${
-                            canEdit ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'
+                            canEdit && busyProductId !== p.id ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'
                           } ${
                             p.visible !== false
                               ? 'bg-emerald-50 text-emerald-700'
@@ -4450,10 +4037,10 @@ export function AdminProductsPanel() {
                       <td className="px-4 py-3">
                         <button
                           type="button"
-                          disabled={!canEdit}
+                          disabled={!canEdit || busyProductId === p.id}
                           onClick={() => canEdit && toggleFeatured(p)}
                           className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold ${
-                            canEdit ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'
+                            canEdit && busyProductId !== p.id ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'
                           } ${
                             p.featured
                               ? 'bg-[#FEF9C3] text-[#854D0E]'
@@ -4518,9 +4105,10 @@ export function AdminProductsPanel() {
                               )}
                               <button
                                 type="button"
+                                disabled={busyProductId === p.id}
                                 title={p.deleted ? 'Restore' : 'Safe Archive'}
                                 onClick={() => toggleArchive(p)}
-                                className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-[#57534E] hover:border-[#1C1917]"
+                                className="cursor-pointer rounded-md border border-[#E7E5E4] p-1.5 text-[#57534E] hover:border-[#1C1917] disabled:opacity-50"
                               >
                                 {p.deleted ? (
                                   <RotateCcw className="h-3.5 w-3.5 text-emerald-700" />
@@ -4994,6 +4582,7 @@ export function AdminCategoriesPanel() {
   };
 
   const toggleCategoryVisibility = async (cat: Category) => {
+    if (busyCategoryId) return;
     setBusyCategoryId(cat.id);
     setMsg(null);
     let authSession: VerifiedWriteSession | null = null;
@@ -5006,7 +4595,7 @@ export function AdminCategoriesPanel() {
       const catRef = doc(firestore, 'categories', cat.id);
       const existingSnap = await fetchDocFromServer(catRef);
       if (!existingSnap.exists()) {
-        throw new CatalogAuthError(
+        throw new AdminAuthError(
           'not-found',
           `ক্যাটাগরি ("categories/${cat.id}") Firestore-এ পাওয়া যায়নি। রিফ্রেশ করে চেষ্টা করুন।`
         );
@@ -5082,6 +4671,7 @@ export function AdminCategoriesPanel() {
   };
 
   const removeCategory = async (cat: Category) => {
+    if (busyCategoryId) return;
     setBusyCategoryId(cat.id);
     setMsg(null);
     let authSession: VerifiedWriteSession | null = null;
@@ -5094,7 +4684,7 @@ export function AdminCategoriesPanel() {
       const catRef = doc(firestore, 'categories', cat.id);
       const existingSnap = await fetchDocFromServer(catRef);
       if (!existingSnap.exists()) {
-        throw new CatalogAuthError(
+        throw new AdminAuthError(
           'not-found',
           `ক্যাটাগরি ("categories/${cat.id}") ইতিমধ্যে ডিলিট হয়ে গেছে বা Firestore-এ নেই।`
         );
@@ -5526,6 +5116,7 @@ export function AdminCategoriesPanel() {
 export function AdminOccasionsPanel() {
   const {
     allOccasions,
+    allCategories,
     allProducts,
     staffRole,
     hasPermission,
@@ -5746,10 +5337,12 @@ export function AdminOccasionsPanel() {
     setTogglingProdId(product.id);
     setMsg(null);
     const has = product.occasions.includes(occSlug);
-    const next = has
-      ? product.occasions.filter((o) => o !== occSlug)
-      : [...product.occasions, occSlug];
+    const next = (
+      has ? product.occasions.filter((o) => o !== occSlug) : [...product.occasions, occSlug]
+    ).slice(0, 15);
     let authSession: VerifiedWriteSession | null = null;
+    let existingIssues: string[] = [];
+    const preflightIssues: string[] = [];
     try {
       authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
@@ -5759,31 +5352,68 @@ export function AdminOccasionsPanel() {
       const prodRef = doc(firestore, 'products', product.id);
       const existingSnap = await fetchDocFromServer(prodRef);
       if (!existingSnap.exists()) {
-        throw new CatalogAuthError(
+        throw new AdminAuthError(
           'not-found',
           `পণ্যটি ("products/${product.id}") Firestore-এ পাওয়া যায়নি।`
         );
       }
       const existingData = existingSnap.data() as Record<string, unknown>;
-      if (isExistingProductDocRuleReady(existingData)) {
-        await updateDoc(prodRef, {
-          occasions: next.slice(0, 15),
-          updatedBy: authSession.uid,
-          updatedAt: serverTimestamp(),
-        });
-        await logAdminActivity(
-          'update',
-          'products',
-          product.id,
-          product.nameEn || product.name,
-          `${has ? 'Unassigned' : 'Assigned'} occasion ${occSlug}`
-        );
-      } else {
-        setMsg({
-          type: 'error',
-          text: 'এই পণ্যের কিছু পুরোনো ফিল্ড অসম্পূর্ণ থাকায় প্রথমে Product Management থেকে পণ্যটি একবার সংরক্ষণ (Save) করুন।',
-        });
-      }
+      existingIssues = inspectExistingProductIssues(existingData);
+      const cleanImages = sanitizeStoredImageUrls(
+        Array.isArray(existingData.images) && existingData.images.length > 0
+          ? existingData.images
+          : Array.isArray(product.images) && product.images.length > 0
+          ? product.images
+          : product.image
+          ? [product.image]
+          : []
+      );
+      const ingList = Array.isArray(existingData.ingredients)
+        ? (existingData.ingredients as string[])
+        : Array.isArray(product.ingredients)
+        ? product.ingredients
+        : [];
+      const szList = Array.isArray(existingData.sizes)
+        ? (existingData.sizes as string[])
+        : Array.isArray(product.sizes)
+        ? product.sizes
+        : [];
+
+      const updatePayload = isExistingProductDocRuleReady(existingData)
+        ? {
+            occasions: next,
+            updatedBy: authSession.uid.slice(0, 254),
+            updatedAt: serverTimestamp(),
+          }
+        : buildPartialProductUpdatePayload({
+            draft: { ...product, occasions: next },
+            original: product,
+            allCategories,
+            existingData,
+            ingredientsList: ingList,
+            sizesList: szList,
+            cleanImages,
+            actorUid: authSession.uid,
+          });
+
+      assertValidProductWritePreflight(
+        {
+          docId: prodRef.id,
+          payload: updatePayload,
+          existingData,
+          isCreate: false,
+        },
+        preflightIssues
+      );
+
+      await updateDoc(prodRef, updatePayload);
+      await logAdminActivity(
+        'update',
+        'products',
+        product.id,
+        product.nameEn || product.name,
+        `${has ? 'Unassigned' : 'Assigned'} occasion ${occSlug}`
+      );
     } catch (err) {
       setMsg({
         type: 'error',
@@ -5793,6 +5423,8 @@ export function AdminOccasionsPanel() {
           path: `products/${product.id}`,
           operation: 'UPDATE',
           staffRole,
+          existingIssues,
+          preflightIssues,
           authSession,
         }),
       });
@@ -6331,22 +5963,9 @@ export function AdminShowroomsPanel() {
     return payload;
   };
 
-  const fetchShowroomServerSnap = async (
+  const fetchShowroomServerSnap = (
     showroomRef: ReturnType<typeof doc>
-  ) => {
-    try {
-      return await getDocFromServer(showroomRef);
-    } catch (err) {
-      const code =
-        err && typeof err === 'object' && 'code' in err
-          ? String((err as { code?: unknown }).code || '').toLowerCase()
-          : '';
-      if (code === 'unavailable' || code.endsWith('/unavailable') || code.includes('failed-precondition')) {
-        return await getDoc(showroomRef);
-      }
-      throw err;
-    }
-  };
+  ) => fetchDocFromServer(showroomRef);
 
   const buildPartialShowroomUpdatePayload = (
     draft: Showroom,
@@ -6768,7 +6387,7 @@ export function AdminShowroomsPanel() {
 
   const saveShowroom = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editing) return;
+    if (!editing || busyShowroomId !== null || uploadingPhoto) return;
 
     const nameEn = (editing.nameEn ?? '').trim();
     const nameBn = (editing.name || '').trim();
@@ -6927,6 +6546,7 @@ export function AdminShowroomsPanel() {
   };
 
   const toggleShowroomVisibility = async (sr: Showroom) => {
+    if (busyShowroomId) return;
     setBusyShowroomId(sr.id);
     setMsg(null);
     let authSession: VerifiedWriteSession | null = null;
@@ -7013,6 +6633,7 @@ export function AdminShowroomsPanel() {
   };
 
   const nudgeShowroomOrder = async (sr: Showroom, delta: number) => {
+    if (busyShowroomId) return;
     const nextOrder = Math.min(1000, Math.max(1, Math.round(Number(sr.display_order ?? 1)) + delta));
     setBusyShowroomId(sr.id);
     setMsg(null);

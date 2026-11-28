@@ -63,46 +63,51 @@ service cloud.firestore {
       return rbacDoc().role;
     }
 
+    function normalizedStaffRole(d) {
+      return ('role' in d && d.role is string) ? d.role.trim().lower() : '';
+    }
+
+    function normalizedStaffStatus(d) {
+      return ('status' in d && d.status is string) ? d.status.trim().lower() : '';
+    }
+
     function isAdminRecordActive(d) {
-      return (!('uid' in d) || d.uid == null || (d.uid is string && (d.uid == '' || d.uid == request.auth.uid)))
+      return (!('uid' in d) || d.uid == null || (d.uid is string && (d.uid.trim() == '' || d.uid.trim() == request.auth.uid)))
         && (!('email' in d) || d.email == null || (d.email is string && (d.email.trim() == '' || d.email.trim().lower() == authEmail())))
         && (('active' in d && d.active == true)
           || ('isActive' in d && d.isActive == true)
-          || ('status' in d && d.status == 'active'))
+          || normalizedStaffStatus(d) == 'active')
         && !('active' in d && d.active == false)
         && !('isActive' in d && d.isActive == false)
-        && !('status' in d && d.status in ['disabled', 'suspended', 'inactive', 'revoked'])
-        && ('role' in d)
-        && d.role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'];
+        && !(normalizedStaffStatus(d) in ['disabled', 'suspended', 'inactive', 'revoked'])
+        && normalizedStaffRole(d) in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'];
     }
 
     function isRbacRecordActive(d) {
       return (!('email' in d) || d.email == null || (d.email is string && (d.email.trim() == '' || d.email.trim().lower() == authEmail())))
-        && ('status' in d)
-        && d.status == 'active'
-        && ('role' in d)
-        && d.role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'];
+        && normalizedStaffStatus(d) == 'active'
+        && normalizedStaffRole(d) in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor', 'moderator', 'support_agent'];
     }
 
     function hasRolePermission(d, perm) {
-      return d.role in ['primary_super_admin', 'super_admin']
+      return normalizedStaffRole(d) in ['primary_super_admin', 'super_admin']
         || ('permissions' in d && d.permissions is list && perm in d.permissions)
-        || (!('permissions' in d) && d.role == 'admin' && perm in [
+        || (!('permissions' in d) && normalizedStaffRole(d) == 'admin' && perm in [
           'dashboard_view', 'products_view', 'products_add', 'products_edit', 'products_delete',
           'categories_manage', 'showrooms_manage', 'banners_manage', 'recruitment_manage', 'reports_view'
         ])
-        || (!('permissions' in d) && d.role == 'manager' && perm in [
+        || (!('permissions' in d) && normalizedStaffRole(d) == 'manager' && perm in [
           'dashboard_view', 'products_view', 'products_add', 'products_edit',
           'categories_manage', 'showrooms_manage', 'complaints_manage', 'recruitment_manage', 'reports_view'
         ])
-        || (!('permissions' in d) && d.role == 'editor' && perm in [
+        || (!('permissions' in d) && normalizedStaffRole(d) == 'editor' && perm in [
           'dashboard_view', 'products_view', 'products_add', 'products_edit',
           'categories_manage', 'showrooms_manage', 'banners_manage', 'seo_manage'
         ])
-        || (!('permissions' in d) && d.role == 'moderator' && perm in [
+        || (!('permissions' in d) && normalizedStaffRole(d) == 'moderator' && perm in [
           'dashboard_view', 'complaints_manage', 'chat_manage', 'recruitment_manage', 'reports_view'
         ])
-        || (!('permissions' in d) && d.role == 'support_agent' && perm in [
+        || (!('permissions' in d) && normalizedStaffRole(d) == 'support_agent' && perm in [
           'dashboard_view', 'complaints_manage', 'chat_manage'
         ]);
     }
@@ -128,7 +133,7 @@ service cloud.firestore {
     }
 
     function currentStaffRole() {
-      return hasActiveAdminDoc() ? adminDoc().role : rbacRole();
+      return hasActiveAdminDoc() ? normalizedStaffRole(adminDoc()) : normalizedStaffRole(rbacDoc());
     }
 
     // Primary Super Admin gate: verified email + active Super Admin authority record in Firestore
@@ -136,14 +141,14 @@ service cloud.firestore {
       return hasVerifiedEmail()
         && authEmail() == 'mdmahmudulhashan0@gmail.com'
         && (
-          (hasActiveAdminDoc() && adminDoc().role in ['primary_super_admin', 'super_admin'])
-          || (hasActiveRbacDoc() && rbacRole() in ['primary_super_admin', 'super_admin'])
+          (hasActiveAdminDoc() && normalizedStaffRole(adminDoc()) in ['primary_super_admin', 'super_admin'])
+          || (hasActiveRbacDoc() && normalizedStaffRole(rbacDoc()) in ['primary_super_admin', 'super_admin'])
         );
     }
 
     function isSuperAdmin() {
-      return (hasActiveAdminDoc() && adminDoc().role in ['primary_super_admin', 'super_admin'])
-        || (hasActiveRbacDoc() && rbacRole() in ['primary_super_admin', 'super_admin']);
+      return (hasActiveAdminDoc() && normalizedStaffRole(adminDoc()) in ['primary_super_admin', 'super_admin'])
+        || (hasActiveRbacDoc() && normalizedStaffRole(rbacDoc()) in ['primary_super_admin', 'super_admin']);
     }
 
     function hasPermission(perm) {
@@ -160,13 +165,13 @@ service cloud.firestore {
 
     function isCatalogAdminDocAuthorized(d, perm) {
       return isAdminRecordActive(d)
-        && (d.role in ['primary_super_admin', 'super_admin']
+        && (normalizedStaffRole(d) in ['primary_super_admin', 'super_admin']
           || hasRolePermission(d, perm));
     }
 
     function isCatalogRbacDocAuthorized(d, perm) {
       return isRbacRecordActive(d)
-        && (d.role in ['primary_super_admin', 'super_admin']
+        && (normalizedStaffRole(d) in ['primary_super_admin', 'super_admin']
           || hasRolePermission(d, perm));
     }
 
@@ -181,13 +186,13 @@ service cloud.firestore {
     }
 
     function isCatalogAdmin() {
-      return (hasActiveAdminDoc() && adminDoc().role in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor'])
-        || (hasActiveRbacDoc() && rbacRole() in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor']);
+      return (hasActiveAdminDoc() && normalizedStaffRole(adminDoc()) in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor'])
+        || (hasActiveRbacDoc() && normalizedStaffRole(rbacDoc()) in ['primary_super_admin', 'super_admin', 'admin', 'manager', 'editor']);
     }
 
     function isSupportAgent() {
-      return (hasActiveAdminDoc() && adminDoc().role == 'support_agent')
-        || (hasActiveRbacDoc() && rbacRole() == 'support_agent');
+      return (hasActiveAdminDoc() && normalizedStaffRole(adminDoc()) == 'support_agent')
+        || (hasActiveRbacDoc() && normalizedStaffRole(rbacDoc()) == 'support_agent');
     }
 
     function isSupportStaff() {
@@ -196,8 +201,8 @@ service cloud.firestore {
 
     function isRecruitmentStaff() {
       return hasPermission('recruitment_manage')
-        || (hasActiveAdminDoc() && adminDoc().role == 'admin')
-        || (hasActiveRbacDoc() && rbacRole() == 'admin');
+        || (hasActiveAdminDoc() && normalizedStaffRole(adminDoc()) == 'admin')
+        || (hasActiveRbacDoc() && normalizedStaffRole(rbacDoc()) == 'admin');
     }
 
     function isBoundedStringList(arr, maxLen, maxItemLen) {
@@ -355,24 +360,6 @@ service cloud.firestore {
         && (!('seoDescription' in data) || (data.seoDescription is string && data.seoDescription.size() <= 400))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
-    }
-
-    function hasOnlyProductKeys(keys) {
-      return keys.removeAll([
-          'id', 'name', 'nameBn', 'nameEn', 'name_bn', 'name_en', 'slug',
-          'category', 'categorySlug', 'categoryName', 'categoryNameEn', 'productType',
-          'price', 'old_price', 'discount', 'price_label', 'priceUnit', 'unit',
-          'shortDescription', 'shortDescriptionEn', 'short_description_bn', 'short_description_en',
-          'description', 'descriptionEn', 'description_bn', 'description_en',
-          'image', 'imageUrl'
-        ]).removeAll([
-          'imageKey', 'images', 'masterKey', 'rating', 'stock', 'sku',
-          'ingredients', 'ingredients_bn', 'ingredients_en', 'sizes', 'weight', 'occasions', 'showrooms',
-          'availability', 'importantNotes', 'featured', 'popular',
-          'visible', 'active', 'isActive', 'deleted', 'status', 'display_order', 'archivedAt',
-          'seoTitle', 'seoDescription', 'seoImage',
-          'createdBy', 'updatedBy', 'createdAt', 'updatedAt'
-        ]).size() == 0;
     }
 
     function isValidProductCore(data) {

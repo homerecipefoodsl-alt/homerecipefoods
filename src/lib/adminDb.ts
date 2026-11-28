@@ -57,7 +57,7 @@ export interface AdminErrorDiag {
   collection?: string;
   documentId?: string;
   path?: string;
-  operation?: 'CREATE' | 'READ' | 'UPDATE' | 'DELETE' | 'WRITE';
+  operation?: 'CREATE' | 'READ' | 'UPDATE' | 'DELETE' | 'WRITE' | 'UPLOAD';
   staffRole?: string | null;
   existingIssues?: string[];
   preflightIssues?: string[];
@@ -230,16 +230,36 @@ export async function ensureVerifiedAdminWriteSession(params: {
 
   if (adminSnap.exists()) {
     const adminData = adminSnap.data() as Record<string, unknown>;
+    const adminUid =
+      typeof adminData.uid === 'string' ? adminData.uid.trim() : '';
     const adminEmail =
       typeof adminData.email === 'string' ? adminData.email.trim().toLowerCase() : '';
-    const adminRole = typeof adminData.role === 'string' ? adminData.role : undefined;
-    const adminStatus =
-      typeof adminData.status === 'string' ? adminData.status : 'active';
-    const isAdminFlagActive =
-      adminData.active !== false &&
-      adminData.isActive !== false &&
-      adminStatus === 'active';
+    const adminRole =
+      typeof adminData.role === 'string' ? adminData.role.trim().toLowerCase() : undefined;
+    const rawAdminStatus =
+      typeof adminData.status === 'string' ? adminData.status.trim().toLowerCase() : '';
+    const hasActiveTrue =
+      adminData.active === true ||
+      adminData.isActive === true ||
+      rawAdminStatus === 'active';
+    const hasExplicitInactive =
+      adminData.active === false ||
+      adminData.isActive === false ||
+      rawAdminStatus === 'disabled' ||
+      rawAdminStatus === 'suspended' ||
+      rawAdminStatus === 'inactive' ||
+      rawAdminStatus === 'revoked';
+    const isAdminFlagActive = hasActiveTrue && !hasExplicitInactive;
+    const adminStatus = isAdminFlagActive
+      ? rawAdminStatus || 'active'
+      : rawAdminStatus || 'disabled';
 
+    if (adminUid && adminUid !== refreshedUser.uid) {
+      throw new AdminAuthError(
+        'rbac/account-mismatch',
+        'অ্যাডমিন ডকুমেন্টের UID বর্তমান লগইন UID-এর সাথে মিলছে না।'
+      );
+    }
     if (adminEmail && adminEmail !== emailLower) {
       throw new AdminAuthError(
         'rbac/account-mismatch',
@@ -263,20 +283,9 @@ export async function ensureVerifiedAdminWriteSession(params: {
       // admins/{uid} already verified
     }
 
-    if (rbacRoleDoc) {
-      const rbacStatus =
-        typeof rbacRoleDoc.status === 'string' ? rbacRoleDoc.status : 'active';
-      if (rbacStatus !== 'active') {
-        throw new AdminAuthError(
-          'rbac/account-inactive',
-          'আপনার স্টাফ রোলটি বর্তমানে সাসপেন্ড বা নিষ্ক্রিয় রয়েছে।'
-        );
-      }
-    }
-
     const effectiveRole =
       adminRole ||
-      (typeof rbacRoleDoc?.role === 'string' ? rbacRoleDoc.role : undefined);
+      (typeof rbacRoleDoc?.role === 'string' ? rbacRoleDoc.role.trim().toLowerCase() : undefined);
 
     if (params.superAdminOnly && !isSuperAdminRole(effectiveRole)) {
       throw new AdminAuthError(
@@ -338,8 +347,10 @@ export async function ensureVerifiedAdminWriteSession(params: {
   }
 
   const rbacData = rbacSnap.data() as Record<string, unknown>;
-  const rbacStatus = typeof rbacData.status === 'string' ? rbacData.status : 'active';
-  const rbacRole = typeof rbacData.role === 'string' ? rbacData.role : undefined;
+  const rbacStatus =
+    typeof rbacData.status === 'string' ? rbacData.status.trim().toLowerCase() : 'active';
+  const rbacRole =
+    typeof rbacData.role === 'string' ? rbacData.role.trim().toLowerCase() : undefined;
   const rbacPerms = Array.isArray(rbacData.permissions)
     ? (rbacData.permissions as PermissionKey[])
     : [];

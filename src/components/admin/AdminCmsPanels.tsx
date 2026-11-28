@@ -105,10 +105,12 @@ export function AdminHomepageSectionsPanel() {
   };
 
   const handleSaveAll = async () => {
+    if (saving) return;
     setSaving(true);
     setSaved(false);
     setErrorMsg(null);
     let currentSectionId = 'layout';
+    let currentOperation: 'CREATE' | 'UPDATE' = 'UPDATE';
     let authSession: Awaited<ReturnType<typeof ensureVerifiedAdminWriteSession>> | null = null;
     try {
       authSession = await ensureVerifiedAdminWriteSession({
@@ -129,6 +131,7 @@ export function AdminHomepageSectionsPanel() {
 
         const sectionRef = doc(firestore, 'homepage_sections', s.id);
         const existingSnap = await fetchDocFromServer(sectionRef);
+        currentOperation = existingSnap.exists() ? 'UPDATE' : 'CREATE';
         const ctaBn = (s.ctaTextBn ?? s.cta_bn ?? '').trim().slice(0, 100);
         const ctaEn = (s.ctaTextEn ?? s.cta_en ?? '').trim().slice(0, 100);
         const ctaLink = (s.ctaLink ?? s.cta_link ?? '').trim().slice(0, 300);
@@ -181,7 +184,7 @@ export function AdminHomepageSectionsPanel() {
           collection: 'homepage_sections',
           documentId: currentSectionId,
           path: `homepage_sections/${currentSectionId}`,
-          operation: 'WRITE',
+          operation: currentOperation,
           authSession,
         })
       );
@@ -829,6 +832,7 @@ export function AdminSeoPanel() {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (saving) return;
     setSaved(false);
     setErrorMsg(null);
     const cleanTitle = (form.siteTitle || '').trim().slice(0, 160);
@@ -839,6 +843,7 @@ export function AdminSeoPanel() {
 
     setSaving(true);
     let authSession: Awaited<ReturnType<typeof ensureVerifiedAdminWriteSession>> | null = null;
+    let operation: 'CREATE' | 'UPDATE' = 'UPDATE';
     try {
       authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
@@ -847,6 +852,7 @@ export function AdminSeoPanel() {
       const firestore = requireDb();
       const seoRef = doc(firestore, 'seo_settings', 'main');
       const existingSnap = await fetchDocFromServer(seoRef);
+      operation = existingSnap.exists() ? 'UPDATE' : 'CREATE';
       const previousOgImage = existingSnap.exists()
         ? String((existingSnap.data() as Record<string, unknown>).ogImage || '')
         : seoSettings.ogImage || '';
@@ -903,7 +909,7 @@ export function AdminSeoPanel() {
           collection: 'seo_settings',
           documentId: 'main',
           path: 'seo_settings/main',
-          operation: 'WRITE',
+          operation,
           authSession,
         })
       );

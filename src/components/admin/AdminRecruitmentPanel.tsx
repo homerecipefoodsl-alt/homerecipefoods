@@ -536,6 +536,7 @@ export function AdminRecruitmentPanel({
 
   const handleSaveJob = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (savingJob) return;
     setErrorMsg(null);
     setBannerMsg(null);
 
@@ -767,6 +768,7 @@ export function AdminRecruitmentPanel({
 
   const handleCreateExamTemplate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (savingExamTemplate) return;
     setErrorMsg(null);
     setBannerMsg(null);
 

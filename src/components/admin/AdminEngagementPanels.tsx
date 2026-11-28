@@ -22,6 +22,7 @@ import {
   serverTimestamp,
   setDoc,
   updateDoc,
+  writeBatch,
 } from 'firebase/firestore';
 import { useStore } from '../../context/StoreContext';
 import { SEED_SITE_SETTINGS } from '../../data/seedData';
@@ -2713,7 +2714,9 @@ export function AdminLiveChatPanel({
       }
 
       const text = replyText.trim().slice(0, 2000);
-      await setDoc(doc(firestore, 'chat_sessions', activeSession.id, 'messages', msgId), {
+      const batch = writeBatch(firestore);
+      const msgRef = doc(firestore, 'chat_sessions', activeSession.id, 'messages', msgId);
+      batch.set(msgRef, {
         id: msgId,
         sessionId: activeSession.id,
         senderRole: 'admin',
@@ -2721,15 +2724,14 @@ export function AdminLiveChatPanel({
         text,
         createdAt: serverTimestamp(),
       });
-
-      currentPath = `chat_sessions/${activeSession.id}`;
-      await updateDoc(sessionRef, {
+      batch.update(sessionRef, {
         status: 'active',
         assignedAdminEmail: (user?.email || '').slice(0, 254),
         assignedAdminName: (user?.displayName || 'Home Recipe Representative').slice(0, 120),
         lastMessage: text.slice(0, 500),
         updatedAt: serverTimestamp(),
       });
+      await batch.commit();
 
       setReplyText('');
     } catch (err) {
@@ -2739,7 +2741,7 @@ export function AdminLiveChatPanel({
           collection: 'chat_sessions',
           documentId: activeSession.id,
           path: currentPath,
-          operation: currentPath.includes('/messages/') ? 'CREATE' : 'UPDATE',
+          operation: 'UPDATE',
           authSession,
         }),
       });
