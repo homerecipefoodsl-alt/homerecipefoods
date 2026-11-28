@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Archive,
   Award,
@@ -15,6 +15,7 @@ import {
   FileText,
   Lock,
   Plus,
+  RefreshCw,
   Search,
   Trash2,
   UserCheck,
@@ -35,7 +36,17 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { useStore } from '../../context/StoreContext';
-import { OperationType, db, handleFirestoreError, requireDb } from '../../lib/firebase';
+import {
+  AdminAuthError,
+  type VerifiedWriteSession,
+  ensureVerifiedAdminWriteSession,
+  fetchCollectionFromServer,
+  fetchDocFromServer,
+  formatAdminFirestoreError,
+  hasValidFirestoreTimestamp,
+  isValidFirestoreId,
+} from '../../lib/adminDb';
+import { db, requireDb } from '../../lib/firebase';
 import {
   APPLICATION_STATUS_META,
   APPLICATION_STATUS_OPTIONS,
@@ -193,7 +204,7 @@ export function AdminRecruitmentPanel({
 }: {
   initialSubTab?: RecruitmentSubTab;
 } = {}) {
-  const { user, isSuperAdmin, logAdminActivity } = useStore();
+  const { user, isSuperAdmin, hasPermission, logAdminActivity } = useStore();
   const [subTab, setSubTab] = useState<RecruitmentSubTab>(initialSubTab);
 
   useEffect(() => {
@@ -203,6 +214,7 @@ export function AdminRecruitmentPanel({
   const [applications, setApplications] = useState<JobApplication[]>([]);
   const [exams, setExams] = useState<JobExamTemplate[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [bannerMsg, setBannerMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -277,11 +289,12 @@ export function AdminRecruitmentPanel({
         },
         (err) => {
           setLoading(false);
-          try {
-            handleFirestoreError(err, OperationType.LIST, 'jobPostings');
-          } catch {
-            // Logged structurally
-          }
+          setErrorMsg(
+            formatAdminFirestoreError(err, 'jobPostings_list', {
+              collection: 'jobPostings',
+              operation: 'READ',
+            })
+          );
         }
       )
     );
@@ -297,11 +310,12 @@ export function AdminRecruitmentPanel({
           );
         },
         (err) => {
-          try {
-            handleFirestoreError(err, OperationType.LIST, 'jobApplications');
-          } catch {
-            // Logged structurally
-          }
+          setErrorMsg(
+            formatAdminFirestoreError(err, 'jobApplications_list', {
+              collection: 'jobApplications',
+              operation: 'READ',
+            })
+          );
         }
       )
     );
@@ -313,11 +327,12 @@ export function AdminRecruitmentPanel({
           setExams(snap.docs.map((d) => d.data() as JobExamTemplate));
         },
         (err) => {
-          try {
-            handleFirestoreError(err, OperationType.LIST, 'jobExams');
-          } catch {
-            // Logged structurally
-          }
+          setErrorMsg(
+            formatAdminFirestoreError(err, 'jobExams_list', {
+              collection: 'jobExams',
+              operation: 'READ',
+            })
+          );
         }
       )
     );
@@ -325,6 +340,64 @@ export function AdminRecruitmentPanel({
     return () => {
       unsubs.forEach((u) => u());
     };
+  }, []);
+
+  const refreshRecruitmentData = useCallback(async () => {
+    setRefreshing(true);
+    setErrorMsg(null);
+    try {
+      const firestore = requireDb();
+      const [jobsRes, appsRes, examsRes] = await Promise.allSettled([
+        fetchCollectionFromServer(
+          query(collection(firestore, 'jobPostings'), orderBy('updatedAt', 'desc'))
+        ),
+        fetchCollectionFromServer(
+          query(collection(firestore, 'jobApplications'), orderBy('createdAt', 'desc'))
+        ),
+        fetchCollectionFromServer(
+          query(collection(firestore, 'jobExams'), orderBy('createdAt', 'desc'))
+        ),
+      ]);
+
+      const failures: unknown[] = [];
+      if (jobsRes.status === 'fulfilled') {
+        setJobs(jobsRes.value.docs.map((d) => d.data() as JobPosting));
+      } else {
+        failures.push(jobsRes.reason);
+      }
+      if (appsRes.status === 'fulfilled') {
+        const list = appsRes.value.docs.map((d) => d.data() as JobApplication);
+        setApplications(list);
+        setSelectedApp((prev) =>
+          prev ? list.find((a) => a.id === prev.id) || null : null
+        );
+      } else {
+        failures.push(appsRes.reason);
+      }
+      if (examsRes.status === 'fulfilled') {
+        setExams(examsRes.value.docs.map((d) => d.data() as JobExamTemplate));
+      } else {
+        failures.push(examsRes.reason);
+      }
+
+      if (failures.length > 0) {
+        setErrorMsg(
+          formatAdminFirestoreError(failures[0], 'recruitment_refresh', {
+            collection: 'jobApplications',
+            operation: 'READ',
+          })
+        );
+      }
+    } catch (err) {
+      setErrorMsg(
+        formatAdminFirestoreError(err, 'recruitment_refresh', {
+          collection: 'jobPostings',
+          operation: 'READ',
+        })
+      );
+    } finally {
+      setRefreshing(false);
+    }
   }, []);
 
   const visibleJobs = useMemo(() => jobs.filter((j) => !j.deleted), [jobs]);
@@ -489,11 +562,23 @@ export function AdminRecruitmentPanel({
     }
 
     setSavingJob(true);
+    let authSession: VerifiedWriteSession | null = null;
+    const isEdit = Boolean(jobForm.id);
+    const id =
+      jobForm.id || `job_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'recruitment_manage',
+      });
+      if (!isValidFirestoreId(id)) {
+        throw new AdminAuthError(
+          'validation/preflight-failed',
+          'নিয়োগ বিজ্ঞপ্তির ডকুমেন্ট আইডি সঠিক নয়।'
+        );
+      }
+
       const firestore = requireDb();
-      const isEdit = Boolean(jobForm.id);
-      const id =
-        jobForm.id || `job_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       const slug =
         (jobForm.slug && /^[a-z0-9-]+$/.test(jobForm.slug.trim())
           ? jobForm.slug.trim()
@@ -535,13 +620,16 @@ export function AdminRecruitmentPanel({
         updatedAt: serverTimestamp(),
       };
 
+      const jobRef = doc(firestore, 'jobPostings', id);
       if (isEdit) {
-        const existingJob = jobs.find((j) => j.id === id);
-        await setDoc(doc(firestore, 'jobPostings', id), {
-          ...payload,
-          createdBy: existingJob?.createdBy || user?.email || '',
-          createdAt: existingJob?.createdAt || serverTimestamp(),
-        });
+        const existingSnap = await fetchDocFromServer(jobRef);
+        if (!existingSnap.exists()) {
+          throw new AdminAuthError(
+            'not-found',
+            `নিয়োগ বিজ্ঞপ্তি (jobPostings/${id}) ডাটাবেসে পাওয়া যায়নি। রিফ্রেশ করে আবার চেষ্টা করুন।`
+          );
+        }
+        await updateDoc(jobRef, payload);
         await logAdminActivity(
           'update',
           'jobPostings',
@@ -551,9 +639,9 @@ export function AdminRecruitmentPanel({
         );
         setBannerMsg('নিয়োগ বিজ্ঞপ্তি সফলভাবে আপডেট হয়েছে।');
       } else {
-        await setDoc(doc(firestore, 'jobPostings', id), {
+        await setDoc(jobRef, {
           ...payload,
-          createdBy: user?.email || '',
+          createdBy: authSession.email || user?.email || '',
           createdAt: serverTimestamp(),
         });
         await logAdminActivity(
@@ -568,21 +656,42 @@ export function AdminRecruitmentPanel({
 
       setEditorOpen(false);
     } catch (err) {
-      setErrorMsg('নিয়োগ বিজ্ঞপ্তি সেভ করতে সমস্যা হয়েছে।');
-      try {
-        handleFirestoreError(err, OperationType.WRITE, 'jobPostings');
-      } catch {
-        // Logged structurally
-      }
+      setErrorMsg(
+        formatAdminFirestoreError(err, 'job_save', {
+          collection: 'jobPostings',
+          documentId: id,
+          path: `jobPostings/${id}`,
+          operation: isEdit ? 'UPDATE' : 'CREATE',
+          authSession,
+        })
+      );
     } finally {
       setSavingJob(false);
     }
   };
 
   const changeJobStatus = async (job: JobPosting, status: JobCircularStatus) => {
+    setErrorMsg(null);
+    setBannerMsg(null);
+    let authSession: VerifiedWriteSession | null = null;
     try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'recruitment_manage',
+      });
+      if (!isValidFirestoreId(job.id)) {
+        throw new AdminAuthError('validation/preflight-failed', 'বিজ্ঞপ্তির আইডি সঠিক নয়।');
+      }
       const firestore = requireDb();
-      await updateDoc(doc(firestore, 'jobPostings', job.id), {
+      const jobRef = doc(firestore, 'jobPostings', job.id);
+      const existingSnap = await fetchDocFromServer(jobRef);
+      if (!existingSnap.exists()) {
+        throw new AdminAuthError(
+          'not-found',
+          `নিয়োগ বিজ্ঞপ্তি (jobPostings/${job.id}) ডাটাবেসে পাওয়া যায়নি।`
+        );
+      }
+      await updateDoc(jobRef, {
         status,
         updatedAt: serverTimestamp(),
       });
@@ -595,24 +704,46 @@ export function AdminRecruitmentPanel({
       );
       setBannerMsg(`"${job.title}" বিজ্ঞপ্তির অবস্থা "${status}" করা হয়েছে।`);
     } catch (err) {
-      setErrorMsg('স্ট্যাটাস পরিবর্তন করা যায়নি।');
-      try {
-        handleFirestoreError(err, OperationType.UPDATE, `jobPostings/${job.id}`);
-      } catch {
-        // Logged
-      }
+      setErrorMsg(
+        formatAdminFirestoreError(err, 'job_status', {
+          collection: 'jobPostings',
+          documentId: job.id,
+          path: `jobPostings/${job.id}`,
+          operation: 'UPDATE',
+          authSession,
+        })
+      );
     }
   };
 
   const archiveOrDeleteJob = async (job: JobPosting, hardDelete: boolean) => {
+    setErrorMsg(null);
+    setBannerMsg(null);
+    let authSession: VerifiedWriteSession | null = null;
     try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'recruitment_manage',
+        superAdminOnly: hardDelete,
+      });
+      if (!isValidFirestoreId(job.id)) {
+        throw new AdminAuthError('validation/preflight-failed', 'বিজ্ঞপ্তির আইডি সঠিক নয়।');
+      }
       const firestore = requireDb();
+      const jobRef = doc(firestore, 'jobPostings', job.id);
+      const existingSnap = await fetchDocFromServer(jobRef);
+      if (!existingSnap.exists()) {
+        throw new AdminAuthError(
+          'not-found',
+          `নিয়োগ বিজ্ঞপ্তি (jobPostings/${job.id}) ইতিমধ্যে মুছে ফেলা হয়েছে বা পাওয়া যায়নি।`
+        );
+      }
       if (hardDelete && isSuperAdmin) {
-        await deleteDoc(doc(firestore, 'jobPostings', job.id));
+        await deleteDoc(jobRef);
         await logAdminActivity('delete', 'jobPostings', job.id, job.title);
         setBannerMsg(`"${job.title}" স্থায়ীভাবে ডিলিট করা হয়েছে।`);
       } else {
-        await updateDoc(doc(firestore, 'jobPostings', job.id), {
+        await updateDoc(jobRef, {
           deleted: true,
           status: 'Closed',
           updatedAt: serverTimestamp(),
@@ -622,12 +753,15 @@ export function AdminRecruitmentPanel({
       }
       setConfirmDeleteJobId(null);
     } catch (err) {
-      setErrorMsg('বিজ্ঞপ্তি মুছতে সমস্যা হয়েছে।');
-      try {
-        handleFirestoreError(err, OperationType.DELETE, `jobPostings/${job.id}`);
-      } catch {
-        // Logged
-      }
+      setErrorMsg(
+        formatAdminFirestoreError(err, 'job_delete', {
+          collection: 'jobPostings',
+          documentId: job.id,
+          path: `jobPostings/${job.id}`,
+          operation: hardDelete ? 'DELETE' : 'UPDATE',
+          authSession,
+        })
+      );
     }
   };
 
@@ -651,9 +785,21 @@ export function AdminRecruitmentPanel({
     }
 
     setSavingExamTemplate(true);
+    let authSession: VerifiedWriteSession | null = null;
+    const examId = `exam_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'recruitment_manage',
+      });
+      if (!isValidFirestoreId(examId) || !isValidFirestoreId(targetJob.id)) {
+        throw new AdminAuthError(
+          'validation/preflight-failed',
+          'পরীক্ষার টেমপ্লেট বা পদের আইডি সঠিক নয়।'
+        );
+      }
+
       const firestore = requireDb();
-      const examId = `exam_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       const totalMarks = Math.max(1, Math.min(10000, Math.round(Number(examForm.totalMarks) || 100)));
       const passMarks = Math.max(0, Math.min(totalMarks, Math.round(Number(examForm.passMarks) || 0)));
 
@@ -671,7 +817,7 @@ export function AdminRecruitmentPanel({
         instructions: examForm.instructions.trim().slice(0, 1000),
         totalMarks,
         passMarks,
-        createdBy: user?.email || '',
+        createdBy: authSession.email || user?.email || '',
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
@@ -686,12 +832,15 @@ export function AdminRecruitmentPanel({
       setBannerMsg(`"${examForm.title.trim()}" পরীক্ষা টেমপ্লেট তৈরি হয়েছে। এখন প্রার্থীদের সাথে যুক্ত করতে পারেন।`);
       setExamForm(createEmptyExamTemplateForm(targetJob.id));
     } catch (err) {
-      setErrorMsg('পরীক্ষা তৈরি করতে সমস্যা হয়েছে।');
-      try {
-        handleFirestoreError(err, OperationType.CREATE, 'jobExams');
-      } catch {
-        // Logged
-      }
+      setErrorMsg(
+        formatAdminFirestoreError(err, 'job_exam_create', {
+          collection: 'jobExams',
+          documentId: examId,
+          path: `jobExams/${examId}`,
+          operation: 'CREATE',
+          authSession,
+        })
+      );
     } finally {
       setSavingExamTemplate(false);
     }
@@ -753,11 +902,43 @@ export function AdminRecruitmentPanel({
     setSavingApp(true);
     setErrorMsg(null);
     setBannerMsg(null);
+    let authSession: VerifiedWriteSession | null = null;
 
     try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'recruitment_manage',
+      });
+      if (
+        !isValidFirestoreId(params.app.id) ||
+        !isValidFirestoreId(params.app.applicationCode)
+      ) {
+        throw new AdminAuthError(
+          'validation/preflight-failed',
+          'আবেদনের ডকুমেন্ট বা স্ট্যাটাস কোড সঠিক নয়।'
+        );
+      }
+
       const firestore = requireDb();
+      const appRef = doc(firestore, 'jobApplications', params.app.id);
+      const statusRef = doc(
+        firestore,
+        'jobApplicationStatuses',
+        params.app.applicationCode
+      );
+      const [appSnap, statusSnap] = await Promise.all([
+        fetchDocFromServer(appRef),
+        fetchDocFromServer(statusRef),
+      ]);
+      if (!appSnap.exists()) {
+        throw new AdminAuthError(
+          'not-found',
+          `আবেদনটি (jobApplications/${params.app.id}) ডাটাবেসে পাওয়া যায়নি। রিফ্রেশ করে আবার চেষ্টা করুন।`
+        );
+      }
+
       const nowIso = new Date().toISOString();
-      const reviewerEmail = user?.email || '';
+      const reviewerEmail = authSession.email || user?.email || '';
       const nextHistory = [
         ...(params.app.statusHistory || []),
         {
@@ -794,9 +975,9 @@ export function AdminRecruitmentPanel({
       }
 
       const batch = writeBatch(firestore);
-      batch.update(doc(firestore, 'jobApplications', params.app.id), appUpdates);
+      batch.update(appRef, appUpdates);
 
-      // Keep Zero-PII status tracker synchronized with mobileHash preserved
+      // Keep Zero-PII status tracker synchronized with mobileHash & createdAt preserved
       const mobileHash = await computeMobileVerificationHash(params.app.mobile);
       const activeExam =
         params.examPayload !== undefined ? params.examPayload : params.app.exam;
@@ -805,7 +986,7 @@ export function AdminRecruitmentPanel({
           ? params.interviewPayload
           : params.app.interview;
 
-      batch.set(doc(firestore, 'jobApplicationStatuses', params.app.applicationCode), {
+      const statusData: Record<string, unknown> = {
         id: params.app.applicationCode,
         jobId: params.app.jobId,
         jobTitle: params.app.jobTitle,
@@ -846,9 +1027,19 @@ export function AdminRecruitmentPanel({
               interviewNotes: activeInterview.interviewNotes || '',
             }
           : {}),
-        createdAt: params.app.createdAt || serverTimestamp(),
         updatedAt: serverTimestamp(),
-      });
+      };
+
+      if (statusSnap.exists()) {
+        batch.update(statusRef, statusData);
+      } else {
+        batch.set(statusRef, {
+          ...statusData,
+          createdAt: hasValidFirestoreTimestamp(params.app.createdAt)
+            ? params.app.createdAt
+            : serverTimestamp(),
+        });
+      }
 
       await batch.commit();
       await logAdminActivity(
@@ -860,12 +1051,15 @@ export function AdminRecruitmentPanel({
       );
       setBannerMsg(`${params.app.applicationCode} — ${params.historyNote}`);
     } catch (err) {
-      setErrorMsg('আবেদন আপডেট করতে সমস্যা হয়েছে।');
-      try {
-        handleFirestoreError(err, OperationType.UPDATE, `jobApplications/${params.app.id}`);
-      } catch {
-        // Logged
-      }
+      setErrorMsg(
+        formatAdminFirestoreError(err, 'job_application_update', {
+          collection: 'jobApplications',
+          documentId: params.app.id,
+          path: `jobApplications/${params.app.id}`,
+          operation: 'UPDATE',
+          authSession,
+        })
+      );
     } finally {
       setSavingApp(false);
     }
@@ -973,9 +1167,37 @@ export function AdminRecruitmentPanel({
   const handleDeleteApplicationPermanent = async (app: JobApplication) => {
     if (!isSuperAdmin) return;
     setSavingApp(true);
+    setErrorMsg(null);
+    setBannerMsg(null);
+    let authSession: VerifiedWriteSession | null = null;
     try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'recruitment_manage',
+        superAdminOnly: true,
+      });
+      if (!isValidFirestoreId(app.id)) {
+        throw new AdminAuthError('validation/preflight-failed', 'আবেদনের আইডি সঠিক নয়।');
+      }
       const firestore = requireDb();
-      await deleteDoc(doc(firestore, 'jobApplications', app.id));
+      const appRef = doc(firestore, 'jobApplications', app.id);
+      const appSnap = await fetchDocFromServer(appRef);
+      if (!appSnap.exists()) {
+        throw new AdminAuthError(
+          'not-found',
+          `আবেদনটি (jobApplications/${app.id}) ইতিমধ্যে মুছে ফেলা হয়েছে।`
+        );
+      }
+      const batch = writeBatch(firestore);
+      batch.delete(appRef);
+      if (isValidFirestoreId(app.applicationCode)) {
+        const statusRef = doc(firestore, 'jobApplicationStatuses', app.applicationCode);
+        const statusSnap = await fetchDocFromServer(statusRef);
+        if (statusSnap.exists()) {
+          batch.delete(statusRef);
+        }
+      }
+      await batch.commit();
       await logAdminActivity(
         'delete',
         'jobApplications',
@@ -987,12 +1209,15 @@ export function AdminRecruitmentPanel({
       setConfirmDeleteAppId(null);
       setBannerMsg(`${app.applicationCode} স্থায়ীভাবে ডিলিট করা হয়েছে।`);
     } catch (err) {
-      setErrorMsg('আবেদন ডিলিট করতে সমস্যা হয়েছে।');
-      try {
-        handleFirestoreError(err, OperationType.DELETE, `jobApplications/${app.id}`);
-      } catch {
-        // Logged
-      }
+      setErrorMsg(
+        formatAdminFirestoreError(err, 'job_application_delete', {
+          collection: 'jobApplications',
+          documentId: app.id,
+          path: `jobApplications/${app.id}`,
+          operation: 'DELETE',
+          authSession,
+        })
+      );
     } finally {
       setSavingApp(false);
     }
@@ -1028,6 +1253,15 @@ export function AdminRecruitmentPanel({
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={refreshing}
+            onClick={() => void refreshRecruitmentData()}
+            className="inline-flex min-h-[40px] cursor-pointer items-center gap-1.5 rounded-lg border border-[#E7E5E4] bg-white px-3 py-2 text-xs font-semibold text-[#1C1917] hover:bg-[#F5F4F0] disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            <span>Refresh</span>
+          </button>
           <button
             type="button"
             onClick={openCreateJobModal}

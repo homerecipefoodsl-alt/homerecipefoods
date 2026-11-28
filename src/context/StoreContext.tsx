@@ -10,8 +10,6 @@ import {
 import {
   collection,
   doc,
-  getDoc,
-  getDocs,
   onSnapshot,
   orderBy,
   query,
@@ -54,6 +52,7 @@ import {
   handleFirestoreError,
   isFirebaseConfigured,
 } from '../lib/firebase';
+import { fetchCollectionFromServer, fetchDocFromServer } from '../lib/adminDb';
 import {
   DEFAULT_ROLE_PERMISSIONS,
   isSuperAdminRole,
@@ -142,7 +141,7 @@ async function bootstrapPrimarySuperAdminDocs(
   const usernameRef = doc(activeDb, 'admin_usernames', PRIMARY_SUPER_ADMIN_USERNAME);
 
   try {
-    const existingAdmin = await getDoc(adminRef);
+    const existingAdmin = await fetchDocFromServer(adminRef);
     if (existingAdmin.exists()) {
       return existingAdmin.data() as AdminRecord;
     }
@@ -164,7 +163,7 @@ async function bootstrapPrimarySuperAdminDocs(
     });
 
     try {
-      const existingRbac = await getDoc(rbacRef);
+      const existingRbac = await fetchDocFromServer(rbacRef);
       if (!existingRbac.exists()) {
         await setDoc(rbacRef, {
           email: PRIMARY_SUPER_ADMIN_EMAIL,
@@ -186,7 +185,7 @@ async function bootstrapPrimarySuperAdminDocs(
     }
 
     try {
-      const existingUsername = await getDoc(usernameRef);
+      const existingUsername = await fetchDocFromServer(usernameRef);
       if (!existingUsername.exists()) {
         await setDoc(usernameRef, {
           username: PRIMARY_SUPER_ADMIN_USERNAME,
@@ -199,7 +198,7 @@ async function bootstrapPrimarySuperAdminDocs(
       // Non-fatal if admin_usernames/mahmud already exists
     }
 
-    const createdAdmin = await getDoc(adminRef);
+    const createdAdmin = await fetchDocFromServer(adminRef);
     return createdAdmin.exists() ? (createdAdmin.data() as AdminRecord) : null;
   } catch {
     return null;
@@ -253,6 +252,9 @@ interface StoreContextValue {
   error: string | null;
   productsError: string | null;
   showroomsError: string | null;
+  cmsSyncError: string | null;
+  refreshingStoreData: boolean;
+  refreshStoreData: () => Promise<void>;
 
   // Auth & RBAC state
   user: User | null;
@@ -333,6 +335,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [productsError, setProductsError] = useState<string | null>(null);
   const [showroomsError, setShowroomsError] = useState<string | null>(null);
+  const [cmsSyncError, setCmsSyncError] = useState<string | null>(null);
+  const [refreshingStoreData, setRefreshingStoreData] = useState(false);
 
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(!isFirebaseConfigured);
@@ -607,7 +611,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
         // 1. Read Primary Authority: admins/{uid}
         try {
-          const adminSnap = await getDoc(adminRef);
+          const adminSnap = await fetchDocFromServer(adminRef);
           if (adminSnap.exists()) {
             adminSnapDataCache = adminSnap.data() as AdminRecord;
           }
@@ -618,7 +622,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         // 2. Fallback read: rbac_roles/{email} only if admins/{uid} does not exist
         if (!adminSnapDataCache) {
           try {
-            const activeRbacSnap = await getDoc(rbacRef);
+            const activeRbacSnap = await fetchDocFromServer(rbacRef);
             if (activeRbacSnap.exists()) {
               rbacSnapDataCache = activeRbacSnap.data() as RbacRoleEntry;
             }
@@ -629,7 +633,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
         // 3. Check user profile status (never promotes role; only tracks account suspension/profile)
         try {
-          const userSnap = await getDoc(userRef);
+          const userSnap = await fetchDocFromServer(userRef);
           if (userSnap.exists()) {
             const existingUser = userSnap.data() as UserAccount;
             if (existingUser.status === 'disabled' || existingUser.status === 'suspended') {
@@ -648,7 +652,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
         // Non-elevating user profile metadata sync only when a profile doc doesn't conflict
         try {
-          const userSnap = await getDoc(userRef);
+          const userSnap = await fetchDocFromServer(userRef);
           if (!userSnap.exists()) {
             await setDoc(userRef, {
               uid: currentUser.uid,
@@ -757,7 +761,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             setAdminProfile(liveAdminDoc);
             syncEffectiveAuthority();
           },
-          () => {}
+          (err) => {
+            console.warn('Admin authority listener warning:', err);
+          }
         );
 
         unsubRbac = onSnapshot(
@@ -766,7 +772,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             liveRbacDoc = snap.exists() ? (snap.data() as RbacRoleEntry) : null;
             syncEffectiveAuthority();
           },
-          () => {}
+          (err) => {
+            console.warn('RBAC role listener warning:', err);
+          }
         );
 
         unsubUserDoc = onSnapshot(
@@ -779,7 +787,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
               syncEffectiveAuthority();
             }
           },
-          () => {}
+          (err) => {
+            console.warn('User profile listener warning:', err);
+          }
         );
       } catch (err) {
         console.error('Admin verification error:', err);
@@ -913,7 +923,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setDbGreetingItems(multiItems);
         markSettled('greetings');
       },
-      () => markSettled('greetings')
+      (err) => {
+        console.warn('Greetings loading warning:', err);
+        setCmsSyncError((prev) => prev || 'শুভেচ্ছা ও ব্যানার তথ্য লোড করতে সমস্যা হয়েছে।');
+        markSettled('greetings');
+      }
     );
 
     const unsubSettings = onSnapshot(
@@ -922,7 +936,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setDbSettings(snap.exists() ? (snap.data() as SiteSettings) : null);
         markSettled('site_settings');
       },
-      () => markSettled('site_settings')
+      (err) => {
+        console.warn('Site settings loading warning:', err);
+        setCmsSyncError((prev) => prev || 'সাইট সেটিংস লোড করতে সমস্যা হয়েছে।');
+        markSettled('site_settings');
+      }
     );
 
     const unsubHeroBanners = onSnapshot(
@@ -932,7 +950,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<HeroSlide, 'id'>) }))
         );
       },
-      () => {}
+      (err) => {
+        console.warn('Hero banners loading warning:', err);
+        setCmsSyncError((prev) => prev || 'হিরো ব্যানার লোড করতে সমস্যা হয়েছে।');
+      }
     );
 
     const unsubSections = onSnapshot(
@@ -945,7 +966,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           }))
         );
       },
-      () => {}
+      (err) => {
+        console.warn('Homepage sections loading warning:', err);
+        setCmsSyncError((prev) => prev || 'হোমপেজ সেকশন লোড করতে সমস্যা হয়েছে।');
+      }
     );
 
     const unsubSeo = onSnapshot(
@@ -953,7 +977,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       (snap) => {
         setDbSeoSettings(snap.exists() ? (snap.data() as SeoSettings) : null);
       },
-      () => {}
+      (err) => {
+        console.warn('SEO settings loading warning:', err);
+        setCmsSyncError((prev) => prev || 'SEO সেটিংস লোড করতে সমস্যা হয়েছে।');
+      }
     );
 
     const unsubAiKnowledge = onSnapshot(
@@ -966,7 +993,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           }))
         );
       },
-      () => {}
+      (err) => {
+        console.warn('AI knowledge loading warning:', err);
+        setCmsSyncError((prev) => prev || 'AI Knowledge তথ্য লোড করতে সমস্যা হয়েছে।');
+      }
     );
 
     const unsubMedia = onSnapshot(
@@ -979,7 +1009,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           }))
         );
       },
-      () => {}
+      (err) => {
+        console.warn('Media library loading warning:', err);
+        setCmsSyncError((prev) => prev || 'মিডিয়া লাইব্রেরি লোড করতে সমস্যা হয়েছে।');
+      }
     );
 
     return () => {
@@ -995,6 +1028,154 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       unsubAiKnowledge();
       unsubMedia();
     };
+  }, []);
+
+  const refreshStoreData = useCallback(async () => {
+    if (!isFirebaseConfigured || !db) return;
+    const activeDb = db;
+    setRefreshingStoreData(true);
+    setCmsSyncError(null);
+    const failedCollections: string[] = [];
+
+    try {
+      const results = await Promise.allSettled([
+        fetchCollectionFromServer(query(collection(activeDb, 'categories'), orderBy('order', 'asc'))),
+        fetchCollectionFromServer(query(collection(activeDb, 'occasions'), orderBy('order', 'asc'))),
+        fetchCollectionFromServer(collection(activeDb, 'products')),
+        fetchCollectionFromServer(collection(activeDb, 'showrooms')),
+        fetchCollectionFromServer(collection(activeDb, 'greetings')),
+        fetchDocFromServer(doc(activeDb, 'site_settings', 'main')),
+        fetchCollectionFromServer(collection(activeDb, 'hero_banners')),
+        fetchCollectionFromServer(collection(activeDb, 'homepage_sections')),
+        fetchDocFromServer(doc(activeDb, 'seo_settings', 'main')),
+        fetchCollectionFromServer(collection(activeDb, 'ai_knowledge')),
+        fetchCollectionFromServer(collection(activeDb, 'media')),
+      ]);
+
+      const [
+        catsRes,
+        occsRes,
+        prodsRes,
+        showroomsRes,
+        greetingsRes,
+        settingsRes,
+        bannersRes,
+        sectionsRes,
+        seoRes,
+        aiRes,
+        mediaRes,
+      ] = results;
+
+      if (catsRes.status === 'fulfilled') {
+        setError(null);
+        setDbCategories(
+          catsRes.value.docs.map((d) => ({ ...(d.data() as Category), id: d.id }))
+        );
+      } else {
+        failedCollections.push('categories');
+      }
+
+      if (occsRes.status === 'fulfilled') {
+        setDbOccasions(
+          occsRes.value.docs.map((d) => ({ ...(d.data() as Occasion), id: d.id }))
+        );
+      } else {
+        failedCollections.push('occasions');
+      }
+
+      if (prodsRes.status === 'fulfilled') {
+        setProductsError(null);
+        setDbProducts(
+          prodsRes.value.docs.map((d) => ({ ...(d.data() as Product), id: d.id }))
+        );
+      } else {
+        failedCollections.push('products');
+      }
+
+      if (showroomsRes.status === 'fulfilled') {
+        setShowroomsError(null);
+        setDbShowrooms(
+          showroomsRes.value.docs.map((d) => ({ ...(d.data() as Showroom), id: d.id }))
+        );
+      } else {
+        failedCollections.push('showrooms');
+      }
+
+      if (greetingsRes.status === 'fulfilled') {
+        const dailyDoc = greetingsRes.value.docs.find((d) => d.id === 'daily');
+        setDbGreeting(dailyDoc ? (dailyDoc.data() as GreetingConfig) : null);
+        setDbGreetingItems(
+          greetingsRes.value.docs
+            .filter((d) => d.id !== 'daily')
+            .map((d) => ({ id: d.id, ...(d.data() as Omit<GreetingItem, 'id'>) }))
+        );
+      } else {
+        failedCollections.push('greetings');
+      }
+
+      if (settingsRes.status === 'fulfilled') {
+        setDbSettings(
+          settingsRes.value.exists() ? (settingsRes.value.data() as SiteSettings) : null
+        );
+      } else {
+        failedCollections.push('site_settings');
+      }
+
+      if (bannersRes.status === 'fulfilled') {
+        setDbHeroBanners(
+          bannersRes.value.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<HeroSlide, 'id'>) }))
+        );
+      } else {
+        failedCollections.push('hero_banners');
+      }
+
+      if (sectionsRes.status === 'fulfilled') {
+        setDbHomepageSections(
+          sectionsRes.value.docs.map((d) => ({
+            id: d.id,
+            ...(d.data() as Omit<HomepageSection, 'id'>),
+          }))
+        );
+      } else {
+        failedCollections.push('homepage_sections');
+      }
+
+      if (seoRes.status === 'fulfilled') {
+        setDbSeoSettings(seoRes.value.exists() ? (seoRes.value.data() as SeoSettings) : null);
+      } else {
+        failedCollections.push('seo_settings');
+      }
+
+      if (aiRes.status === 'fulfilled') {
+        setDbAiKnowledge(
+          aiRes.value.docs.map((d) => ({
+            id: d.id,
+            ...(d.data() as Omit<AiKnowledgeEntry, 'id'>),
+          }))
+        );
+      } else {
+        failedCollections.push('ai_knowledge');
+      }
+
+      if (mediaRes.status === 'fulfilled') {
+        setDbMediaItems(
+          mediaRes.value.docs.map((d) => ({
+            id: d.id,
+            ...(d.data() as Omit<MediaItem, 'id'>),
+          }))
+        );
+      } else {
+        failedCollections.push('media');
+      }
+
+      if (failedCollections.length > 0) {
+        setCmsSyncError(
+          `সার্ভার থেকে কিছু ডাটা রিফ্রেশ করা যায়নি (${failedCollections.join(', ')})।`
+        );
+      }
+    } finally {
+      setRefreshingStoreData(false);
+    }
   }, []);
 
   const firestoreEmpty = useMemo(() => {
@@ -1637,7 +1818,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     let resolvedEmail = cleanId;
     if (!cleanId.includes('@')) {
       try {
-        const usernameSnap = await getDoc(doc(db, 'admin_usernames', cleanId));
+        const usernameSnap = await fetchDocFromServer(doc(db, 'admin_usernames', cleanId));
         if (usernameSnap.exists()) {
           const mapping = usernameSnap.data() as AdminUsernameMapping;
           if (!mapping.active || !mapping.email) {
@@ -1715,7 +1896,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     let rbacEntry: RbacRoleEntry | null = null;
 
     try {
-      const adminSnap = await getDoc(doc(db, 'admins', cred.user.uid));
+      const adminSnap = await fetchDocFromServer(doc(db, 'admins', cred.user.uid));
       if (adminSnap.exists()) {
         adminEntry = adminSnap.data() as AdminRecord;
       }
@@ -1736,7 +1917,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           const initJson = (await initResp.json()) as { adminDocCreated?: boolean };
           if (initJson.adminDocCreated) {
             await cred.user.getIdToken(true);
-            const recheckSnap = await getDoc(doc(db, 'admins', cred.user.uid));
+            const recheckSnap = await fetchDocFromServer(doc(db, 'admins', cred.user.uid));
             if (recheckSnap.exists()) {
               adminEntry = recheckSnap.data() as AdminRecord;
             }
@@ -1753,7 +1934,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
     if (!adminEntry) {
       try {
-        const rbacSnap = await getDoc(doc(db, 'rbac_roles', emailLower));
+        const rbacSnap = await fetchDocFromServer(doc(db, 'rbac_roles', emailLower));
         if (rbacSnap.exists()) {
           rbacEntry = rbacSnap.data() as RbacRoleEntry;
         }
@@ -1841,7 +2022,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     let emailToReset = clean;
     if (!clean.includes('@')) {
       try {
-        const snap = await getDoc(doc(db, 'admin_usernames', clean));
+        const snap = await fetchDocFromServer(doc(db, 'admin_usernames', clean));
         if (snap.exists()) {
           const data = snap.data() as AdminUsernameMapping;
           emailToReset = data.email.trim().toLowerCase();
@@ -1901,7 +2082,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
     for (const cat of SEED_CATEGORIES) {
       const ref = doc(db, 'categories', cat.id);
-      const snap = await getDoc(ref);
+      const snap = await fetchDocFromServer(ref);
       if (!snap.exists()) {
         batch.set(ref, { ...cat, visible: true, deleted: false, createdAt: now, updatedAt: now });
         createdCount += 1;
@@ -1910,7 +2091,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
     for (const occ of SEED_OCCASIONS) {
       const ref = doc(db, 'occasions', occ.id);
-      const snap = await getDoc(ref);
+      const snap = await fetchDocFromServer(ref);
       if (!snap.exists()) {
         batch.set(ref, { ...occ, visible: true, deleted: false, createdAt: now, updatedAt: now });
         createdCount += 1;
@@ -1919,7 +2100,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
     for (const prod of SEED_PRODUCTS) {
       const ref = doc(db, 'products', prod.id);
-      const snap = await getDoc(ref);
+      const snap = await fetchDocFromServer(ref);
       if (!snap.exists()) {
         batch.set(ref, {
           ...prod,
@@ -1935,7 +2116,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
     for (const sec of SEED_HOMEPAGE_SECTIONS) {
       const ref = doc(db, 'homepage_sections', sec.id);
-      const snap = await getDoc(ref);
+      const snap = await fetchDocFromServer(ref);
       if (!snap.exists()) {
         batch.set(ref, { ...sec, updatedAt: now });
         createdCount += 1;
@@ -1943,19 +2124,19 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     }
 
     const greetingRef = doc(db, 'greetings', 'daily');
-    if (!(await getDoc(greetingRef)).exists()) {
+    if (!(await fetchDocFromServer(greetingRef)).exists()) {
       batch.set(greetingRef, { ...SEED_GREETING, updatedAt: now });
       createdCount += 1;
     }
 
     const settingsRef = doc(db, 'site_settings', 'main');
-    if (!(await getDoc(settingsRef)).exists()) {
+    if (!(await fetchDocFromServer(settingsRef)).exists()) {
       batch.set(settingsRef, { ...SEED_SITE_SETTINGS, updatedAt: now });
       createdCount += 1;
     }
 
     const seoRef = doc(db, 'seo_settings', 'main');
-    if (!(await getDoc(seoRef)).exists()) {
+    if (!(await fetchDocFromServer(seoRef)).exists()) {
       batch.set(seoRef, { ...SEED_SEO_SETTINGS, updatedAt: now });
       createdCount += 1;
     }
@@ -2045,7 +2226,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const now = serverTimestamp();
 
       // 1. Inspect live categories without overwriting any existing category
-      const catSnap = await getDocs(collection(firestore, 'categories'));
+      const catSnap = await fetchCollectionFromServer(collection(firestore, 'categories'));
       const existingCategories: Category[] = [];
       const existingCategorySlugs = new Set<string>();
       const existingCategoryByNormName = new Map<string, Category>();
@@ -2127,7 +2308,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       }
 
       // 2. Inspect ALL existing products in Firestore before writing
-      const prodSnap = await getDocs(collection(firestore, 'products'));
+      const prodSnap = await fetchCollectionFromServer(collection(firestore, 'products'));
       const existingProductCount = prodSnap.size;
       const existingIds = new Set<string>();
       const existingSlugs = new Set<string>();
@@ -2322,7 +2503,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     try {
       const firestore = db;
       const now = serverTimestamp();
-      const prodSnap = await getDocs(collection(firestore, 'products'));
+      const prodSnap = await fetchCollectionFromServer(collection(firestore, 'products'));
       const REQUIRED_KEYS = [
         'id', 'name', 'nameEn', 'slug', 'category', 'categoryName', 'productType',
         'price', 'priceUnit', 'shortDescription', 'description', 'images', 'ingredients',
@@ -2510,6 +2691,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         error,
         productsError,
         showroomsError,
+        cmsSyncError,
+        refreshingStoreData,
+        refreshStoreData,
         user,
         authReady,
         userRole,

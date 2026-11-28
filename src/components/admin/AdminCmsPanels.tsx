@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Activity,
+  AlertCircle,
   Archive,
   ArrowDown,
   ArrowUp,
@@ -9,11 +10,14 @@ import {
   Database,
   Globe,
   HardDrive,
+  RefreshCw,
   Search,
+  Trash2,
   Upload,
 } from 'lucide-react';
 import {
   collection,
+  deleteDoc,
   doc,
   limit,
   onSnapshot,
@@ -25,6 +29,15 @@ import {
 } from 'firebase/firestore';
 import { useStore } from '../../context/StoreContext';
 import {
+  AdminAuthError,
+  ensureVerifiedAdminWriteSession,
+  fetchCollectionFromServer,
+  fetchDocFromServer,
+  formatAdminFirestoreError,
+  isValidFirestoreId,
+  safeDeleteUnreferencedR2Urls,
+} from '../../lib/adminDb';
+import {
   db,
   firebaseConnectionStatus,
   firebaseMissingFields,
@@ -35,6 +48,7 @@ import {
   deleteCatalogImageFromStorage,
   isForbiddenInlineImageUrl,
   uploadCatalogImageToStorage,
+  validateCatalogImageFile,
 } from '../../lib/productStorage';
 import type {
   ActivityLog,
@@ -47,10 +61,30 @@ import type {
 // ========================
 // HOMEPAGE SECTIONS MANAGER
 // ========================
+const ALLOWED_SECTION_KEYS = new Set<HomepageSection['sectionKey']>([
+  'hero',
+  'announcement',
+  'categories',
+  'featured_products',
+  'occasion_explorer',
+  'popular_products',
+  'promotional_banner',
+  'showrooms',
+  'complaint_and_support',
+]);
+
 export function AdminHomepageSectionsPanel() {
-  const { allHomepageSections, logAdminActivity } = useStore();
+  const {
+    allHomepageSections,
+    hasPermission,
+    logAdminActivity,
+    refreshStoreData,
+    refreshingStoreData,
+  } = useStore();
   const [sections, setSections] = useState<HomepageSection[]>(allHomepageSections);
+  const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
     setSections(allHomepageSections);
@@ -71,18 +105,89 @@ export function AdminHomepageSectionsPanel() {
   };
 
   const handleSaveAll = async () => {
-    const firestore = requireDb();
+    setSaving(true);
     setSaved(false);
-    for (let i = 0; i < sections.length; i += 1) {
-      const s = sections[i];
-      await setDoc(doc(firestore, 'homepage_sections', s.id), {
-        ...s,
-        display_order: i + 1,
-        updatedAt: serverTimestamp(),
+    setErrorMsg(null);
+    let currentSectionId = 'layout';
+    let authSession: Awaited<ReturnType<typeof ensureVerifiedAdminWriteSession>> | null = null;
+    try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'banners_manage',
       });
+      const firestore = requireDb();
+
+      for (let i = 0; i < sections.length; i += 1) {
+        const s = sections[i];
+        currentSectionId = s.id;
+        if (!isValidFirestoreId(s.id) || !ALLOWED_SECTION_KEYS.has(s.sectionKey)) {
+          throw new AdminAuthError(
+            'validation/preflight-failed',
+            `হোমপেজ সেকশন "${s.id}" এর আইডি বা sectionKey সঠিক নয়।`
+          );
+        }
+
+        const sectionRef = doc(firestore, 'homepage_sections', s.id);
+        const existingSnap = await fetchDocFromServer(sectionRef);
+        const ctaBn = (s.ctaTextBn ?? s.cta_bn ?? '').trim().slice(0, 100);
+        const ctaEn = (s.ctaTextEn ?? s.cta_en ?? '').trim().slice(0, 100);
+        const ctaLink = (s.ctaLink ?? s.cta_link ?? '').trim().slice(0, 300);
+
+        const payload: Record<string, unknown> = {
+          id: existingSnap.exists()
+            ? String((existingSnap.data() as Record<string, unknown>).id || s.id)
+            : s.id,
+          sectionKey: s.sectionKey,
+          enabled: s.enabled !== false,
+          visible: s.enabled !== false,
+          display_order: Math.max(0, Math.min(100, i + 1)),
+          title_bn: (s.title_bn || '').trim().slice(0, 200),
+          title_en: (s.title_en || '').trim().slice(0, 200),
+          subtitle_bn: (s.subtitle_bn || '').trim().slice(0, 400),
+          subtitle_en: (s.subtitle_en || '').trim().slice(0, 400),
+          ctaTextBn: ctaBn,
+          ctaTextEn: ctaEn,
+          ctaLink,
+          cta_bn: ctaBn,
+          cta_en: ctaEn,
+          cta_link: ctaLink,
+          ...(typeof s.content_bn === 'string'
+            ? { content_bn: s.content_bn.trim().slice(0, 1000) }
+            : {}),
+          ...(typeof s.content_en === 'string'
+            ? { content_en: s.content_en.trim().slice(0, 1000) }
+            : {}),
+          ...(typeof s.backgroundImage === 'string' && s.backgroundImage.trim()
+            ? { backgroundImage: s.backgroundImage.trim().slice(0, 2048) }
+            : {}),
+          ...(s.status === 'draft' || s.status === 'published' || s.status === 'archived'
+            ? { status: s.status }
+            : {}),
+          updatedAt: serverTimestamp(),
+        };
+
+        if (existingSnap.exists()) {
+          await updateDoc(sectionRef, payload);
+        } else {
+          await setDoc(sectionRef, payload);
+        }
+      }
+
+      await logAdminActivity('update', 'homepage_sections', 'layout', 'Updated homepage sections');
+      setSaved(true);
+    } catch (err) {
+      setErrorMsg(
+        formatAdminFirestoreError(err, 'homepage_sections_save', {
+          collection: 'homepage_sections',
+          documentId: currentSectionId,
+          path: `homepage_sections/${currentSectionId}`,
+          operation: 'WRITE',
+          authSession,
+        })
+      );
+    } finally {
+      setSaving(false);
     }
-    await logAdminActivity('update', 'homepage_sections', 'layout', 'Updated homepage sections');
-    setSaved(true);
   };
 
   return (
@@ -96,18 +201,35 @@ export function AdminHomepageSectionsPanel() {
             হোমপেজের প্রতিটি সেকশন চালু/বন্ধ করুন, উপর-নিচে সাজান এবং বাংলা/English শিরোনাম ও বাটন পরিবর্তন করুন।
           </p>
         </div>
-        <button
-          type="button"
-          onClick={handleSaveAll}
-          className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#B91C1C]"
-        >
-          সব সেকশন সেভ করুন
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={refreshingStoreData || saving}
+            onClick={() => void refreshStoreData()}
+            className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#D6D3D1] bg-white px-3.5 py-2 text-xs font-semibold text-[#1C1917] hover:border-[#1C1917] disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshingStoreData ? 'animate-spin' : ''}`} />
+            <span>Refresh</span>
+          </button>
+          <button
+            type="button"
+            disabled={saving}
+            onClick={handleSaveAll}
+            className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#B91C1C] disabled:opacity-50"
+          >
+            {saving ? 'সেভ হচ্ছে...' : 'সব সেকশন সেভ করুন'}
+          </button>
+        </div>
       </div>
 
       {saved && (
-        <p className="rounded-lg bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800">
+        <p className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800">
           হোমপেজ সেকশন লেআউট আপডেট হয়েছে।
+        </p>
+      )}
+      {errorMsg && (
+        <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-[#B91C1C]">
+          {errorMsg}
         </p>
       )}
 
@@ -272,10 +394,27 @@ const MEDIA_FOLDERS: MediaFolder[] = [
 ];
 
 export function AdminMediaLibraryPanel() {
-  const { mediaItems, user, logAdminActivity } = useStore();
+  const {
+    mediaItems,
+    allProducts,
+    allCategories,
+    allShowrooms,
+    allHeroBanners,
+    siteSettings,
+    seoSettings,
+    user,
+    isSuperAdmin,
+    hasPermission,
+    logAdminActivity,
+    refreshStoreData,
+    refreshingStoreData,
+  } = useStore();
   const [folderFilter, setFolderFilter] = useState<string>('all');
   const [uploadFolder, setUploadFolder] = useState<MediaFolder>('Products');
   const [uploading, setUploading] = useState(false);
+  const [busyMediaId, setBusyMediaId] = useState<string | null>(null);
+  const [confirmArchiveId, setConfirmArchiveId] = useState<string | null>(null);
+  const [confirmDeleteItem, setConfirmDeleteItem] = useState<MediaItem | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{
     type: 'success' | 'error';
@@ -286,13 +425,25 @@ export function AdminMediaLibraryPanel() {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
+
+    const validationError = validateCatalogImageFile(file);
+    if (validationError) {
+      setFeedback({ type: 'error', message: validationError });
+      return;
+    }
+
     setUploading(true);
     setFeedback(null);
 
     let uploadedStorage: { storagePath: string; downloadUrl: string } | null = null;
+    let authSession: Awaited<ReturnType<typeof ensureVerifiedAdminWriteSession>> | null = null;
+    const mediaId = `med_${Date.now()}`;
     try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'banners_manage',
+      });
       const firestore = requireDb();
-      const mediaId = `med_${Date.now()}`;
       const uploaded = await uploadCatalogImageToStorage({
         folder: 'media',
         entityId: uploadFolder,
@@ -307,15 +458,16 @@ export function AdminMediaLibraryPanel() {
         downloadUrl: uploaded.downloadUrl,
       };
 
+      const cleanName = (file.name || `image-${Date.now()}`).trim().slice(0, 200);
       const item: MediaItem = {
         id: mediaId,
-        name: file.name,
+        name: cleanName,
         url: uploaded.downloadUrl,
         storagePath: uploaded.storagePath,
         folder: uploadFolder,
-        mimeType: file.type || 'image/jpeg',
-        sizeBytes: uploaded.sizeBytes,
-        uploadedByEmail: user?.email || '',
+        mimeType: (file.type || 'image/jpeg').slice(0, 80),
+        sizeBytes: Math.max(0, Math.round(Number(uploaded.sizeBytes) || 0)),
+        uploadedByEmail: (user?.email || authSession.email || '').slice(0, 254),
         deleted: false,
       };
 
@@ -324,7 +476,7 @@ export function AdminMediaLibraryPanel() {
         createdAt: serverTimestamp(),
       });
       uploadedStorage = null;
-      await logAdminActivity('upload', 'media', mediaId, file.name, `Folder=${uploadFolder}`);
+      await logAdminActivity('upload', 'media', mediaId, cleanName, `Folder=${uploadFolder}`);
       setFeedback({ type: 'success', message: 'ছবিটি সফলভাবে সংরক্ষণ হয়েছে।' });
     } catch (err) {
       if (uploadedStorage) {
@@ -334,12 +486,16 @@ export function AdminMediaLibraryPanel() {
           // Best-effort cleanup of uncommitted R2 image
         }
       }
-      console.error('[MediaLibrary] Upload failed:', err);
-      const message =
-        err instanceof Error && err.message
-          ? err.message
-          : 'ছবি আপলোড করা যায়নি। অনুগ্রহ করে আবার চেষ্টা করুন।';
-      setFeedback({ type: 'error', message });
+      setFeedback({
+        type: 'error',
+        message: formatAdminFirestoreError(err, 'media_upload', {
+          collection: 'media',
+          documentId: mediaId,
+          path: `media/${mediaId}`,
+          operation: 'CREATE',
+          authSession,
+        }),
+      });
     } finally {
       setUploading(false);
     }
@@ -355,11 +511,89 @@ export function AdminMediaLibraryPanel() {
     }
   };
 
-  const archiveMedia = async (id: string) => {
-    await updateDoc(doc(requireDb(), 'media', id), {
-      deleted: true,
-      updatedAt: serverTimestamp(),
-    });
+  const archiveMedia = async (item: MediaItem) => {
+    setBusyMediaId(item.id);
+    setFeedback(null);
+    let authSession: Awaited<ReturnType<typeof ensureVerifiedAdminWriteSession>> | null = null;
+    try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'banners_manage',
+      });
+      const mediaRef = doc(requireDb(), 'media', item.id);
+      const snap = await fetchDocFromServer(mediaRef);
+      if (!snap.exists()) {
+        throw new AdminAuthError('not-found', 'সংশ্লিষ্ট মিডিয়া আইটেমটি ডাটাবেসে পাওয়া যায়নি।');
+      }
+      await updateDoc(mediaRef, {
+        deleted: true,
+        updatedAt: serverTimestamp(),
+      });
+      await logAdminActivity('archive', 'media', item.id, item.name);
+      setConfirmArchiveId(null);
+      setFeedback({ type: 'success', message: `"${item.name}" আর্কাইভ করা হয়েছে।` });
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        message: formatAdminFirestoreError(err, 'media_archive', {
+          collection: 'media',
+          documentId: item.id,
+          path: `media/${item.id}`,
+          operation: 'UPDATE',
+          authSession,
+        }),
+      });
+    } finally {
+      setBusyMediaId(null);
+    }
+  };
+
+  const permanentDeleteMedia = async (item: MediaItem) => {
+    if (!isSuperAdmin) return;
+    setBusyMediaId(item.id);
+    setFeedback(null);
+    let authSession: Awaited<ReturnType<typeof ensureVerifiedAdminWriteSession>> | null = null;
+    try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'banners_manage',
+        superAdminOnly: true,
+      });
+      const mediaRef = doc(requireDb(), 'media', item.id);
+      const snap = await fetchDocFromServer(mediaRef);
+      if (snap.exists()) {
+        await deleteDoc(mediaRef);
+      }
+      await safeDeleteUnreferencedR2Urls({
+        urls: [item.url],
+        exclude: { collection: 'media', docId: item.id },
+        snapshot: {
+          allProducts,
+          allCategories,
+          allShowrooms,
+          allHeroBanners,
+          mediaItems,
+          siteSettings,
+          seoSettings,
+        },
+      });
+      await logAdminActivity('delete', 'media', item.id, item.name);
+      setConfirmDeleteItem(null);
+      setFeedback({ type: 'success', message: `"${item.name}" স্থায়ীভাবে ডিলিট করা হয়েছে।` });
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        message: formatAdminFirestoreError(err, 'media_delete', {
+          collection: 'media',
+          documentId: item.id,
+          path: `media/${item.id}`,
+          operation: 'DELETE',
+          authSession,
+        }),
+      });
+    } finally {
+      setBusyMediaId(null);
+    }
   };
 
   const visibleItems = mediaItems.filter(
@@ -377,7 +611,16 @@ export function AdminMediaLibraryPanel() {
             পণ্য, ব্যানার, ক্যাটাগরি ও ব্র্যান্ডিংয়ের ছবি আপলোড করুন ও URL কপি করে ব্যবহার করুন।
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={refreshingStoreData}
+            onClick={() => void refreshStoreData()}
+            className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#D6D3D1] bg-white px-3 py-2 text-xs font-semibold text-[#1C1917] hover:border-[#1C1917] disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshingStoreData ? 'animate-spin' : ''}`} />
+            <span>Refresh</span>
+          </button>
           <select
             value={uploadFolder}
             onChange={(e) => setUploadFolder(e.target.value as MediaFolder)}
@@ -445,45 +688,113 @@ export function AdminMediaLibraryPanel() {
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4">
-          {visibleItems.map((m) => (
-            <div
-              key={m.id}
-              className="overflow-hidden rounded-xl border border-[#E7E5E4] bg-white"
-            >
-              <img src={m.url} alt={m.name} className="aspect-[4/3] w-full object-cover" />
-              <div className="p-3">
-                <p className="truncate text-xs font-semibold text-[#1C1917]">{m.name}</p>
-                <p className="text-[10px] text-[#78716C]">{m.folder}</p>
-                <div className="mt-2 flex items-center justify-between gap-1">
-                  <button
-                    type="button"
-                    onClick={() => copyUrl(m.id, m.url)}
-                    className="inline-flex cursor-pointer items-center gap-1 rounded border border-[#E7E5E4] px-2 py-1 text-[11px] font-semibold text-[#1C1917] hover:border-[#DC1F26]"
-                  >
-                    {copiedId === m.id ? (
-                      <>
-                        <Check className="h-3 w-3 text-emerald-700" />
-                        <span>Copied</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="h-3 w-3" />
-                        <span>Copy URL</span>
-                      </>
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => archiveMedia(m.id)}
-                    title="Archive"
-                    className="cursor-pointer rounded border border-[#E7E5E4] p-1 text-[#57534E] hover:text-red-700"
-                  >
-                    <Archive className="h-3.5 w-3.5" />
-                  </button>
+          {visibleItems.map((m) => {
+            const busy = busyMediaId === m.id;
+            return (
+              <div
+                key={m.id}
+                className="overflow-hidden rounded-xl border border-[#E7E5E4] bg-white"
+              >
+                <img src={m.url} alt={m.name} className="aspect-[4/3] w-full object-cover" />
+                <div className="p-3">
+                  <p className="truncate text-xs font-semibold text-[#1C1917]">{m.name}</p>
+                  <p className="text-[10px] text-[#78716C]">{m.folder}</p>
+                  <div className="mt-2 flex items-center justify-between gap-1">
+                    <button
+                      type="button"
+                      onClick={() => copyUrl(m.id, m.url)}
+                      className="inline-flex cursor-pointer items-center gap-1 rounded border border-[#E7E5E4] px-2 py-1 text-[11px] font-semibold text-[#1C1917] hover:border-[#DC1F26]"
+                    >
+                      {copiedId === m.id ? (
+                        <>
+                          <Check className="h-3 w-3 text-emerald-700" />
+                          <span>Copied</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-3 w-3" />
+                          <span>Copy URL</span>
+                        </>
+                      )}
+                    </button>
+                    <div className="flex items-center gap-1">
+                      {confirmArchiveId === m.id ? (
+                        <>
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => void archiveMedia(m)}
+                            className="cursor-pointer rounded bg-amber-700 px-2 py-1 text-[10px] font-bold text-white disabled:opacity-50"
+                          >
+                            Archive
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmArchiveId(null)}
+                            className="cursor-pointer rounded border border-[#D6D3D1] px-1.5 py-1 text-[10px]"
+                          >
+                            বাতিল
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => setConfirmArchiveId(m.id)}
+                          title="Archive"
+                          className="cursor-pointer rounded border border-[#E7E5E4] p-1 text-[#57534E] hover:text-amber-800 disabled:opacity-50"
+                        >
+                          <Archive className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                      {isSuperAdmin && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => setConfirmDeleteItem(m)}
+                          title="Permanent Delete"
+                          className="cursor-pointer rounded border border-[#E7E5E4] p-1 text-red-700 hover:bg-red-50 disabled:opacity-50"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
+            );
+          })}
+        </div>
+      )}
+
+      {confirmDeleteItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-red-200 bg-white p-6 shadow-xl">
+            <h3 className="font-display text-lg font-bold text-[#1C1917]">
+              Delete Media Permanently?
+            </h3>
+            <p className="mt-1.5 text-xs text-[#57534E]">
+              This removes <span className="font-semibold text-[#1C1917]">{confirmDeleteItem.name}</span> from Media Library and cleans up the R2 file if no product, showroom, or banner still references it.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={busyMediaId === confirmDeleteItem.id}
+                onClick={() => setConfirmDeleteItem(null)}
+                className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold text-[#44403C]"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busyMediaId === confirmDeleteItem.id}
+                onClick={() => void permanentDeleteMedia(confirmDeleteItem)}
+                className="cursor-pointer rounded-lg bg-[#DC1F26] px-4 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C] disabled:opacity-50"
+              >
+                {busyMediaId === confirmDeleteItem.id ? 'Deleting...' : 'Confirm Delete'}
+              </button>
             </div>
-          ))}
+          </div>
         </div>
       )}
     </div>
@@ -494,9 +805,23 @@ export function AdminMediaLibraryPanel() {
 // SEO SETTINGS PANEL
 // ========================
 export function AdminSeoPanel() {
-  const { seoSettings, logAdminActivity } = useStore();
+  const {
+    seoSettings,
+    allProducts,
+    allCategories,
+    allShowrooms,
+    allHeroBanners,
+    mediaItems,
+    siteSettings,
+    hasPermission,
+    logAdminActivity,
+    refreshStoreData,
+    refreshingStoreData,
+  } = useStore();
   const [form, setForm] = useState<SeoSettings>(seoSettings);
+  const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
     setForm(seoSettings);
@@ -505,17 +830,91 @@ export function AdminSeoPanel() {
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaved(false);
-    await setDoc(doc(requireDb(), 'seo_settings', 'main'), {
-      ...form,
-      updatedAt: serverTimestamp(),
-    });
-    await logAdminActivity('update', 'seo_settings', 'main', 'Global SEO Settings');
-    setSaved(true);
+    setErrorMsg(null);
+    const cleanTitle = (form.siteTitle || '').trim().slice(0, 160);
+    if (!cleanTitle) {
+      setErrorMsg('Site Title কমপক্ষে ১ অক্ষরের হতে হবে।');
+      return;
+    }
+
+    setSaving(true);
+    let authSession: Awaited<ReturnType<typeof ensureVerifiedAdminWriteSession>> | null = null;
+    try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'seo_manage',
+      });
+      const firestore = requireDb();
+      const seoRef = doc(firestore, 'seo_settings', 'main');
+      const existingSnap = await fetchDocFromServer(seoRef);
+      const previousOgImage = existingSnap.exists()
+        ? String((existingSnap.data() as Record<string, unknown>).ogImage || '')
+        : seoSettings.ogImage || '';
+
+      const payload: Record<string, unknown> = {
+        siteTitle: cleanTitle,
+        metaDescription: (form.metaDescription || '').trim().slice(0, 400),
+        metaKeywords: (form.metaKeywords || '').trim().slice(0, 400),
+        ogTitle: (form.ogTitle || '').trim().slice(0, 160),
+        ogDescription: (form.ogDescription || '').trim().slice(0, 400),
+        ogImage: (form.ogImage || '').trim().slice(0, 500000),
+        ...(typeof form.siteTitleBn === 'string'
+          ? { siteTitleBn: form.siteTitleBn.trim().slice(0, 160) }
+          : {}),
+        ...(typeof form.twitterCard === 'string'
+          ? { twitterCard: form.twitterCard.trim().slice(0, 40) }
+          : {}),
+        ...(typeof form.homepageTitle === 'string'
+          ? { homepageTitle: form.homepageTitle.trim().slice(0, 160) }
+          : {}),
+        ...(typeof form.homepageDescription === 'string'
+          ? { homepageDescription: form.homepageDescription.trim().slice(0, 400) }
+          : {}),
+        updatedAt: serverTimestamp(),
+      };
+
+      if (existingSnap.exists()) {
+        await updateDoc(seoRef, payload);
+      } else {
+        await setDoc(seoRef, payload);
+      }
+
+      if (previousOgImage && previousOgImage !== payload.ogImage) {
+        await safeDeleteUnreferencedR2Urls({
+          urls: [previousOgImage],
+          exclude: { collection: 'seo_settings', field: 'ogImage' },
+          snapshot: {
+            allProducts,
+            allCategories,
+            allShowrooms,
+            allHeroBanners,
+            mediaItems,
+            siteSettings,
+            seoSettings: { ...form, ogImage: String(payload.ogImage || '') },
+          },
+        });
+      }
+
+      await logAdminActivity('update', 'seo_settings', 'main', 'Global SEO Settings');
+      setSaved(true);
+    } catch (err) {
+      setErrorMsg(
+        formatAdminFirestoreError(err, 'seo_settings_save', {
+          collection: 'seo_settings',
+          documentId: 'main',
+          path: 'seo_settings/main',
+          operation: 'WRITE',
+          authSession,
+        })
+      );
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
     <form onSubmit={handleSave} className="max-w-3xl space-y-5">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="font-display text-2xl font-bold text-[#1C1917]">
             SEO &amp; OpenGraph Management
@@ -524,17 +923,34 @@ export function AdminSeoPanel() {
             সার্চ ইঞ্জিন টাইটেল, মেটা বিবরণ, কীওয়ার্ড এবং সোশ্যাল মিডিয়া শেয়ার প্রিভিউ এখান থেকে পরিবর্তন করুন।
           </p>
         </div>
-        <button
-          type="submit"
-          className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#B91C1C]"
-        >
-          SEO সেভ করুন
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={refreshingStoreData || saving}
+            onClick={() => void refreshStoreData()}
+            className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#D6D3D1] bg-white px-3.5 py-2 text-xs font-semibold text-[#1C1917] hover:border-[#1C1917] disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshingStoreData ? 'animate-spin' : ''}`} />
+            <span>Refresh</span>
+          </button>
+          <button
+            type="submit"
+            disabled={saving}
+            className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#B91C1C] disabled:opacity-50"
+          >
+            {saving ? 'সেভ হচ্ছে...' : 'SEO সেভ করুন'}
+          </button>
+        </div>
       </div>
 
       {saved && (
-        <p className="rounded-lg bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800">
+        <p className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800">
           SEO সেটিংস সফলভাবে আপডেট হয়েছে।
+        </p>
+      )}
+      {errorMsg && (
+        <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-[#B91C1C]">
+          {errorMsg}
         </p>
       )}
 
@@ -543,6 +959,7 @@ export function AdminSeoPanel() {
           <label className="mb-1 block text-xs font-semibold">Site Title</label>
           <input
             type="text"
+            required
             value={form.siteTitle}
             onChange={(e) => setForm({ ...form, siteTitle: e.target.value })}
             className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
@@ -617,37 +1034,104 @@ export function AdminSeoPanel() {
 // ACTIVITY LOGS PANEL
 // ========================
 export function AdminActivityLogsPanel() {
-  const { isSuperAdmin, hasPermission } = useStore();
+  const { isSuperAdmin, hasPermission, staffRole } = useStore();
   const canViewLogs = isSuperAdmin || hasPermission('reports_view');
   const [logs, setLogs] = useState<ActivityLog[]>([]);
+  const [loadingLogs, setLoadingLogs] = useState(true);
+  const [refreshingLogs, setRefreshingLogs] = useState(false);
+  const [logsError, setLogsError] = useState<string | null>(null);
+
+  const fetchLogsFromServer = useCallback(async () => {
+    if (!db || !canViewLogs) return;
+    setRefreshingLogs(true);
+    setLogsError(null);
+    try {
+      const snap = await fetchCollectionFromServer(
+        query(collection(db, 'activity_logs'), orderBy('timestamp', 'desc'), limit(100))
+      );
+      setLogs(snap.docs.map((d) => ({ ...(d.data() as ActivityLog), id: d.id })));
+    } catch (err) {
+      setLogsError(
+        formatAdminFirestoreError(err, 'activity_logs_refresh', {
+          collection: 'activity_logs',
+          operation: 'READ',
+          staffRole,
+        })
+      );
+    } finally {
+      setRefreshingLogs(false);
+      setLoadingLogs(false);
+    }
+  }, [canViewLogs, staffRole]);
 
   useEffect(() => {
     if (!db || !canViewLogs) {
       setLogs([]);
+      setLoadingLogs(false);
       return;
     }
+    setLoadingLogs(true);
+    setLogsError(null);
     const unsub = onSnapshot(
       query(collection(db, 'activity_logs'), orderBy('timestamp', 'desc'), limit(100)),
       (snap) => {
-        setLogs(snap.docs.map((d) => d.data() as ActivityLog));
+        setLogs(snap.docs.map((d) => ({ ...(d.data() as ActivityLog), id: d.id })));
+        setLogsError(null);
+        setLoadingLogs(false);
       },
-      () => {}
+      (err) => {
+        setLogsError(
+          formatAdminFirestoreError(err, 'activity_logs_listen', {
+            collection: 'activity_logs',
+            operation: 'READ',
+            staffRole,
+          })
+        );
+        setLoadingLogs(false);
+      }
     );
     return () => unsub();
-  }, [canViewLogs]);
+  }, [canViewLogs, staffRole]);
 
   if (!canViewLogs) return null;
 
   return (
     <div className="space-y-5">
-      <div>
-        <h2 className="font-display text-2xl font-bold text-[#1C1917]">
-          Admin Activity Audit Logs
-        </h2>
-        <p className="text-xs text-[#57534E]">
-          লগইন, প্রোডাক্ট আপডেট, রোল পরিবর্তন ও সেটিংস পরিবর্তনের অডিট রেকর্ড।
-        </p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="font-display text-2xl font-bold text-[#1C1917]">
+            Admin Activity Audit Logs
+          </h2>
+          <p className="text-xs text-[#57534E]">
+            লগইন, প্রোডাক্ট আপডেট, রোল পরিবর্তন ও সেটিংস পরিবর্তনের অডিট রেকর্ড।
+          </p>
+        </div>
+        <button
+          type="button"
+          disabled={refreshingLogs}
+          onClick={() => void fetchLogsFromServer()}
+          className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#D6D3D1] bg-white px-3.5 py-2 text-xs font-semibold text-[#1C1917] hover:border-[#1C1917] disabled:opacity-50"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${refreshingLogs ? 'animate-spin' : ''}`} />
+          <span>{refreshingLogs ? 'লোড হচ্ছে...' : 'Refresh Logs'}</span>
+        </button>
       </div>
+
+      {logsError && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-semibold text-[#B91C1C]">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            <span>{logsError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void fetchLogsFromServer()}
+            className="cursor-pointer rounded border border-red-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-[#B91C1C]"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       <div className="overflow-hidden rounded-xl border border-[#E7E5E4] bg-white">
         <div className="overflow-x-auto">
@@ -661,7 +1145,13 @@ export function AdminActivityLogsPanel() {
               </tr>
             </thead>
             <tbody className="divide-y divide-[#F5F4F0]">
-              {logs.length === 0 ? (
+              {loadingLogs ? (
+                <tr>
+                  <td colSpan={4} className="px-4 py-8 text-center text-[#78716C]">
+                    অ্যাক্টিভিটি লগ লোড হচ্ছে...
+                  </td>
+                </tr>
+              ) : logs.length === 0 ? (
                 <tr>
                   <td colSpan={4} className="px-4 py-8 text-center text-[#78716C]">
                     এখনো কোনো অ্যাক্টিভিটি লগ রেকর্ড হয়নি।
@@ -706,12 +1196,16 @@ export function AdminSystemSettingsPanel() {
     importProductMasterList,
     masterImportStats,
     masterImportRunning,
+    refreshStoreData,
+    refreshingStoreData,
   } = useStore();
   const canViewSystem = isSuperAdmin || hasPermission('settings_view');
   const canAddProducts = hasPermission('products_add');
   const [seeding, setSeeding] = useState(false);
-  const [seedResult, setSeedResult] = useState<string | null>(null);
-  const [masterResult, setMasterResult] = useState<string | null>(null);
+  const [seedResult, setSeedResult] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [masterResult, setMasterResult] = useState<{ type: 'ok' | 'err'; text: string } | null>(
+    null
+  );
 
   if (!canViewSystem) return null;
 
@@ -720,13 +1214,20 @@ export function AdminSystemSettingsPanel() {
     setSeedResult(null);
     try {
       const res = await seedDemoCatalog();
-      setSeedResult(
-        res.createdCount > 0
-          ? `${res.createdCount}টি অনুপস্থিত ডকুমেন্ট নিরাপদে যুক্ত করা হয়েছে (বিদ্যমান কোনো ডাটা পরিবর্তন করা হয়নি)।`
-          : 'সব প্রয়োজনীয় ডকুমেন্ট ইতিমধ্যে ডাটাবেসে বিদ্যমান রয়েছে।'
-      );
-    } catch {
-      setSeedResult('ডাটাবেস সিডিং ব্যর্থ হয়েছে।');
+      setSeedResult({
+        type: 'ok',
+        text:
+          res.createdCount > 0
+            ? `${res.createdCount}টি অনুপস্থিত ডকুমেন্ট নিরাপদে যুক্ত করা হয়েছে (বিদ্যমান কোনো ডাটা পরিবর্তন করা হয়নি)।`
+            : 'সব প্রয়োজনীয় ডকুমেন্ট ইতিমধ্যে ডাটাবেসে বিদ্যমান রয়েছে।',
+      });
+    } catch (err) {
+      setSeedResult({
+        type: 'err',
+        text: formatAdminFirestoreError(err, 'system_safe_seed', {
+          operation: 'WRITE',
+        }),
+      });
     } finally {
       setSeeding(false);
     }
@@ -736,23 +1237,41 @@ export function AdminSystemSettingsPanel() {
     setMasterResult(null);
     try {
       const summary = await importProductMasterList();
-      setMasterResult(
-        `মাস্টার তালিকা সিঙ্ক সম্পন্ন: মোট ${summary.totalMasterCount}টি, পূর্বে ছিল ${summary.existingProductCount}টি, নতুন যোগ ${summary.newlyAddedCount}টি, স্কিপ ${summary.skippedExistingCount}টি।`
-      );
-    } catch {
-      setMasterResult('মাস্টার প্রোডাক্ট তালিকা ইমপোর্ট ব্যর্থ হয়েছে।');
+      setMasterResult({
+        type: 'ok',
+        text: `মাস্টার তালিকা সিঙ্ক সম্পন্ন: মোট ${summary.totalMasterCount}টি, পূর্বে ছিল ${summary.existingProductCount}টি, নতুন যোগ ${summary.newlyAddedCount}টি, স্কিপ ${summary.skippedExistingCount}টি।`,
+      });
+    } catch (err) {
+      setMasterResult({
+        type: 'err',
+        text: formatAdminFirestoreError(err, 'system_master_sync', {
+          collection: 'products',
+          operation: 'WRITE',
+        }),
+      });
     }
   };
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="font-display text-2xl font-bold text-[#1C1917]">
-          System Status &amp; Cloudflare Deployment
-        </h2>
-        <p className="text-xs text-[#57534E]">
-          Firebase প্রজেক্ট সংযোগ, নিরাপদ ইনিশিয়ালাইজেশন এবং Cloudflare SPA রাউটিং অবস্থা দেখুন।
-        </p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="font-display text-2xl font-bold text-[#1C1917]">
+            System Status &amp; Cloudflare Deployment
+          </h2>
+          <p className="text-xs text-[#57534E]">
+            Firebase প্রজেক্ট সংযোগ, নিরাপদ ইনিশিয়ালাইজেশন এবং Cloudflare SPA রাউটিং অবস্থা দেখুন।
+          </p>
+        </div>
+        <button
+          type="button"
+          disabled={refreshingStoreData}
+          onClick={() => void refreshStoreData()}
+          className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#D6D3D1] bg-white px-3.5 py-2 text-xs font-semibold text-[#1C1917] hover:border-[#1C1917] disabled:opacity-50"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${refreshingStoreData ? 'animate-spin' : ''}`} />
+          <span>{refreshingStoreData ? 'Syncing...' : 'Refresh Store Data'}</span>
+        </button>
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -804,8 +1323,14 @@ export function AdminSystemSettingsPanel() {
             বিদ্যমান কোনো পণ্য বা ছবি ওভাররাইট না করে শুধুমাত্র অনুপস্থিত পণ্যগুলো যোগ করে।
           </p>
           {masterResult && (
-            <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800">
-              {masterResult}
+            <p
+              className={`mt-3 rounded-lg border px-3 py-2 text-xs font-semibold ${
+                masterResult.type === 'ok'
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                  : 'border-red-200 bg-red-50 text-[#B91C1C]'
+              }`}
+            >
+              {masterResult.text}
             </p>
           )}
           <button
@@ -832,8 +1357,14 @@ export function AdminSystemSettingsPanel() {
           এই বাটনটি শুধুমাত্র অনুপস্থিত ডকুমেন্টগুলো যোগ করে—বিদ্যমান কোনো পণ্য, ক্যাটাগরি বা ক্রেতার ডাটা কখনোই মুছে ফেলে না বা পরিবর্তন করে না।
         </p>
         {seedResult && (
-          <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800">
-            {seedResult}
+          <p
+            className={`mt-3 rounded-lg border px-3 py-2 text-xs font-semibold ${
+              seedResult.type === 'ok'
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                : 'border-red-200 bg-red-50 text-[#B91C1C]'
+            }`}
+          >
+            {seedResult.text}
           </p>
         )}
         <button

@@ -67,6 +67,7 @@ import {
   validateCatalogImageFile,
   validateProductImageUrl,
 } from '../../lib/productStorage';
+import { fetchDocFromServer, safeDeleteUnreferencedR2Urls } from '../../lib/adminDb';
 import { formatBdtPrice, toSlug } from '../../lib/utils';
 import {
   DEFAULT_ROLE_PERMISSIONS,
@@ -1190,6 +1191,10 @@ export function AdminProductsPanel() {
     allCategories,
     allOccasions,
     allShowrooms,
+    allHeroBanners,
+    mediaItems,
+    siteSettings,
+    seoSettings,
     staffRole,
     hasPermission,
     logAdminActivity,
@@ -1198,6 +1203,8 @@ export function AdminProductsPanel() {
     masterImportStats,
     masterImportRunning,
     lastMasterImportSummary,
+    refreshStoreData,
+    refreshingStoreData,
   } = useStore();
   const canAdd = hasPermission('products_add');
   const canEdit = hasPermission('products_edit');
@@ -2502,11 +2509,22 @@ export function AdminProductsPanel() {
       uploadedResult = null; // Persisted & verified in Firestore; do not roll back
 
       // Best-effort delete any R2 images that fell off the 6-image list AFTER Firestore verification
+      // while ensuring images shared by other products, categories, showrooms, banners, or media library stay intact
       const evictedR2Urls = previousR2Urls.filter((oldUrl) => !nextImages.includes(oldUrl));
       if (evictedR2Urls.length > 0) {
-        await Promise.allSettled(
-          evictedR2Urls.map((oldUrl) => deleteCatalogImageFromStorage({ imageUrl: oldUrl }))
-        );
+        await safeDeleteUnreferencedR2Urls({
+          urls: evictedR2Urls,
+          exclude: { collection: 'products', docId: prod.id },
+          snapshot: {
+            allProducts,
+            allCategories,
+            allShowrooms,
+            allHeroBanners,
+            mediaItems,
+            siteSettings,
+            seoSettings,
+          },
+        });
       }
 
       try {
@@ -2798,20 +2816,31 @@ export function AdminProductsPanel() {
       );
       sessionUploadedR2KeysRef.current.clear();
 
-      // Safe cleanup: delete replaced/removed old R2 images + discarded session uploads ONLY AFTER Firestore verify succeeds
-      // (Legacy Firebase Storage URLs and external HTTPS URLs are never touched)
+      // Safe cleanup: delete unreferenced replaced/removed old R2 images + discarded session uploads ONLY AFTER Firestore verify succeeds
       const replacedOrRemovedR2Urls = previousR2Urls.filter(
         (oldUrl) => !nextImages.includes(oldUrl)
       );
-      if (replacedOrRemovedR2Urls.length > 0 || discardedSessionKeys.length > 0) {
-        await Promise.allSettled([
-          ...replacedOrRemovedR2Urls.map((oldUrl) =>
-            deleteCatalogImageFromStorage({ imageUrl: oldUrl })
-          ),
-          ...discardedSessionKeys.map((key) =>
+      if (replacedOrRemovedR2Urls.length > 0) {
+        await safeDeleteUnreferencedR2Urls({
+          urls: replacedOrRemovedR2Urls,
+          exclude: { collection: 'products', docId: resolvedTargetId },
+          snapshot: {
+            allProducts,
+            allCategories,
+            allShowrooms,
+            allHeroBanners,
+            mediaItems,
+            siteSettings,
+            seoSettings,
+          },
+        });
+      }
+      if (discardedSessionKeys.length > 0) {
+        await Promise.allSettled(
+          discardedSessionKeys.map((key) =>
             deleteCatalogImageFromStorage({ imageKey: key })
-          ),
-        ]);
+          )
+        );
       }
 
       const committedOperation = isCreateMode ? 'create' : 'update';
@@ -3087,9 +3116,19 @@ export function AdminProductsPanel() {
       await deleteDoc(productRef);
 
       if (r2UrlsToDelete.length > 0) {
-        await Promise.allSettled(
-          r2UrlsToDelete.map((url) => deleteCatalogImageFromStorage({ imageUrl: url }))
-        );
+        await safeDeleteUnreferencedR2Urls({
+          urls: r2UrlsToDelete,
+          exclude: { collection: 'products', docId: target.id },
+          snapshot: {
+            allProducts,
+            allCategories,
+            allShowrooms,
+            allHeroBanners,
+            mediaItems,
+            siteSettings,
+            seoSettings,
+          },
+        });
       }
 
       await logAdminActivity('delete', 'products', target.id, target.nameEn || target.name);
@@ -3258,16 +3297,27 @@ export function AdminProductsPanel() {
             products · Manage English &amp; Bengali names, categories, units, pricing, and Cloudflare R2 photos.
           </p>
         </div>
-        {canAdd && (
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => openEditor(null)}
-            className="inline-flex shrink-0 cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#DC1F26]"
+            onClick={() => void refreshStoreData()}
+            disabled={refreshingStoreData}
+            className="inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-[#D6D3D1] bg-white px-3 py-2.5 text-xs font-semibold text-[#1C1917] hover:border-[#1C1917] disabled:opacity-50"
           >
-            <Plus className="h-4 w-4" />
-            <span>Add Product</span>
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshingStoreData ? 'animate-spin' : ''}`} />
+            <span>{refreshingStoreData ? 'Refreshing...' : 'Refresh'}</span>
           </button>
-        )}
+          {canAdd && (
+            <button
+              type="button"
+              onClick={() => openEditor(null)}
+              className="inline-flex shrink-0 cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#DC1F26]"
+            >
+              <Plus className="h-4 w-4" />
+              <span>Add Product</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Authoritative Product Master List Sync Banner */}
@@ -4608,18 +4658,44 @@ function normalizeCategoryCompare(value: string | undefined | null): string {
 }
 
 export function AdminCategoriesPanel() {
-  const { allCategories, staffRole, hasPermission, logAdminActivity } = useStore();
+  const {
+    allCategories,
+    allProducts,
+    allShowrooms,
+    allHeroBanners,
+    mediaItems,
+    siteSettings,
+    seoSettings,
+    staffRole,
+    hasPermission,
+    logAdminActivity,
+    refreshStoreData,
+    refreshingStoreData,
+  } = useStore();
   const [editing, setEditing] = useState<Category | null>(null);
-  const [isNew, setIsNew] = useState(false);
+  const [originalCategoryImage, setOriginalCategoryImage] = useState<string>('');
+  const [formMode, setFormMode] = useState<'create' | 'edit'>('create');
+  const isNew = formMode === 'create';
   const [catSaving, setCatSaving] = useState(false);
+  const [busyCategoryId, setBusyCategoryId] = useState<string | null>(null);
   const [catUploading, setCatUploading] = useState(false);
   const [catUploadPct, setCatUploadPct] = useState<number | null>(null);
   const [catPreviewUrl, setCatPreviewUrl] = useState<string | null>(null);
   const [pendingDeleteCat, setPendingDeleteCat] = useState<Category | null>(null);
   const [msg, setMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
+  const pendingDeleteLinkedCount = useMemo(() => {
+    if (!pendingDeleteCat) return 0;
+    return allProducts.filter(
+      (p) =>
+        !p.deleted &&
+        (p.category === pendingDeleteCat.slug || p.categorySlug === pendingDeleteCat.slug)
+    ).length;
+  }, [allProducts, pendingDeleteCat]);
+
   const startNew = () => {
-    setIsNew(true);
+    setFormMode('create');
+    setOriginalCategoryImage('');
     setMsg(null);
     setEditing({
       id: `cat-${Date.now()}`,
@@ -4735,7 +4811,6 @@ export function AdminCategoriesPanel() {
       return;
     }
 
-    // Duplicate check across non-deleted categories (excluding self on edit)
     const duplicate = allCategories.find((cat) => {
       if (cat.deleted) return false;
       if (!isNew && cat.id === editing.id) return false;
@@ -4803,16 +4878,22 @@ export function AdminCategoriesPanel() {
       }
 
       let catRef = doc(firestore, 'categories', targetDocId);
-      let existingSnap = await getDoc(catRef);
+      let existingSnap = await fetchDocFromServer(catRef);
 
-      // Never overwrite an existing category when creating a new category
       if (isNew && existingSnap.exists()) {
         targetDocId = `${targetDocId.slice(0, 110)}-${Date.now().toString(36)}`;
         catRef = doc(firestore, 'categories', targetDocId);
-        existingSnap = await getDoc(catRef);
+        existingSnap = await fetchDocFromServer(catRef);
         if (existingSnap.exists()) {
           throw new Error('A category with this ID already exists. Please retry.');
         }
+      }
+
+      if (!isNew && !existingSnap.exists()) {
+        throw new CatalogAuthError(
+          'not-found',
+          `ক্যাটাগরি ডকুমেন্ট ("categories/${targetDocId}") Firestore-এ পাওয়া যায়নি। পেজ রিফ্রেশ করে আবার চেষ্টা করুন।`
+        );
       }
 
       const existingData = existingSnap.exists()
@@ -4824,6 +4905,9 @@ export function AdminCategoriesPanel() {
         /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
           ? existingData.id
           : targetDocId;
+      const nextImage = (
+        editing.image || '/src/assets/images/hero_bakery_clean_1794746110066.jpg'
+      ).trim();
 
       const payload: Record<string, unknown> = {
         id: preservedValidId,
@@ -4837,7 +4921,7 @@ export function AdminCategoriesPanel() {
         descriptionEn: descEn,
         description_bn: descBn,
         description_en: descEn,
-        image: (editing.image || '/src/assets/images/hero_bakery_clean_1794746110066.jpg').trim(),
+        image: nextImage,
         order: safeOrder,
         visible: isVisible,
         active: isVisible,
@@ -4845,30 +4929,45 @@ export function AdminCategoriesPanel() {
         updatedAt: serverTimestamp(),
       };
 
-      if (!existingSnap.exists()) {
+      if (isNew) {
         await setDoc(catRef, {
           ...payload,
           createdAt: serverTimestamp(),
         });
         await logAdminActivity('create', 'categories', targetDocId, nameEn);
-      } else if (getUnknownKeys(existingData!, ALLOWED_CATEGORY_KEYS).length > 0) {
-        await setDoc(catRef, {
+      } else {
+        const updatePayload: Record<string, unknown> = {
           ...payload,
           createdAt: hasValidTimestamp(existingData?.createdAt)
             ? existingData!.createdAt
             : serverTimestamp(),
-        });
+        };
+        for (const unknownKey of getUnknownKeys(existingData!, ALLOWED_CATEGORY_KEYS)) {
+          updatePayload[unknownKey] = deleteField();
+        }
+        await updateDoc(catRef, updatePayload);
         await logAdminActivity('update', 'categories', targetDocId, nameEn);
-      } else {
-        await updateDoc(
-          catRef,
-          hasValidTimestamp(existingData?.createdAt)
-            ? payload
-            : { ...payload, createdAt: serverTimestamp() }
-        );
-        await logAdminActivity('update', 'categories', targetDocId, nameEn);
+
+        const prevImg = originalCategoryImage || (typeof existingData?.image === 'string' ? existingData.image : '');
+        if (prevImg && prevImg !== nextImage && isR2ImageUrl(prevImg)) {
+          await safeDeleteUnreferencedR2Urls({
+            urls: [prevImg],
+            exclude: { collection: 'categories', docId: targetDocId },
+            snapshot: {
+              allProducts,
+              allCategories,
+              allShowrooms,
+              allHeroBanners,
+              mediaItems,
+              siteSettings,
+              seoSettings,
+            },
+          });
+        }
       }
       setEditing(null);
+      setOriginalCategoryImage('');
+      setFormMode('create');
       setMsg({ type: 'success', text: 'ক্যাটাগরি সফলভাবে সংরক্ষণ হয়েছে।' });
     } catch (err) {
       setMsg({
@@ -4895,6 +4994,8 @@ export function AdminCategoriesPanel() {
   };
 
   const toggleCategoryVisibility = async (cat: Category) => {
+    setBusyCategoryId(cat.id);
+    setMsg(null);
     let authSession: VerifiedWriteSession | null = null;
     try {
       authSession = await ensureVerifiedAdminWriteSession({
@@ -4903,16 +5004,17 @@ export function AdminCategoriesPanel() {
       });
       const firestore = requireDb();
       const catRef = doc(firestore, 'categories', cat.id);
-      const existingSnap = await getDoc(catRef);
-      const existingData = existingSnap.exists()
-        ? (existingSnap.data() as Record<string, unknown>)
-        : undefined;
+      const existingSnap = await fetchDocFromServer(catRef);
+      if (!existingSnap.exists()) {
+        throw new CatalogAuthError(
+          'not-found',
+          `ক্যাটাগরি ("categories/${cat.id}") Firestore-এ পাওয়া যায়নি। রিফ্রেশ করে চেষ্টা করুন।`
+        );
+      }
+      const existingData = existingSnap.data() as Record<string, unknown>;
       const currentlyVisible = cat.visible !== false && cat.active !== false;
       const nextVisible = !currentlyVisible;
-      if (
-        existingSnap.exists() &&
-        isExistingCategoryDocRuleReady(existingData)
-      ) {
+      if (isExistingCategoryDocRuleReady(existingData)) {
         await updateDoc(catRef, {
           visible: nextVisible,
           active: nextVisible,
@@ -4921,12 +5023,11 @@ export function AdminCategoriesPanel() {
       } else {
         const ct = getCategoryText(cat);
         const preservedValidId =
-          existingData &&
           typeof existingData.id === 'string' &&
           /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
             ? existingData.id
             : cat.id;
-        const fullCatPayload = {
+        const fullCatPayload: Record<string, unknown> = {
           id: preservedValidId,
           name: ct.nameBn.slice(0, 120),
           nameEn: (ct.nameEn || ct.nameBn).slice(0, 120),
@@ -4943,25 +5044,15 @@ export function AdminCategoriesPanel() {
           visible: nextVisible,
           active: nextVisible,
           deleted: Boolean(cat.deleted),
+          createdAt: hasValidTimestamp(existingData.createdAt)
+            ? existingData.createdAt
+            : serverTimestamp(),
           updatedAt: serverTimestamp(),
         };
-        if (!existingSnap.exists()) {
-          await setDoc(catRef, { ...fullCatPayload, createdAt: serverTimestamp() });
-        } else if (getUnknownKeys(existingData!, ALLOWED_CATEGORY_KEYS).length > 0) {
-          await setDoc(catRef, {
-            ...fullCatPayload,
-            createdAt: hasValidTimestamp(existingData?.createdAt)
-              ? existingData!.createdAt
-              : serverTimestamp(),
-          });
-        } else {
-          await updateDoc(
-            catRef,
-            hasValidTimestamp(existingData?.createdAt)
-              ? fullCatPayload
-              : { ...fullCatPayload, createdAt: serverTimestamp() }
-          );
+        for (const unknownKey of getUnknownKeys(existingData, ALLOWED_CATEGORY_KEYS)) {
+          fullCatPayload[unknownKey] = deleteField();
         }
+        await updateDoc(catRef, fullCatPayload);
       }
       await logAdminActivity(
         nextVisible ? 'show' : 'hide',
@@ -4969,6 +5060,10 @@ export function AdminCategoriesPanel() {
         cat.id,
         cat.nameEn || cat.name
       );
+      setMsg({
+        type: 'success',
+        text: `"${cat.nameEn || cat.name}" এখন ${nextVisible ? 'Visible' : 'Hidden'}।`,
+      });
     } catch (err) {
       setMsg({
         type: 'error',
@@ -4981,10 +5076,14 @@ export function AdminCategoriesPanel() {
           authSession,
         }),
       });
+    } finally {
+      setBusyCategoryId(null);
     }
   };
 
-  const removeCategory = async (id: string) => {
+  const removeCategory = async (cat: Category) => {
+    setBusyCategoryId(cat.id);
+    setMsg(null);
     let authSession: VerifiedWriteSession | null = null;
     try {
       authSession = await ensureVerifiedAdminWriteSession({
@@ -4992,27 +5091,60 @@ export function AdminCategoriesPanel() {
         requiredPermission: 'categories_manage',
       });
       const firestore = requireDb();
-      await deleteDoc(doc(firestore, 'categories', id));
-      await logAdminActivity('delete', 'categories', id, id);
-      setMsg({ type: 'success', text: 'ক্যাটাগরি ডিলিট করা হয়েছে।' });
+      const catRef = doc(firestore, 'categories', cat.id);
+      const existingSnap = await fetchDocFromServer(catRef);
+      if (!existingSnap.exists()) {
+        throw new CatalogAuthError(
+          'not-found',
+          `ক্যাটাগরি ("categories/${cat.id}") ইতিমধ্যে ডিলিট হয়ে গেছে বা Firestore-এ নেই।`
+        );
+      }
+      const existingImg =
+        typeof existingSnap.data()?.image === 'string'
+          ? (existingSnap.data().image as string)
+          : cat.image;
+      await deleteDoc(catRef);
+      if (existingImg && isR2ImageUrl(existingImg)) {
+        await safeDeleteUnreferencedR2Urls({
+          urls: [existingImg],
+          exclude: { collection: 'categories', docId: cat.id },
+          snapshot: {
+            allProducts,
+            allCategories,
+            allShowrooms,
+            allHeroBanners,
+            mediaItems,
+            siteSettings,
+            seoSettings,
+          },
+        });
+      }
+      await logAdminActivity('delete', 'categories', cat.id, cat.nameEn || cat.name);
+      if (editing?.id === cat.id) {
+        setEditing(null);
+        setOriginalCategoryImage('');
+      }
+      setMsg({ type: 'success', text: 'ক্যাটাগরি স্থায়ীভাবে ডিলিট করা হয়েছে।' });
     } catch (err) {
       setMsg({
         type: 'error',
         text: mapCatalogSaveError(err, 'category_delete', {
           collection: 'categories',
-          documentId: id,
-          path: `categories/${id}`,
+          documentId: cat.id,
+          path: `categories/${cat.id}`,
           operation: 'DELETE',
           staffRole,
           authSession,
         }),
       });
+    } finally {
+      setBusyCategoryId(null);
     }
   };
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="font-display text-2xl font-bold text-[#1C1917]">
             Category Management
@@ -5021,14 +5153,25 @@ export function AdminCategoriesPanel() {
             Add or edit English &amp; Bengali category titles, optional icons, descriptions, active visibility, and sort order.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={startNew}
-          className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-4 py-2 text-xs font-semibold text-white hover:bg-[#DC1F26]"
-        >
-          <Plus className="h-4 w-4" />
-          <span>Add Category</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void refreshStoreData()}
+            disabled={refreshingStoreData}
+            className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#D6D3D1] bg-white px-3 py-2 text-xs font-semibold text-[#1C1917] hover:border-[#1C1917] disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshingStoreData ? 'animate-spin' : ''}`} />
+            <span>{refreshingStoreData ? 'Refreshing...' : 'Refresh'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={startNew}
+            className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-4 py-2 text-xs font-semibold text-white hover:bg-[#DC1F26]"
+          >
+            <Plus className="h-4 w-4" />
+            <span>Add Category</span>
+          </button>
+        </div>
       </div>
 
       {msg && (
@@ -5213,7 +5356,10 @@ export function AdminCategoriesPanel() {
             <button
               type="button"
               disabled={catSaving || catUploading}
-              onClick={() => setEditing(null)}
+              onClick={() => {
+                setEditing(null);
+                setOriginalCategoryImage('');
+              }}
               className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold disabled:opacity-50"
             >
               Cancel
@@ -5236,6 +5382,7 @@ export function AdminCategoriesPanel() {
           const namePair = resolveBilingualPair(ct.nameEn, ct.nameBn);
           const descPair = resolveBilingualPair(ct.descriptionEn, ct.descriptionBn);
           const isCatVisible = cat.visible !== false && cat.active !== false;
+          const isBusy = busyCategoryId === cat.id;
           return (
             <div
               key={cat.id}
@@ -5275,15 +5422,18 @@ export function AdminCategoriesPanel() {
                 <div className="mt-4 flex justify-end gap-2 border-t border-[#F5F4F0] pt-3">
                   <button
                     type="button"
+                    disabled={isBusy}
                     onClick={() => toggleCategoryVisibility(cat)}
-                    className="cursor-pointer rounded-md border border-[#E7E5E4] px-2.5 py-1 text-xs font-medium text-[#57534E]"
+                    className="cursor-pointer rounded-md border border-[#E7E5E4] px-2.5 py-1 text-xs font-medium text-[#57534E] disabled:opacity-50"
                   >
                     {!isCatVisible ? 'Show' : 'Hide'}
                   </button>
                   <button
                     type="button"
+                    disabled={isBusy}
                     onClick={() => {
-                      setIsNew(false);
+                      setFormMode('edit');
+                      setOriginalCategoryImage(cat.image || '');
                       setMsg(null);
                       setEditing({
                         ...cat,
@@ -5300,14 +5450,15 @@ export function AdminCategoriesPanel() {
                         active: isCatVisible,
                       });
                     }}
-                    className="cursor-pointer rounded-md border border-[#E7E5E4] px-3 py-1 text-xs font-medium hover:border-[#DC1F26]"
+                    className="cursor-pointer rounded-md border border-[#E7E5E4] px-3 py-1 text-xs font-medium hover:border-[#DC1F26] disabled:opacity-50"
                   >
                     Edit
                   </button>
                   <button
                     type="button"
+                    disabled={isBusy}
                     onClick={() => setPendingDeleteCat(cat)}
-                    className="cursor-pointer rounded-md border border-[#E7E5E4] px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-50"
+                    className="cursor-pointer rounded-md border border-[#E7E5E4] px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
                   >
                     Delete
                   </button>
@@ -5329,15 +5480,21 @@ export function AdminCategoriesPanel() {
               Delete Category?
             </h3>
             <p className="mt-1 text-xs leading-relaxed text-[#57534E]">
-              You are about to remove{' '}
+              You are about to permanently remove{' '}
               <strong className="text-[#1C1917]">
                 {pendingDeleteCat.nameEn || pendingDeleteCat.name}
               </strong>
-              . Confirm below to proceed.
+              .
+              {pendingDeleteLinkedCount > 0 && (
+                <span className="mt-2 block rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 font-semibold text-amber-900">
+                  সতর্কতা: বর্তমানে {pendingDeleteLinkedCount}টি পণ্য এই ক্যাটাগরির সাথে যুক্ত আছে। ডিলিট করার আগে পণ্যগুলোর ক্যাটাগরি আপডেট করা ভালো।
+                </span>
+              )}
             </p>
             <div className="mt-5 flex justify-end gap-2">
               <button
                 type="button"
+                disabled={busyCategoryId === pendingDeleteCat.id}
                 onClick={() => setPendingDeleteCat(null)}
                 className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold text-[#1C1917]"
               >
@@ -5345,12 +5502,13 @@ export function AdminCategoriesPanel() {
               </button>
               <button
                 type="button"
+                disabled={busyCategoryId === pendingDeleteCat.id}
                 onClick={() => {
-                  const id = pendingDeleteCat.id;
+                  const target = pendingDeleteCat;
                   setPendingDeleteCat(null);
-                  void removeCategory(id);
+                  void removeCategory(target);
                 }}
-                className="cursor-pointer rounded-lg bg-[#DC1F26] px-4 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C]"
+                className="cursor-pointer rounded-lg bg-[#DC1F26] px-4 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C] disabled:opacity-50"
               >
                 Delete Category
               </button>
@@ -5366,27 +5524,66 @@ export function AdminCategoriesPanel() {
 // 3. OCCASION MANAGEMENT
 // ========================
 export function AdminOccasionsPanel() {
-  const { allOccasions, allProducts, staffRole, hasPermission, logAdminActivity } = useStore();
+  const {
+    allOccasions,
+    allProducts,
+    staffRole,
+    hasPermission,
+    logAdminActivity,
+    refreshStoreData,
+    refreshingStoreData,
+  } = useStore();
   const [editing, setEditing] = useState<Occasion | null>(null);
-  const [isNew, setIsNew] = useState(false);
+  const [formMode, setFormMode] = useState<'create' | 'edit'>('create');
+  const isNew = formMode === 'create';
+  const [savingOccasion, setSavingOccasion] = useState(false);
+  const [deletingOccId, setDeletingOccId] = useState<string | null>(null);
+  const [togglingProdId, setTogglingProdId] = useState<string | null>(null);
+  const [pendingDeleteOcc, setPendingDeleteOcc] = useState<Occasion | null>(null);
   const [assigningSlug, setAssigningSlug] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const pendingDeleteLinkedCount = useMemo(() => {
+    if (!pendingDeleteOcc) return 0;
+    return allProducts.filter(
+      (p) => !p.deleted && Array.isArray(p.occasions) && p.occasions.includes(pendingDeleteOcc.slug)
+    ).length;
+  }, [allProducts, pendingDeleteOcc]);
 
   const saveOccasion = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editing) return;
+    if (!editing || savingOccasion) return;
+
     const nameBn = editing.name.trim().slice(0, 120);
     const nameEn = editing.nameEn.trim().slice(0, 120);
     if (!nameBn) {
-      setMsg('অনুগ্রহ করে বাংলা নাম দিন।');
+      setMsg({ type: 'error', text: 'অনুগ্রহ করে বাংলা নাম দিন।' });
       return;
     }
     if (!nameEn) {
-      setMsg('অনুগ্রহ করে English Name দিন।');
+      setMsg({ type: 'error', text: 'অনুগ্রহ করে English Name দিন।' });
       return;
     }
 
     const slug = toSlug(editing.slug.trim() || nameEn || nameBn);
+    if (!/^[a-z0-9-]{1,160}$/.test(slug)) {
+      setMsg({ type: 'error', text: 'উপলক্ষের slug সঠিক নয়। অনুগ্রহ করে নাম যাচাই করুন।' });
+      return;
+    }
+
+    const duplicate = allOccasions.find((occ) => {
+      if (occ.deleted) return false;
+      if (!isNew && occ.id === editing.id) return false;
+      return occ.slug === slug;
+    });
+    if (duplicate) {
+      setMsg({
+        type: 'error',
+        text: `এই slug ("${slug}") ইতিমধ্যে "${duplicate.nameEn || duplicate.name}"-এ ব্যবহৃত হচ্ছে।`,
+      });
+      return;
+    }
+
     const descEn = (editing.descriptionEn ?? '').trim().slice(0, 600);
     const descBn = (editing.description.trim() || descEn || nameBn).slice(0, 600);
     const rawOrder = Number(editing.order);
@@ -5394,14 +5591,52 @@ export function AdminOccasionsPanel() {
       ? Math.min(1000, Math.max(0, Math.round(rawOrder)))
       : 1;
 
+    setSavingOccasion(true);
+    setMsg(null);
+    let authSession: VerifiedWriteSession | null = null;
+    let targetDocId = editing.id;
+
     try {
-      await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'categories_manage',
       });
       const firestore = requireDb();
-      const occRef = doc(firestore, 'occasions', editing.id);
-      const existingSnap = await getDoc(occRef);
+
+      if (isNew) {
+        const candidate = `occ-${slug}`.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 128);
+        const existingIds = new Set(allOccasions.map((o) => o.id));
+        if (candidate && /^[a-zA-Z0-9_-]{1,128}$/.test(candidate) && !existingIds.has(candidate)) {
+          targetDocId = candidate;
+        }
+      }
+
+      if (!/^[a-zA-Z0-9_-]{1,128}$/.test(targetDocId)) {
+        throw new CatalogAuthError(
+          'validation/invalid-occasion-id',
+          'উপলক্ষ ডকুমেন্ট আইডি সঠিক নয়।'
+        );
+      }
+
+      let occRef = doc(firestore, 'occasions', targetDocId);
+      let existingSnap = await fetchDocFromServer(occRef);
+
+      if (isNew && existingSnap.exists()) {
+        targetDocId = `${targetDocId.slice(0, 110)}-${Date.now().toString(36)}`;
+        occRef = doc(firestore, 'occasions', targetDocId);
+        existingSnap = await fetchDocFromServer(occRef);
+        if (existingSnap.exists()) {
+          throw new Error('এই আইডির উপলক্ষ ইতিমধ্যে বিদ্যমান। অনুগ্রহ করে আবার চেষ্টা করুন।');
+        }
+      }
+
+      if (!isNew && !existingSnap.exists()) {
+        throw new CatalogAuthError(
+          'not-found',
+          `উপলক্ষ ডকুমেন্ট ("occasions/${targetDocId}") Firestore-এ পাওয়া যায়নি। পেজ রিফ্রেশ করে আবার চেষ্টা করুন।`
+        );
+      }
+
       const existingData = existingSnap.exists()
         ? (existingSnap.data() as Record<string, unknown>)
         : undefined;
@@ -5410,7 +5645,7 @@ export function AdminOccasionsPanel() {
         typeof existingData.id === 'string' &&
         /^[a-zA-Z0-9_-]{1,128}$/.test(existingData.id)
           ? existingData.id
-          : editing.id;
+          : targetDocId;
 
       const payload = {
         id: preservedValidId,
@@ -5419,7 +5654,7 @@ export function AdminOccasionsPanel() {
         name_bn: nameBn,
         name_en: nameEn,
         slug,
-        icon: (editing.icon.trim() || '✨').slice(0, 32),
+        icon: (editing.icon ?? '').trim().slice(0, 40),
         description: descBn,
         descriptionEn: descEn,
         description_bn: descBn,
@@ -5430,12 +5665,12 @@ export function AdminOccasionsPanel() {
         updatedAt: serverTimestamp(),
       };
 
-      if (!existingSnap.exists()) {
+      if (isNew) {
         await setDoc(occRef, {
           ...payload,
           createdAt: serverTimestamp(),
         });
-        await logAdminActivity('create', 'occasions', editing.id, nameEn);
+        await logAdminActivity('create', 'occasions', targetDocId, nameEn);
       } else {
         await updateDoc(
           occRef,
@@ -5443,62 +5678,132 @@ export function AdminOccasionsPanel() {
             ? payload
             : { ...payload, createdAt: serverTimestamp() }
         );
-        await logAdminActivity('update', 'occasions', editing.id, nameEn);
+        await logAdminActivity('update', 'occasions', targetDocId, nameEn);
       }
       setEditing(null);
-      setMsg('উপলক্ষ সেভ হয়েছে।');
+      setFormMode('create');
+      setMsg({ type: 'success', text: 'উপলক্ষ সফলভাবে সেভ হয়েছে।' });
     } catch (err) {
-      setMsg(
-        mapCatalogSaveError(err, 'occasion_save', {
-          path: `occasions/${editing.id}`,
+      setMsg({
+        type: 'error',
+        text: mapCatalogSaveError(err, 'occasion_save', {
+          collection: 'occasions',
+          documentId: targetDocId,
+          path: `occasions/${targetDocId}`,
           operation: isNew ? 'CREATE' : 'UPDATE',
           staffRole,
-        })
-      );
+          authSession,
+        }),
+      });
+    } finally {
+      setSavingOccasion(false);
+    }
+  };
+
+  const confirmDeleteOccasion = async (occ: Occasion) => {
+    setDeletingOccId(occ.id);
+    setMsg(null);
+    let authSession: VerifiedWriteSession | null = null;
+    try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'categories_manage',
+      });
+      const firestore = requireDb();
+      const occRef = doc(firestore, 'occasions', occ.id);
+      const existingSnap = await fetchDocFromServer(occRef);
+      if (!existingSnap.exists()) {
+        throw new CatalogAuthError(
+          'not-found',
+          `উপলক্ষ ডকুমেন্ট ("occasions/${occ.id}") ইতিমধ্যে ডিলিট হয়েছে বা Firestore-এ নেই।`
+        );
+      }
+      await deleteDoc(occRef);
+      await logAdminActivity('delete', 'occasions', occ.id, occ.nameEn || occ.name);
+      if (editing?.id === occ.id) {
+        setEditing(null);
+      }
+      setMsg({ type: 'success', text: 'উপলক্ষ স্থায়ীভাবে ডিলিট করা হয়েছে।' });
+    } catch (err) {
+      setMsg({
+        type: 'error',
+        text: mapCatalogSaveError(err, 'occasion_delete', {
+          collection: 'occasions',
+          documentId: occ.id,
+          path: `occasions/${occ.id}`,
+          operation: 'DELETE',
+          staffRole,
+          authSession,
+        }),
+      });
+    } finally {
+      setDeletingOccId(null);
     }
   };
 
   const toggleProductOccasion = async (product: Product, occSlug: string) => {
+    if (togglingProdId) return;
+    setTogglingProdId(product.id);
+    setMsg(null);
     const has = product.occasions.includes(occSlug);
     const next = has
       ? product.occasions.filter((o) => o !== occSlug)
       : [...product.occasions, occSlug];
+    let authSession: VerifiedWriteSession | null = null;
     try {
-      const authSession = await ensureVerifiedAdminWriteSession({
+      authSession = await ensureVerifiedAdminWriteSession({
         hasPermission,
         requiredPermission: 'products_edit',
       });
       const firestore = requireDb();
       const prodRef = doc(firestore, 'products', product.id);
-      const existingSnap = await getDoc(prodRef);
-      const existingData = existingSnap.exists()
-        ? (existingSnap.data() as Record<string, unknown>)
-        : undefined;
-      if (existingSnap.exists() && isExistingProductDocRuleReady(existingData)) {
+      const existingSnap = await fetchDocFromServer(prodRef);
+      if (!existingSnap.exists()) {
+        throw new CatalogAuthError(
+          'not-found',
+          `পণ্যটি ("products/${product.id}") Firestore-এ পাওয়া যায়নি।`
+        );
+      }
+      const existingData = existingSnap.data() as Record<string, unknown>;
+      if (isExistingProductDocRuleReady(existingData)) {
         await updateDoc(prodRef, {
           occasions: next.slice(0, 15),
           updatedBy: authSession.uid,
           updatedAt: serverTimestamp(),
         });
-      } else {
-        setMsg(
-          'এই পণ্যের কিছু পুরোনো ফিল্ড অসম্পূর্ণ থাকায় প্রথমে Product Management থেকে পণ্যটি একবার সংরক্ষণ (Save) করুন।'
+        await logAdminActivity(
+          'update',
+          'products',
+          product.id,
+          product.nameEn || product.name,
+          `${has ? 'Unassigned' : 'Assigned'} occasion ${occSlug}`
         );
+      } else {
+        setMsg({
+          type: 'error',
+          text: 'এই পণ্যের কিছু পুরোনো ফিল্ড অসম্পূর্ণ থাকায় প্রথমে Product Management থেকে পণ্যটি একবার সংরক্ষণ (Save) করুন।',
+        });
       }
     } catch (err) {
-      setMsg(
-        mapCatalogSaveError(err, 'occasion_product_toggle', {
+      setMsg({
+        type: 'error',
+        text: mapCatalogSaveError(err, 'occasion_product_toggle', {
+          collection: 'products',
+          documentId: product.id,
           path: `products/${product.id}`,
           operation: 'UPDATE',
           staffRole,
-        })
-      );
+          authSession,
+        }),
+      });
+    } finally {
+      setTogglingProdId(null);
     }
   };
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="font-display text-2xl font-bold text-[#1C1917]">
             Occasion Management
@@ -5507,37 +5812,54 @@ export function AdminOccasionsPanel() {
             Manage occasions in English and Bengali and assign matching catalog products.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            setIsNew(true);
-            setMsg(null);
-            setEditing({
-              id: `occ-${Date.now()}`,
-              name: '',
-              nameEn: '',
-              name_bn: '',
-              name_en: '',
-              slug: '',
-              icon: '',
-              description: '',
-              descriptionEn: '',
-              description_bn: '',
-              description_en: '',
-              order: allOccasions.length + 1,
-              visible: true,
-            });
-          }}
-          className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-4 py-2 text-xs font-semibold text-white hover:bg-[#DC1F26]"
-        >
-          <Plus className="h-4 w-4" />
-          <span>Add Occasion</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void refreshStoreData()}
+            disabled={refreshingStoreData}
+            className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#D6D3D1] bg-white px-3 py-2 text-xs font-semibold text-[#1C1917] hover:border-[#1C1917] disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshingStoreData ? 'animate-spin' : ''}`} />
+            <span>{refreshingStoreData ? 'Refreshing...' : 'Refresh'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setFormMode('create');
+              setMsg(null);
+              setEditing({
+                id: `occ-${Date.now()}`,
+                name: '',
+                nameEn: '',
+                name_bn: '',
+                name_en: '',
+                slug: '',
+                icon: '',
+                description: '',
+                descriptionEn: '',
+                description_bn: '',
+                description_en: '',
+                order: allOccasions.length + 1,
+                visible: true,
+              });
+            }}
+            className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-4 py-2 text-xs font-semibold text-white hover:bg-[#DC1F26]"
+          >
+            <Plus className="h-4 w-4" />
+            <span>Add Occasion</span>
+          </button>
+        </div>
       </div>
 
       {msg && (
-        <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-[#B91C1C]">
-          {msg}
+        <p
+          className={`rounded-lg border px-3 py-2 text-xs font-medium ${
+            msg.type === 'error'
+              ? 'border-red-200 bg-red-50 text-[#B91C1C]'
+              : 'border-emerald-200 bg-emerald-50 text-emerald-800'
+          }`}
+        >
+          {msg.text}
         </p>
       )}
 
@@ -5551,6 +5873,7 @@ export function AdminOccasionsPanel() {
             <label className="mb-1 block text-xs font-semibold">Icon Label (Optional)</label>
             <input
               type="text"
+              maxLength={40}
               value={editing.icon}
               onChange={(e) => setEditing({ ...editing, icon: e.target.value })}
               className="w-full rounded-lg border border-[#D6D3D1] px-3 py-2 text-sm"
@@ -5560,6 +5883,7 @@ export function AdminOccasionsPanel() {
             <label className="mb-1 block text-xs font-semibold">Name (বাংলা) *</label>
             <input
               type="text"
+              maxLength={120}
               value={editing.name}
               onChange={(e) =>
                 setEditing({ ...editing, name: e.target.value, name_bn: e.target.value })
@@ -5572,6 +5896,7 @@ export function AdminOccasionsPanel() {
             <label className="mb-1 block text-xs font-semibold">Name (English) *</label>
             <input
               type="text"
+              maxLength={120}
               value={editing.nameEn}
               onChange={(e) =>
                 setEditing({ ...editing, nameEn: e.target.value, name_en: e.target.value })
@@ -5585,6 +5910,7 @@ export function AdminOccasionsPanel() {
               <label className="mb-1 block text-xs font-semibold">Description (বাংলা)</label>
               <input
                 type="text"
+                maxLength={600}
                 value={editing.description}
                 onChange={(e) =>
                   setEditing({
@@ -5601,6 +5927,7 @@ export function AdminOccasionsPanel() {
               <label className="mb-1 block text-xs font-semibold">Description (English)</label>
               <input
                 type="text"
+                maxLength={600}
                 value={editing.descriptionEn ?? ''}
                 onChange={(e) =>
                   setEditing({
@@ -5617,16 +5944,19 @@ export function AdminOccasionsPanel() {
           <div className="flex justify-end gap-2 sm:col-span-3">
             <button
               type="button"
+              disabled={savingOccasion}
               onClick={() => setEditing(null)}
-              className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold"
+              className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold disabled:opacity-50"
             >
               Cancel
             </button>
             <button
               type="submit"
-              className="cursor-pointer rounded-lg bg-[#DC1F26] px-5 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C]"
+              disabled={savingOccasion}
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-[#DC1F26] px-5 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C] disabled:opacity-50"
             >
-              Save Occasion
+              {savingOccasion && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              <span>{savingOccasion ? 'Saving...' : 'Save Occasion'}</span>
             </button>
           </div>
         </form>
@@ -5638,6 +5968,7 @@ export function AdminOccasionsPanel() {
           const namePair = resolveBilingualPair(ot.nameEn, ot.nameBn);
           const descPair = resolveBilingualPair(ot.descriptionEn, ot.descriptionBn);
           const matchedCount = allProducts.filter((p) => p.occasions.includes(occ.slug)).length;
+          const isDeleting = deletingOccId === occ.id;
           return (
             <div
               key={occ.id}
@@ -5668,17 +5999,19 @@ export function AdminOccasionsPanel() {
                 <div className="flex shrink-0 gap-1.5">
                   <button
                     type="button"
+                    disabled={isDeleting}
                     onClick={() =>
                       setAssigningSlug(assigningSlug === occ.slug ? null : occ.slug)
                     }
-                    className="cursor-pointer rounded-md border border-[#E7E5E4] px-2.5 py-1 text-[11px] font-semibold text-[#1C1917] hover:border-[#DC1F26]"
+                    className="cursor-pointer rounded-md border border-[#E7E5E4] px-2.5 py-1 text-[11px] font-semibold text-[#1C1917] hover:border-[#DC1F26] disabled:opacity-50"
                   >
                     Assign Products
                   </button>
                   <button
                     type="button"
+                    disabled={isDeleting}
                     onClick={() => {
-                      setIsNew(false);
+                      setFormMode('edit');
                       setMsg(null);
                       setEditing({
                         ...occ,
@@ -5692,20 +6025,15 @@ export function AdminOccasionsPanel() {
                         description_en: ot.descriptionEn,
                       });
                     }}
-                    className="cursor-pointer rounded-md border border-[#E7E5E4] p-1 text-[#57534E]"
+                    className="cursor-pointer rounded-md border border-[#E7E5E4] p-1 text-[#57534E] disabled:opacity-50"
                   >
                     <Edit3 className="h-3.5 w-3.5" />
                   </button>
                   <button
                     type="button"
-                    onClick={async () => {
-                      try {
-                        await deleteDoc(doc(requireDb(), 'occasions', occ.id));
-                      } catch {
-                        setMsg('Could not delete occasion.');
-                      }
-                    }}
-                    className="cursor-pointer rounded-md border border-[#E7E5E4] p-1 text-red-700"
+                    disabled={isDeleting}
+                    onClick={() => setPendingDeleteOcc(occ)}
+                    className="cursor-pointer rounded-md border border-[#E7E5E4] p-1 text-red-700 disabled:opacity-50"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
@@ -5721,8 +6049,9 @@ export function AdminOccasionsPanel() {
                       <button
                         key={prod.id}
                         type="button"
-                        onClick={() => toggleProductOccasion(prod, occ.slug)}
-                        className="flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 text-left text-xs hover:bg-[#FAFAF8]"
+                        disabled={togglingProdId === prod.id}
+                        onClick={() => void toggleProductOccasion(prod, occ.slug)}
+                        className="flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 text-left text-xs hover:bg-[#FAFAF8] disabled:opacity-50"
                       >
                         <span className="text-[#1C1917]">
                           {prodPair.primary}
@@ -5746,6 +6075,54 @@ export function AdminOccasionsPanel() {
           );
         })}
       </div>
+
+      {pendingDeleteOcc && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-[#E7E5E4] bg-white p-6 shadow-xl">
+            <h3 className="font-display text-xl font-bold text-[#1C1917]">
+              Delete Occasion?
+            </h3>
+            <p className="mt-1 text-xs leading-relaxed text-[#57534E]">
+              You are about to permanently remove{' '}
+              <strong className="text-[#1C1917]">
+                {pendingDeleteOcc.nameEn || pendingDeleteOcc.name}
+              </strong>
+              .
+              {pendingDeleteLinkedCount > 0 && (
+                <span className="mt-2 block rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 font-semibold text-amber-900">
+                  সতর্কতা: বর্তমানে {pendingDeleteLinkedCount}টি পণ্য এই উপলক্ষের সাথে যুক্ত আছে।
+                </span>
+              )}
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={deletingOccId === pendingDeleteOcc.id}
+                onClick={() => setPendingDeleteOcc(null)}
+                className="cursor-pointer rounded-lg border border-[#D6D3D1] px-4 py-2 text-xs font-semibold text-[#1C1917]"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deletingOccId === pendingDeleteOcc.id}
+                onClick={() => {
+                  const target = pendingDeleteOcc;
+                  setPendingDeleteOcc(null);
+                  void confirmDeleteOccasion(target);
+                }}
+                className="cursor-pointer rounded-lg bg-[#DC1F26] px-4 py-2 text-xs font-semibold text-white hover:bg-[#B91C1C] disabled:opacity-50"
+              >
+                Delete Occasion
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -5757,11 +6134,18 @@ export function AdminShowroomsPanel() {
   const {
     allShowrooms,
     allProducts,
+    allCategories,
+    allHeroBanners,
+    mediaItems,
+    siteSettings,
+    seoSettings,
     firestoreShowrooms,
     legacyDemoShowrooms,
     staffRole,
     hasPermission,
     logAdminActivity,
+    refreshStoreData,
+    refreshingStoreData,
   } = useStore();
   const [editing, setEditing] = useState<Showroom | null>(null);
   const [editingOriginal, setEditingOriginal] = useState<Showroom | null>(null);
@@ -6492,6 +6876,28 @@ export function AdminShowroomsPanel() {
             })
           ).id;
 
+      if (!isCreateMode && editingOriginal && Array.isArray(editingOriginal.images)) {
+        const nextSet = new Set(validatedImages || []);
+        const removedUrls = editingOriginal.images.filter(
+          (u) => typeof u === 'string' && isR2ImageUrl(u) && !nextSet.has(u)
+        );
+        if (removedUrls.length > 0) {
+          await safeDeleteUnreferencedR2Urls({
+            urls: removedUrls,
+            exclude: { collection: 'showrooms', docId: savedId },
+            snapshot: {
+              allProducts,
+              allCategories,
+              allShowrooms,
+              allHeroBanners,
+              mediaItems,
+              siteSettings,
+              seoSettings,
+            },
+          });
+        }
+      }
+
       setEditing(null);
       setEditingOriginal(null);
       setFormMode('create');
@@ -6698,7 +7104,30 @@ export function AdminShowroomsPanel() {
         hasPermission,
         requiredPermission: 'showrooms_manage',
       });
-      await deleteDoc(doc(requireDb(), 'showrooms', target.id));
+      const showroomRef = doc(requireDb(), 'showrooms', target.id);
+      const existingSnap = await fetchDocFromServer(showroomRef);
+      const existingR2Imgs =
+        existingSnap.exists() && Array.isArray(existingSnap.data()?.images)
+          ? (existingSnap.data().images as string[])
+          : Array.isArray(target.images)
+          ? target.images
+          : [];
+      await deleteDoc(showroomRef);
+      if (existingR2Imgs.length > 0) {
+        await safeDeleteUnreferencedR2Urls({
+          urls: existingR2Imgs,
+          exclude: { collection: 'showrooms', docId: target.id },
+          snapshot: {
+            allProducts,
+            allCategories,
+            allShowrooms,
+            allHeroBanners,
+            mediaItems,
+            siteSettings,
+            seoSettings,
+          },
+        });
+      }
       const isOfficial = canonicalIds.has(target.id);
       await logAdminActivity(
         'delete',
@@ -6742,9 +7171,19 @@ export function AdminShowroomsPanel() {
             Edit any of the <span className="tabular-nums font-semibold">{allShowrooms.filter((s) => !s.deleted).length}</span> active Chattogram outlets or add new branches. Changes reflect live across Our Outlets, Contact, Footer, and Complaint forms.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => {
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void refreshStoreData()}
+            disabled={refreshingStoreData}
+            className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#D6D3D1] bg-white px-3 py-2 text-xs font-semibold text-[#1C1917] hover:border-[#1C1917] disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshingStoreData ? 'animate-spin' : ''}`} />
+            <span>{refreshingStoreData ? 'Refreshing...' : 'Refresh'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
             setFormMode('create');
             setEditingOriginal(null);
             setMsg(null);
@@ -6786,9 +7225,10 @@ export function AdminShowroomsPanel() {
           }}
           className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#1C1917] px-4 py-2 text-xs font-semibold text-white hover:bg-[#DC1F26]"
         >
-          <Plus className="h-4 w-4" />
-          <span>Add New Outlet</span>
-        </button>
+            <Plus className="h-4 w-4" />
+            <span>Add New Outlet</span>
+          </button>
+        </div>
       </div>
 
       {msg && (

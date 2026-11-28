@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -24,6 +24,7 @@ import {
   MessageCircle,
   MessageSquareText,
   Package,
+  RefreshCw,
   Search,
   Server,
   Settings,
@@ -45,6 +46,10 @@ import {
   handleFirestoreError,
   isFirebaseConfigured,
 } from '../lib/firebase';
+import {
+  fetchCollectionFromServer,
+  formatAdminFirestoreError,
+} from '../lib/adminDb';
 import type {
   ActivityLog,
   ChatSession,
@@ -589,6 +594,11 @@ export function AdminPage() {
     firestoreEmpty,
     signOutAdmin,
     seedDemoCatalog,
+    productsError,
+    showroomsError,
+    cmsSyncError,
+    refreshingStoreData,
+    refreshStoreData,
   } = useStore();
 
   const [complaints, setComplaints] = useState<Complaint[]>([]);
@@ -596,6 +606,8 @@ export function AdminPage() {
   const [staffRoles, setStaffRoles] = useState<RbacRoleEntry[]>([]);
   const [registeredUsers, setRegisteredUsers] = useState<UserAccount[]>([]);
   const [recentActivities, setRecentActivities] = useState<ActivityLog[]>([]);
+  const [adminDataError, setAdminDataError] = useState<string | null>(null);
+  const [refreshingAdminData, setRefreshingAdminData] = useState(false);
   const [seeding, setSeeding] = useState(false);
   const [seedDone, setSeedDone] = useState(false);
 
@@ -628,8 +640,17 @@ export function AdminPage() {
       unsubs.push(
         onSnapshot(
           query(collection(activeDb, 'complaints'), orderBy('createdAt', 'desc')),
-          (snap) => setComplaints(snap.docs.map((d) => d.data() as Complaint)),
+          (snap) => {
+            setComplaints(snap.docs.map((d) => ({ ...(d.data() as Complaint), id: d.id })));
+          },
           (err) => {
+            setAdminDataError(
+              formatAdminFirestoreError(err, 'complaints_listen', {
+                collection: 'complaints',
+                operation: 'READ',
+                staffRole,
+              })
+            );
             try {
               handleFirestoreError(err, OperationType.LIST, 'complaints');
             } catch {
@@ -644,8 +665,19 @@ export function AdminPage() {
       unsubs.push(
         onSnapshot(
           query(collection(activeDb, 'chat_sessions'), orderBy('updatedAt', 'desc')),
-          (snap) => setChatSessions(snap.docs.map((d) => d.data() as ChatSession)),
+          (snap) => {
+            setChatSessions(
+              snap.docs.map((d) => ({ ...(d.data() as ChatSession), id: d.id }))
+            );
+          },
           (err) => {
+            setAdminDataError(
+              formatAdminFirestoreError(err, 'chat_sessions_listen', {
+                collection: 'chat_sessions',
+                operation: 'READ',
+                staffRole,
+              })
+            );
             try {
               handleFirestoreError(err, OperationType.LIST, 'chat_sessions');
             } catch {
@@ -660,8 +692,20 @@ export function AdminPage() {
       unsubs.push(
         onSnapshot(
           collection(activeDb, 'rbac_roles'),
-          (snap) => setStaffRoles(snap.docs.map((d) => d.data() as RbacRoleEntry)),
-          () => {}
+          (snap) => {
+            setStaffRoles(
+              snap.docs.map((d) => ({ ...(d.data() as RbacRoleEntry), email: d.id }))
+            );
+          },
+          (err) => {
+            setAdminDataError(
+              formatAdminFirestoreError(err, 'rbac_roles_listen', {
+                collection: 'rbac_roles',
+                operation: 'READ',
+                staffRole,
+              })
+            );
+          }
         )
       );
     }
@@ -670,8 +714,20 @@ export function AdminPage() {
       unsubs.push(
         onSnapshot(
           collection(activeDb, 'users'),
-          (snap) => setRegisteredUsers(snap.docs.map((d) => d.data() as UserAccount)),
-          () => {}
+          (snap) => {
+            setRegisteredUsers(
+              snap.docs.map((d) => ({ ...(d.data() as UserAccount), uid: d.id }))
+            );
+          },
+          (err) => {
+            setAdminDataError(
+              formatAdminFirestoreError(err, 'users_listen', {
+                collection: 'users',
+                operation: 'READ',
+                staffRole,
+              })
+            );
+          }
         )
       );
     }
@@ -680,8 +736,20 @@ export function AdminPage() {
       unsubs.push(
         onSnapshot(
           query(collection(activeDb, 'activity_logs'), orderBy('timestamp', 'desc'), limit(8)),
-          (snap) => setRecentActivities(snap.docs.map((d) => d.data() as ActivityLog)),
-          () => {}
+          (snap) => {
+            setRecentActivities(
+              snap.docs.map((d) => ({ ...(d.data() as ActivityLog), id: d.id }))
+            );
+          },
+          (err) => {
+            setAdminDataError(
+              formatAdminFirestoreError(err, 'activity_logs_listen', {
+                collection: 'activity_logs',
+                operation: 'READ',
+                staffRole,
+              })
+            );
+          }
         )
       );
     }
@@ -690,6 +758,103 @@ export function AdminPage() {
       unsubs.forEach((u) => u());
     };
   }, [
+    authReady,
+    staffRole,
+    accountStatus,
+    canComplaints,
+    canChat,
+    canStaffDirectory,
+    isSuperAdmin,
+    canLogs,
+  ]);
+
+  const refreshAdminData = useCallback(async () => {
+    setRefreshingAdminData(true);
+    setAdminDataError(null);
+    const activeDb = db;
+    const failedParts: string[] = [];
+
+    try {
+      await refreshStoreData();
+
+      if (activeDb && authReady && staffRole && accountStatus === 'active') {
+        const jobs: Array<{ key: string; promise: Promise<void> }> = [];
+
+        if (canComplaints) {
+          jobs.push({
+            key: 'complaints',
+            promise: fetchCollectionFromServer(
+              query(collection(activeDb, 'complaints'), orderBy('createdAt', 'desc'))
+            ).then((snap) => {
+              setComplaints(snap.docs.map((d) => ({ ...(d.data() as Complaint), id: d.id })));
+            }),
+          });
+        }
+        if (canChat) {
+          jobs.push({
+            key: 'chat_sessions',
+            promise: fetchCollectionFromServer(
+              query(collection(activeDb, 'chat_sessions'), orderBy('updatedAt', 'desc'))
+            ).then((snap) => {
+              setChatSessions(
+                snap.docs.map((d) => ({ ...(d.data() as ChatSession), id: d.id }))
+              );
+            }),
+          });
+        }
+        if (canStaffDirectory) {
+          jobs.push({
+            key: 'rbac_roles',
+            promise: fetchCollectionFromServer(collection(activeDb, 'rbac_roles')).then(
+              (snap) => {
+                setStaffRoles(
+                  snap.docs.map((d) => ({ ...(d.data() as RbacRoleEntry), email: d.id }))
+                );
+              }
+            ),
+          });
+        }
+        if (isSuperAdmin) {
+          jobs.push({
+            key: 'users',
+            promise: fetchCollectionFromServer(collection(activeDb, 'users')).then((snap) => {
+              setRegisteredUsers(
+                snap.docs.map((d) => ({ ...(d.data() as UserAccount), uid: d.id }))
+              );
+            }),
+          });
+        }
+        if (canLogs) {
+          jobs.push({
+            key: 'activity_logs',
+            promise: fetchCollectionFromServer(
+              query(collection(activeDb, 'activity_logs'), orderBy('timestamp', 'desc'), limit(8))
+            ).then((snap) => {
+              setRecentActivities(
+                snap.docs.map((d) => ({ ...(d.data() as ActivityLog), id: d.id }))
+              );
+            }),
+          });
+        }
+
+        const results = await Promise.allSettled(jobs.map((j) => j.promise));
+        results.forEach((res, idx) => {
+          if (res.status === 'rejected') {
+            failedParts.push(jobs[idx].key);
+          }
+        });
+      }
+
+      if (failedParts.length > 0) {
+        setAdminDataError(
+          `অ্যাডমিন ডাটা রিফ্রেশ আংশিক ব্যর্থ হয়েছে (${failedParts.join(', ')})।`
+        );
+      }
+    } finally {
+      setRefreshingAdminData(false);
+    }
+  }, [
+    refreshStoreData,
     authReady,
     staffRole,
     accountStatus,
@@ -994,6 +1159,21 @@ export function AdminPage() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={refreshAdminData}
+              disabled={refreshingAdminData || refreshingStoreData}
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-white/20 px-3 py-2 text-xs font-semibold text-[#E7E5E4] transition-colors hover:bg-white/10 disabled:opacity-50"
+            >
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${
+                  refreshingAdminData || refreshingStoreData ? 'animate-spin' : ''
+                }`}
+              />
+              <span>
+                {refreshingAdminData || refreshingStoreData ? 'Syncing...' : 'Refresh Data'}
+              </span>
+            </button>
             <Link
               to="/"
               className="rounded-lg border border-white/20 px-3 py-2 text-xs font-semibold text-[#E7E5E4] transition-colors hover:bg-white/10"
@@ -1022,6 +1202,28 @@ export function AdminPage() {
             </button>
           </div>
         </div>
+
+        {(adminDataError || cmsSyncError || productsError || showroomsError) && (
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-900">
+            <div className="flex items-center gap-2 font-semibold">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-700" />
+              <span>{adminDataError || cmsSyncError || productsError || showroomsError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={refreshAdminData}
+              disabled={refreshingAdminData || refreshingStoreData}
+              className="inline-flex cursor-pointer items-center gap-1 rounded-lg border border-amber-400 bg-white px-3 py-1.5 font-semibold text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+            >
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${
+                  refreshingAdminData || refreshingStoreData ? 'animate-spin' : ''
+                }`}
+              />
+              <span>Retry Sync</span>
+            </button>
+          </div>
+        )}
 
         {/* Mobile Tab Selector */}
         <div className="mt-4 flex gap-2 overflow-x-auto pb-2 lg:hidden">
@@ -1437,10 +1639,10 @@ export function AdminPage() {
               )}
 
               {activeTab === 'complaints' && hasPermission('complaints_manage') && (
-                <AdminComplaintsPanel complaints={complaints} />
+                <AdminComplaintsPanel complaints={complaints} onRefresh={refreshAdminData} />
               )}
               {activeTab === 'chat' && hasPermission('chat_manage') && (
-                <AdminLiveChatPanel sessions={chatSessions} />
+                <AdminLiveChatPanel sessions={chatSessions} onRefresh={refreshAdminData} />
               )}
               {(activeTab === 'recruitment' || activeTab === 'applications') && canRecruitment && (
                 <AdminRecruitmentPanel

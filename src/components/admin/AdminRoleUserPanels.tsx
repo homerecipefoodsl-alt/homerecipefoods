@@ -23,7 +23,6 @@ import {
 import {
   collection,
   doc,
-  getDoc,
   onSnapshot,
   orderBy,
   query,
@@ -32,12 +31,19 @@ import {
 } from 'firebase/firestore';
 import { PRIMARY_SUPER_ADMIN_EMAIL, useStore } from '../../context/StoreContext';
 import {
-  OperationType,
+  AdminAuthError,
+  type VerifiedWriteSession,
+  ensureVerifiedAdminWriteSession,
+  fetchCollectionFromServer,
+  fetchDocFromServer,
+  formatAdminFirestoreError,
+  isValidFirestoreId,
+} from '../../lib/adminDb';
+import {
   db,
   firebaseConnectionStatus,
   firebaseMissingFields,
   firebasePublicInfo,
-  handleFirestoreError,
   requireDb,
 } from '../../lib/firebase';
 import {
@@ -196,6 +202,8 @@ export function AdminRoleManagementPanel() {
   const canManageManagers = isSuperAdmin || hasPermission('manager_manage');
 
   const [roles, setRoles] = useState<RbacRoleEntry[]>([]);
+  const [rolesError, setRolesError] = useState<string | null>(null);
+  const [refreshingRoles, setRefreshingRoles] = useState(false);
   const [hasAdminCredentials, setHasAdminCredentials] = useState<boolean | null>(null);
   const [serviceAccountStatus, setServiceAccountStatus] = useState<string | null>(null);
   const [serviceAccountMessage, setServiceAccountMessage] = useState<string | null>(null);
@@ -248,22 +256,47 @@ export function AdminRoleManagementPanel() {
   useEffect(() => {
     if (!db || !canManageManagers) {
       setRoles([]);
+      setRolesError(null);
       return;
     }
     const unsub = onSnapshot(
       query(collection(db, 'rbac_roles'), orderBy('updatedAt', 'desc')),
       (snap) => {
         setRoles(snap.docs.map((d) => d.data() as RbacRoleEntry));
+        setRolesError(null);
       },
       (err) => {
-        try {
-          handleFirestoreError(err, OperationType.LIST, 'rbac_roles');
-        } catch {
-          // Handled cleanly
-        }
+        setRolesError(
+          formatAdminFirestoreError(err, 'rbac_roles_list', {
+            collection: 'rbac_roles',
+            operation: 'READ',
+          })
+        );
       }
     );
     return () => unsub();
+  }, [canManageManagers]);
+
+  const refreshRolesDirectory = useCallback(async () => {
+    if (!canManageManagers) return;
+    setRefreshingRoles(true);
+    setRolesError(null);
+    try {
+      const firestore = requireDb();
+      const snap = await fetchCollectionFromServer(
+        query(collection(firestore, 'rbac_roles'), orderBy('updatedAt', 'desc'))
+      );
+      setRoles(snap.docs.map((d) => d.data() as RbacRoleEntry));
+    } catch (err) {
+      setRolesError(
+        formatAdminFirestoreError(err, 'rbac_roles_refresh', {
+          collection: 'rbac_roles',
+          operation: 'READ',
+        })
+      );
+    } finally {
+      setRefreshingRoles(false);
+    }
   }, [canManageManagers]);
 
   const refreshAdminSdkStatus = useCallback(async () => {
@@ -509,8 +542,15 @@ export function AdminRoleManagementPanel() {
 
     let createdUid = '';
     let successHeadline = '';
+    let authSession: VerifiedWriteSession | null = null;
 
     try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: isSuperAdmin ? 'admin_manage' : 'manager_manage',
+        superAdminOnly: creationMode === 'new_auth' || effectiveRole !== 'manager',
+      });
+
       const useServerAdminEndpoint =
         creationMode === 'new_auth' ||
         (creationMode === 'existing_auth' && hasAdminCredentials === true);
@@ -599,7 +639,17 @@ export function AdminRoleManagementPanel() {
         const now = serverTimestamp();
         const batch = writeBatch(firestore);
         const isActive = statusInput === 'active';
-        const creatorEmail = user?.email?.toLowerCase() || PRIMARY_SUPER_ADMIN_EMAIL;
+        const creatorEmail =
+          authSession.email || user?.email?.toLowerCase() || PRIMARY_SUPER_ADMIN_EMAIL;
+
+        const rbacRef = doc(firestore, 'rbac_roles', cleanEmail);
+        const existingRbac = await fetchDocFromServer(rbacRef);
+        if (existingRbac.exists()) {
+          throw new AdminAuthError(
+            'already-exists',
+            `এই email (${cleanEmail}) দিয়ে ইতিমধ্যে rbac_roles ডকুমেন্ট রয়েছে।`
+          );
+        }
 
         const rbacPayload: Record<string, unknown> = {
           email: cleanEmail,
@@ -620,7 +670,7 @@ export function AdminRoleManagementPanel() {
           rbacPayload.managerId = cleanManagerId;
           rbacPayload.managerTitle = cleanManagerTitle || 'Store Manager';
         }
-        batch.set(doc(firestore, 'rbac_roles', cleanEmail), rbacPayload);
+        batch.set(rbacRef, rbacPayload);
 
         if (cleanUsername) {
           batch.set(doc(firestore, 'admin_usernames', cleanUsername), {
@@ -670,10 +720,13 @@ export function AdminRoleManagementPanel() {
     } catch (err) {
       setFeedback({
         type: 'err',
-        text:
-          err instanceof Error && err.message
-            ? err.message
-            : 'Unable to create user account. Please check inputs and permissions.',
+        text: formatAdminFirestoreError(err, 'rbac_create_user', {
+          collection: 'rbac_roles',
+          documentId: cleanEmail,
+          path: `rbac_roles/${cleanEmail}`,
+          operation: 'CREATE',
+          authSession,
+        }),
       });
     } finally {
       setSaving(false);
@@ -763,8 +816,23 @@ export function AdminRoleManagementPanel() {
 
     setEditSaving(true);
     setFeedback(null);
+    let authSession: VerifiedWriteSession | null = null;
     try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: isSuperAdmin ? 'admin_manage' : 'manager_manage',
+        superAdminOnly: editingEntry.role !== 'manager' || targetRole !== 'manager',
+      });
       const firestore = requireDb();
+      const rbacRef = doc(firestore, 'rbac_roles', editingEntry.email);
+      const existingRbacSnap = await fetchDocFromServer(rbacRef);
+      if (!existingRbacSnap.exists()) {
+        throw new AdminAuthError(
+          'not-found',
+          `সংশ্লিষ্ট রোল রেকর্ড (rbac_roles/${editingEntry.email}) ডাটাবেসে পাওয়া যায়নি। রিফ্রেশ করে আবার চেষ্টা করুন।`
+        );
+      }
+
       const now = serverTimestamp();
       const batch = writeBatch(firestore);
       const isActive = editStatus === 'active';
@@ -784,11 +852,11 @@ export function AdminRoleManagementPanel() {
         rbacUpdate.managerId = cleanManagerId;
         rbacUpdate.managerTitle = cleanManagerTitle || 'Store Manager';
       }
-      batch.update(doc(firestore, 'rbac_roles', editingEntry.email), rbacUpdate);
+      batch.update(rbacRef, rbacUpdate);
 
-      if (editingEntry.uid) {
+      if (editingEntry.uid && isValidFirestoreId(editingEntry.uid)) {
         const adminRef = doc(firestore, 'admins', editingEntry.uid);
-        const adminSnap = await getDoc(adminRef);
+        const adminSnap = await fetchDocFromServer(adminRef);
         const adminUpdate: Record<string, unknown> = {
           display_name: cleanName,
           phone: cleanPhone,
@@ -815,6 +883,7 @@ export function AdminRoleManagementPanel() {
             created_by:
               editingEntry.createdBy ||
               editingEntry.addedByEmail ||
+              authSession.email ||
               user?.email?.toLowerCase() ||
               PRIMARY_SUPER_ADMIN_EMAIL,
             created_at: now,
@@ -823,7 +892,7 @@ export function AdminRoleManagementPanel() {
 
         if (isSuperAdmin) {
           const userRef = doc(firestore, 'users', editingEntry.uid);
-          const userSnap = await getDoc(userRef);
+          const userSnap = await fetchDocFromServer(userRef);
           if (userSnap.exists()) {
             batch.update(userRef, {
               displayName: cleanName,
@@ -891,8 +960,17 @@ export function AdminRoleManagementPanel() {
       );
       setEditingEntry(null);
       setFeedback({ type: 'ok', text: `Updated profile and permissions for ${editingEntry.email}.` });
-    } catch {
-      setFeedback({ type: 'err', text: 'Failed to save changes. Check permissions.' });
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: formatAdminFirestoreError(err, 'rbac_update_user', {
+          collection: 'rbac_roles',
+          documentId: editingEntry.email,
+          path: `rbac_roles/${editingEntry.email}`,
+          operation: 'UPDATE',
+          authSession,
+        }),
+      });
     } finally {
       setEditSaving(false);
     }
@@ -904,11 +982,26 @@ export function AdminRoleManagementPanel() {
     const nextStatus: AccountStatus = entry.status === 'active' ? 'suspended' : 'active';
     setActionBusyEmail(entry.email);
     setFeedback(null);
+    let authSession: VerifiedWriteSession | null = null;
     try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: isSuperAdmin ? 'admin_manage' : 'manager_manage',
+        superAdminOnly: entry.role !== 'manager',
+      });
       const firestore = requireDb();
+      const rbacRef = doc(firestore, 'rbac_roles', entry.email);
+      const rbacSnap = await fetchDocFromServer(rbacRef);
+      if (!rbacSnap.exists()) {
+        throw new AdminAuthError(
+          'not-found',
+          `রোল রেকর্ড (rbac_roles/${entry.email}) পাওয়া যায়নি। রিফ্রেশ করে আবার চেষ্টা করুন।`
+        );
+      }
+
       const batch = writeBatch(firestore);
       const isActive = nextStatus === 'active';
-      batch.update(doc(firestore, 'rbac_roles', entry.email), {
+      batch.update(rbacRef, {
         status: nextStatus,
         updatedAt: serverTimestamp(),
       });
@@ -924,9 +1017,9 @@ export function AdminRoleManagementPanel() {
           { merge: true }
         );
       }
-      if (entry.uid) {
+      if (entry.uid && isValidFirestoreId(entry.uid)) {
         const adminRef = doc(firestore, 'admins', entry.uid);
-        const adminSnap = await getDoc(adminRef);
+        const adminSnap = await fetchDocFromServer(adminRef);
         if (adminSnap.exists()) {
           batch.update(adminRef, {
             active: isActive,
@@ -937,7 +1030,7 @@ export function AdminRoleManagementPanel() {
         }
         if (isSuperAdmin) {
           const userRef = doc(firestore, 'users', entry.uid);
-          const userSnap = await getDoc(userRef);
+          const userSnap = await fetchDocFromServer(userRef);
           if (userSnap.exists()) {
             batch.update(userRef, {
               status: nextStatus,
@@ -981,8 +1074,17 @@ export function AdminRoleManagementPanel() {
           authSynced ? ' (Firebase Auth status synced)' : ''
         }.`,
       });
-    } catch {
-      setFeedback({ type: 'err', text: 'Failed to update account status.' });
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: formatAdminFirestoreError(err, 'rbac_toggle_status', {
+          collection: 'rbac_roles',
+          documentId: entry.email,
+          path: `rbac_roles/${entry.email}`,
+          operation: 'UPDATE',
+          authSession,
+        }),
+      });
     } finally {
       setActionBusyEmail(null);
     }
@@ -1039,7 +1141,14 @@ export function AdminRoleManagementPanel() {
 
     setDeleteLoading(true);
     setFeedback(null);
+    let authSession: VerifiedWriteSession | null = null;
     try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'admin_manage',
+        superAdminOnly: true,
+      });
+
       let authDeleted = false;
       if (deletingEntry.uid && user) {
         const idToken = await user.getIdToken();
@@ -1070,7 +1179,7 @@ export function AdminRoleManagementPanel() {
           doc(firestore, 'admin_usernames', deletingEntry.username.toLowerCase())
         );
       }
-      if (deletingEntry.uid) {
+      if (deletingEntry.uid && isValidFirestoreId(deletingEntry.uid)) {
         batch.delete(doc(firestore, 'admins', deletingEntry.uid));
         batch.delete(doc(firestore, 'users', deletingEntry.uid));
       }
@@ -1094,7 +1203,13 @@ export function AdminRoleManagementPanel() {
     } catch (err) {
       setFeedback({
         type: 'err',
-        text: err instanceof Error ? err.message : 'Failed to delete user.',
+        text: formatAdminFirestoreError(err, 'rbac_delete_user', {
+          collection: 'rbac_roles',
+          documentId: deletingEntry.email,
+          path: `rbac_roles/${deletingEntry.email}`,
+          operation: 'DELETE',
+          authSession,
+        }),
       });
     } finally {
       setDeleteLoading(false);
@@ -1929,9 +2044,20 @@ export function AdminRoleManagementPanel() {
       {/* User & Role Management Table */}
       <div className="overflow-hidden rounded-xl border border-[#E7E5E4] bg-white">
         <div className="flex flex-col justify-between gap-3 border-b border-[#E7E5E4] bg-[#FAFAF8] px-5 py-3.5 sm:flex-row sm:items-center">
-          <h3 className="text-sm font-bold text-[#1C1917]">
-            Admin &amp; Staff Directory ({filteredRoles.length})
-          </h3>
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-bold text-[#1C1917]">
+              Admin &amp; Staff Directory ({filteredRoles.length})
+            </h3>
+            <button
+              type="button"
+              disabled={refreshingRoles}
+              onClick={() => void refreshRolesDirectory()}
+              className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-[#D6D3D1] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#1C1917] hover:bg-[#F5F4F0] disabled:opacity-50"
+            >
+              <RefreshCw className={`h-3 w-3 ${refreshingRoles ? 'animate-spin' : ''}`} />
+              <span>Refresh</span>
+            </button>
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <div className="relative">
               <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-[#78716C]" />
@@ -1968,6 +2094,12 @@ export function AdminRoleManagementPanel() {
             </select>
           </div>
         </div>
+
+        {rolesError && (
+          <div className="mx-5 mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-[#B91C1C]">
+            {rolesError}
+          </div>
+        )}
 
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
@@ -2205,8 +2337,10 @@ export function AdminRoleManagementPanel() {
 // 10. USER MANAGEMENT (Super Admin Only — All Registered Accounts)
 // ========================
 export function AdminUserManagementPanel() {
-  const { user, isSuperAdmin, isPrimarySuperAdmin, logAdminActivity } = useStore();
+  const { user, isSuperAdmin, isPrimarySuperAdmin, hasPermission, logAdminActivity } = useStore();
   const [users, setUsers] = useState<UserAccount[]>([]);
+  const [usersError, setUsersError] = useState<string | null>(null);
+  const [refreshingUsers, setRefreshingUsers] = useState(false);
   const [search, setSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -2220,22 +2354,47 @@ export function AdminUserManagementPanel() {
   useEffect(() => {
     if (!db || !isSuperAdmin) {
       setUsers([]);
+      setUsersError(null);
       return;
     }
     const unsub = onSnapshot(
       query(collection(db, 'users'), orderBy('lastLoginAt', 'desc')),
       (snap) => {
         setUsers(snap.docs.map((d) => d.data() as UserAccount));
+        setUsersError(null);
       },
       (err) => {
-        try {
-          handleFirestoreError(err, OperationType.LIST, 'users');
-        } catch {
-          // Handled cleanly
-        }
+        setUsersError(
+          formatAdminFirestoreError(err, 'users_list', {
+            collection: 'users',
+            operation: 'READ',
+          })
+        );
       }
     );
     return () => unsub();
+  }, [isSuperAdmin]);
+
+  const refreshUsersDirectory = useCallback(async () => {
+    if (!isSuperAdmin) return;
+    setRefreshingUsers(true);
+    setUsersError(null);
+    try {
+      const firestore = requireDb();
+      const snap = await fetchCollectionFromServer(
+        query(collection(firestore, 'users'), orderBy('lastLoginAt', 'desc'))
+      );
+      setUsers(snap.docs.map((d) => d.data() as UserAccount));
+    } catch (err) {
+      setUsersError(
+        formatAdminFirestoreError(err, 'users_refresh', {
+          collection: 'users',
+          operation: 'READ',
+        })
+      );
+    } finally {
+      setRefreshingUsers(false);
+    }
   }, [isSuperAdmin]);
 
   if (!isSuperAdmin) return null;
@@ -2255,8 +2414,27 @@ export function AdminUserManagementPanel() {
     if (nextRole === 'super_admin' && !isPrimarySuperAdmin) return;
     setBusyUid(target.uid);
     setFeedback(null);
+    let authSession: VerifiedWriteSession | null = null;
     try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'admin_manage',
+        superAdminOnly: true,
+      });
+      if (!isValidFirestoreId(target.uid)) {
+        throw new AdminAuthError('validation/preflight-failed', 'ব্যবহারকারীর UID সঠিক নয়।');
+      }
+
       const firestore = requireDb();
+      const userRef = doc(firestore, 'users', target.uid);
+      const userSnap = await fetchDocFromServer(userRef);
+      if (!userSnap.exists()) {
+        throw new AdminAuthError(
+          'not-found',
+          `ব্যবহারকারীর ডকুমেন্ট (users/${target.uid}) পাওয়া যায়নি। রিফ্রেশ করে আবার চেষ্টা করুন।`
+        );
+      }
+
       const now = serverTimestamp();
       const batch = writeBatch(firestore);
       const nextPermissions =
@@ -2264,7 +2442,7 @@ export function AdminUserManagementPanel() {
       const isActive = target.status === 'active';
       const cleanEmail = target.email.toLowerCase();
 
-      batch.update(doc(firestore, 'users', target.uid), {
+      batch.update(userRef, {
         role: nextRole,
         permissions: nextPermissions,
         updatedAt: now,
@@ -2274,7 +2452,8 @@ export function AdminUserManagementPanel() {
         batch.delete(doc(firestore, 'admins', target.uid));
       } else {
         const cleanDisplayName = (target.displayName || cleanEmail.split('@')[0] || 'Staff').slice(0, 120);
-        const creatorEmail = user?.email?.toLowerCase() || PRIMARY_SUPER_ADMIN_EMAIL;
+        const creatorEmail =
+          authSession.email || user?.email?.toLowerCase() || PRIMARY_SUPER_ADMIN_EMAIL;
         batch.set(
           doc(firestore, 'rbac_roles', cleanEmail),
           {
@@ -2294,7 +2473,7 @@ export function AdminUserManagementPanel() {
         );
 
         const adminRef = doc(firestore, 'admins', target.uid);
-        const adminSnap = await getDoc(adminRef);
+        const adminSnap = await fetchDocFromServer(adminRef);
         if (adminSnap.exists()) {
           batch.update(adminRef, {
             role: nextRole as StaffRole,
@@ -2357,8 +2536,17 @@ export function AdminUserManagementPanel() {
         type: 'ok',
         text: `${target.email} role updated to ${ROLE_LABEL[nextRole]}.`,
       });
-    } catch {
-      setFeedback({ type: 'err', text: 'Failed to update user role.' });
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: formatAdminFirestoreError(err, 'users_update_role', {
+          collection: 'users',
+          documentId: target.uid,
+          path: `users/${target.uid}`,
+          operation: 'UPDATE',
+          authSession,
+        }),
+      });
     } finally {
       setBusyUid(null);
     }
@@ -2369,19 +2557,38 @@ export function AdminUserManagementPanel() {
     const nextStatus: AccountStatus = target.status === 'active' ? 'suspended' : 'active';
     setBusyUid(target.uid);
     setFeedback(null);
+    let authSession: VerifiedWriteSession | null = null;
     try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'admin_manage',
+        superAdminOnly: true,
+      });
+      if (!isValidFirestoreId(target.uid)) {
+        throw new AdminAuthError('validation/preflight-failed', 'ব্যবহারকারীর UID সঠিক নয়।');
+      }
+
       const firestore = requireDb();
+      const userRef = doc(firestore, 'users', target.uid);
+      const userSnap = await fetchDocFromServer(userRef);
+      if (!userSnap.exists()) {
+        throw new AdminAuthError(
+          'not-found',
+          `ব্যবহারকারীর ডকুমেন্ট (users/${target.uid}) পাওয়া যায়নি। রিফ্রেশ করে আবার চেষ্টা করুন।`
+        );
+      }
+
       const now = serverTimestamp();
       const batch = writeBatch(firestore);
       const isActive = nextStatus === 'active';
       const cleanEmail = target.email.toLowerCase();
-      batch.update(doc(firestore, 'users', target.uid), {
+      batch.update(userRef, {
         status: nextStatus,
         updatedAt: now,
       });
 
       const rbacRef = doc(firestore, 'rbac_roles', cleanEmail);
-      const rbacSnap = await getDoc(rbacRef);
+      const rbacSnap = await fetchDocFromServer(rbacRef);
       if (rbacSnap.exists()) {
         batch.update(rbacRef, {
           status: nextStatus,
@@ -2390,7 +2597,7 @@ export function AdminUserManagementPanel() {
       }
 
       const adminRef = doc(firestore, 'admins', target.uid);
-      const adminSnap = await getDoc(adminRef);
+      const adminSnap = await fetchDocFromServer(adminRef);
       if (adminSnap.exists()) {
         batch.update(adminRef, {
           active: isActive,
@@ -2428,8 +2635,17 @@ export function AdminUserManagementPanel() {
         type: 'ok',
         text: `${target.email} status updated to ${nextStatus}.`,
       });
-    } catch {
-      setFeedback({ type: 'err', text: 'Failed to update user status.' });
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: formatAdminFirestoreError(err, 'users_toggle_status', {
+          collection: 'users',
+          documentId: target.uid,
+          path: `users/${target.uid}`,
+          operation: 'UPDATE',
+          authSession,
+        }),
+      });
     } finally {
       setBusyUid(null);
     }
@@ -2440,18 +2656,37 @@ export function AdminUserManagementPanel() {
     if (!editingPermsUser || editingPermsUser.role === 'customer') return;
     setBusyUid(editingPermsUser.uid);
     setFeedback(null);
+    let authSession: VerifiedWriteSession | null = null;
     try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'admin_manage',
+        superAdminOnly: true,
+      });
+      if (!isValidFirestoreId(editingPermsUser.uid)) {
+        throw new AdminAuthError('validation/preflight-failed', 'ব্যবহারকারীর UID সঠিক নয়।');
+      }
+
       const firestore = requireDb();
+      const userRef = doc(firestore, 'users', editingPermsUser.uid);
+      const userSnap = await fetchDocFromServer(userRef);
+      if (!userSnap.exists()) {
+        throw new AdminAuthError(
+          'not-found',
+          `ব্যবহারকারীর ডকুমেন্ট (users/${editingPermsUser.uid}) পাওয়া যায়নি। রিফ্রেশ করে আবার চেষ্টা করুন।`
+        );
+      }
+
       const now = serverTimestamp();
       const batch = writeBatch(firestore);
       const cleanEmail = editingPermsUser.email.toLowerCase();
-      batch.update(doc(firestore, 'users', editingPermsUser.uid), {
+      batch.update(userRef, {
         permissions: editPerms,
         updatedAt: now,
       });
 
       const rbacRef = doc(firestore, 'rbac_roles', cleanEmail);
-      const rbacSnap = await getDoc(rbacRef);
+      const rbacSnap = await fetchDocFromServer(rbacRef);
       if (rbacSnap.exists()) {
         batch.update(rbacRef, {
           permissions: editPerms,
@@ -2460,7 +2695,7 @@ export function AdminUserManagementPanel() {
       }
 
       const adminRef = doc(firestore, 'admins', editingPermsUser.uid);
-      const adminSnap = await getDoc(adminRef);
+      const adminSnap = await fetchDocFromServer(adminRef);
       if (adminSnap.exists()) {
         batch.update(adminRef, {
           permissions: editPerms,
@@ -2474,8 +2709,17 @@ export function AdminUserManagementPanel() {
         text: `Updated permissions for ${editingPermsUser.email}.`,
       });
       setEditingPermsUser(null);
-    } catch {
-      setFeedback({ type: 'err', text: 'Failed to update user permissions.' });
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: formatAdminFirestoreError(err, 'users_update_permissions', {
+          collection: 'users',
+          documentId: editingPermsUser.uid,
+          path: `users/${editingPermsUser.uid}`,
+          operation: 'UPDATE',
+          authSession,
+        }),
+      });
     } finally {
       setBusyUid(null);
     }
@@ -2521,7 +2765,17 @@ export function AdminUserManagementPanel() {
     }
     setBusyUid(deletingUser.uid);
     setFeedback(null);
+    let authSession: VerifiedWriteSession | null = null;
     try {
+      authSession = await ensureVerifiedAdminWriteSession({
+        hasPermission,
+        requiredPermission: 'admin_manage',
+        superAdminOnly: true,
+      });
+      if (!isValidFirestoreId(deletingUser.uid)) {
+        throw new AdminAuthError('validation/preflight-failed', 'ব্যবহারকারীর UID সঠিক নয়।');
+      }
+
       let authDeleted = false;
       if (user) {
         const idToken = await user.getIdToken();
@@ -2544,7 +2798,7 @@ export function AdminUserManagementPanel() {
       const firestore = requireDb();
       const batch = writeBatch(firestore);
       batch.delete(doc(firestore, 'users', deletingUser.uid));
-      batch.delete(doc(firestore, 'rbac_roles', deletingUser.email));
+      batch.delete(doc(firestore, 'rbac_roles', deletingUser.email.toLowerCase()));
       batch.delete(doc(firestore, 'admins', deletingUser.uid));
       await batch.commit();
 
@@ -2559,7 +2813,13 @@ export function AdminUserManagementPanel() {
     } catch (err) {
       setFeedback({
         type: 'err',
-        text: err instanceof Error ? err.message : 'Failed to delete user.',
+        text: formatAdminFirestoreError(err, 'users_delete', {
+          collection: 'users',
+          documentId: deletingUser.uid,
+          path: `users/${deletingUser.uid}`,
+          operation: 'DELETE',
+          authSession,
+        }),
       });
     } finally {
       setBusyUid(null);
@@ -2583,14 +2843,31 @@ export function AdminUserManagementPanel() {
 
   return (
     <div className="space-y-5">
-      <div>
-        <h2 className="font-display text-2xl font-bold text-[#1C1917]">
-          User Management
-        </h2>
-        <p className="text-xs text-[#57534E]">
-          View registered users, change roles, inspect permissions, activate/suspend accounts, send password resets, or delete accounts.
-        </p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="font-display text-2xl font-bold text-[#1C1917]">
+            User Management
+          </h2>
+          <p className="text-xs text-[#57534E]">
+            View registered users, change roles, inspect permissions, activate/suspend accounts, send password resets, or delete accounts.
+          </p>
+        </div>
+        <button
+          type="button"
+          disabled={refreshingUsers}
+          onClick={() => void refreshUsersDirectory()}
+          className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#E7E5E4] bg-white px-3 py-2 text-xs font-semibold text-[#1C1917] hover:bg-[#F5F4F0] disabled:opacity-50"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${refreshingUsers ? 'animate-spin' : ''}`} />
+          <span>Refresh</span>
+        </button>
       </div>
+
+      {usersError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-[#B91C1C]">
+          {usersError}
+        </div>
+      )}
 
       {feedback && (
         <div
